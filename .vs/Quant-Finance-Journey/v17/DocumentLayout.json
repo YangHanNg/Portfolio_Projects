@@ -1,0 +1,71 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "C:\\Users\\ngyan\\source\\repos\\Quant-Finance-Journey\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\ngyan\\source\\repos\\Quant-Finance-Journey\\Project 1\\.gitignore||{3B902123-F8A7-4915-9F01-361F908088D0}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:Project 1\\.gitignore||{3B902123-F8A7-4915-9F01-361F908088D0}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\ngyan\\source\\repos\\Quant-Finance-Journey\\Project 1\\Program 1.py||{8B382828-6202-11D1-8870-0000F87579D2}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:Project 1\\Program 1.py||{8B382828-6202-11D1-8870-0000F87579D2}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\ngyan\\source\\repos\\Quant-Finance-Journey\\Project 1\\Program 2.py||{8B382828-6202-11D1-8870-0000F87579D2}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:Project 1\\Program 2.py||{8B382828-6202-11D1-8870-0000F87579D2}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 0,
+          "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": ".gitignore",
+              "DocumentMoniker": "C:\\Users\\ngyan\\source\\repos\\Quant-Finance-Journey\\Project 1\\.gitignore",
+              "RelativeDocumentMoniker": "Project 1\\.gitignore",
+              "ToolTip": "C:\\Users\\ngyan\\source\\repos\\Quant-Finance-Journey\\Project 1\\.gitignore",
+              "RelativeToolTip": "Project 1\\.gitignore",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
+              "WhenOpened": "2025-04-21T15:59:10.049Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "Program 2.py",
+              "DocumentMoniker": "C:\\Users\\ngyan\\source\\repos\\Quant-Finance-Journey\\Project 1\\Program 2.py",
+              "RelativeDocumentMoniker": "Project 1\\Program 2.py",
+              "ToolTip": "C:\\Users\\ngyan\\source\\repos\\Quant-Finance-Journey\\Project 1\\Program 2.py",
+              "RelativeToolTip": "Project 1\\Program 2.py",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "00000000-0000-0000-0000-000000000000.000000|iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAGZSURBVDhPrZPPSgJRFMa/SckxVMRElHRAtEUi\u002BQDudO0jCOKux3EhrfUVfAEFWwS6CTQkV0m6kZBwTDE9nTPM\u002BCdzY33wgzn3fufce8/ciz\u002BJiBTz05KNuWIcRnSoBfPGrIzoh1LMA/PBfB5B5sQj3j2dM48M7eJ2u8npdO6NmYhXcmAdQWOemQsJbDYb0uk04vE4ms0mptMphsOhTFmaMTfMq1Xgmnli1EQigUKhgGAwiG63i1arhUgkgsVigXa7jV6vJ/45c8u8SCCSAnJGymQyVKvVSNd17jHRarWi5XJJs9mMisWidQTxSo7RddElc8fYXS4XOp2OsbLH40EoFMJ8Pkej0UC5XMZkMhH/F3PPvJ9JtCu73Q5eFf1\u002BH9VqFYPBAOPxGKVSCbwL07XVQQHZQSwWQzKZRDQahaIoRhHpg9frNV1bHRQYjUbQNA2pVArhcBjr9Ro\u002Bnw/ZbNbY3THJb9QZo0kOh4NyuRxVKhWq1\u002BuUz\u002BdJVVWrgYJ4JWejXy\u002BS3\u002B\u002BnQCCwN2ayuUi7Oukq/\u002BtjOkHAN\u002BRms7QPD1cwAAAAAElFTkSuQmCC",
+              "WhenOpened": "2025-04-21T15:56:59.367Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "Program 1.py",
+              "DocumentMoniker": "C:\\Users\\ngyan\\source\\repos\\Quant-Finance-Journey\\Project 1\\Program 1.py",
+              "RelativeDocumentMoniker": "Project 1\\Program 1.py",
+              "ToolTip": "C:\\Users\\ngyan\\source\\repos\\Quant-Finance-Journey\\Project 1\\Program 1.py",
+              "RelativeToolTip": "Project 1\\Program 1.py",
+              "ViewState": "AgIAALUCAAAAAAAAAAAAAL0CAAAQAAAAAAAAAA==",
+              "Icon": "00000000-0000-0000-0000-000000000000.000000|iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAGZSURBVDhPrZPPSgJRFMa/SckxVMRElHRAtEUi\u002BQDudO0jCOKux3EhrfUVfAEFWwS6CTQkV0m6kZBwTDE9nTPM\u002BCdzY33wgzn3fufce8/ciz\u002BJiBTz05KNuWIcRnSoBfPGrIzoh1LMA/PBfB5B5sQj3j2dM48M7eJ2u8npdO6NmYhXcmAdQWOemQsJbDYb0uk04vE4ms0mptMphsOhTFmaMTfMq1Xgmnli1EQigUKhgGAwiG63i1arhUgkgsVigXa7jV6vJ/45c8u8SCCSAnJGymQyVKvVSNd17jHRarWi5XJJs9mMisWidQTxSo7RddElc8fYXS4XOp2OsbLH40EoFMJ8Pkej0UC5XMZkMhH/F3PPvJ9JtCu73Q5eFf1\u002BH9VqFYPBAOPxGKVSCbwL07XVQQHZQSwWQzKZRDQahaIoRhHpg9frNV1bHRQYjUbQNA2pVArhcBjr9Ro\u002Bnw/ZbNbY3THJb9QZo0kOh4NyuRxVKhWq1\u002BuUz\u002BdJVVWrgYJ4JWejXy\u002BS3\u002B\u002BnQCCwN2ayuUi7Oukq/\u002BtjOkHAN\u002BRms7QPD1cwAAAAAElFTkSuQmCC",
+              "WhenOpened": "2025-04-21T15:52:16.591Z",
+              "EditorCaption": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
