@@ -1,4 +1,4 @@
-# Quant Finance Journey
+# Portfolio Projects
 
 
-Project 1
+Hey there!
