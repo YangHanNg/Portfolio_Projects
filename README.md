@@ -1,1 +1,1 @@
-# quant-finance-journey
+# Quant Finance Journey
