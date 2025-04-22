@@ -1,10 +1,12 @@
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt 
 pd.set_option('future.no_silent_downcasting', True)
-from sklearn.linear_model import LinearRegression
-from scipy import stats
 from scipy.stats import t
-from scipy.stats import zscore
+import statsmodels.api as sm
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+from statsmodels.stats.diagnostic import het_breuschpagan
+import statsmodels.api as sm
 import logging
 import os
 from dotenv import load_dotenv
@@ -28,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Database configuration
 DB_CONFIG = {
-    "dbname": "postgres",
+    "dbname": os.getenv("DB_NAME"),
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
     "host": os.getenv("DB_HOST"),
@@ -61,7 +63,7 @@ def load_sp500_data(file_path='SP500.csv'):
 
 def display_available_industries(sp500_df):
     """
-    Display available industries and their company counts.
+    Display available industries with more than 8 companies.
     
     Args:
         sp500_df (pd.DataFrame): DataFrame containing SP500 data
@@ -69,7 +71,8 @@ def display_available_industries(sp500_df):
     industry_counts = sp500_df['Sector'].value_counts()
     print("Available Industries:")
     for industry, count in industry_counts.items():
-        print(f"{industry}: {count} companies")
+        if count >= 8:
+            print(f"{industry}: {count} companies")
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -86,25 +89,25 @@ def select_industry(sp500_df):
     while True:
         # Prompt user to select an industry
         selected_industry = input("\nSelect an industry (or type 'exit' to quit): ").strip()
+        if not selected_industry:
+            logger.warning("Input cannot be empty. Please enter a valid industry.")
+            continue
         
         # Allow user to exit
         if selected_industry.lower() == 'exit':
-            print("Exiting the program.")
-            return None, None
+            logger.info("Exiting the program.")
+        if 'Sector' in sp500_df.columns and not sp500_df['Sector'].empty and selected_industry in sp500_df['Sector'].unique():
         
-        # Validate industry selection
-        if selected_industry in sp500_df['Sector'].unique():
             # Retrieve tickers for the selected industry
-            industry_tickers = sp500_df[sp500_df['Sector'] == selected_industry]['Symbol'].tolist()
-            
+            filtered_df = sp500_df.loc[sp500_df['Sector'] == selected_industry]
+            industry_tickers = filtered_df['Symbol'].tolist()
+        
             print(f"\nSelected Industry: {selected_industry}")
             print(f"Number of companies: {len(industry_tickers)}")
             print("Tickers:", ', '.join(industry_tickers))
-            
-            return selected_industry, industry_tickers
-        else:
-            print("Invalid industry. Please select from the list above.")
-   
+        
+        return selected_industry, industry_tickers
+ 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
 def create_db_connection():
@@ -158,6 +161,22 @@ def process_financial_data(symbols, selected_industry):
     all_metrics = []
     regression_data = {}
     
+    # Create column mapping in case of different column names
+    column_mapping = {
+        'Operating Margin': 'Operating Margin',
+        'WACC': 'WACC',
+        'Sales to Capital': 'Sales to Capital',
+        'EBITDA Margin': 'EBITDA Margin',
+        '3Y Exp Growth': '3Y Exp Growth',  # Possible different name
+        '3Y Rev Growth': '3Y Rev Growth',   # Possible different name
+        'Return On Invested Capital': 'Return On Invested Capital',  # Note the 'On' vs 'on'
+        'EV/EBIT': 'EV/EBIT',
+        'EV/EBITDA': 'EV/EBITDA',
+        'EV/After Tax EBIT': 'EV/After Tax EBIT',
+        'EV/Sales': 'EV/Sales',
+        'EV/Capital Invested': 'EV/Capital Invested'
+        }
+    
     for symbol in symbols:
         logger.info(f"Processing metrics for {symbol}")
         
@@ -169,16 +188,23 @@ def process_financial_data(symbols, selected_industry):
             processed_df = calculate_financial_metrics(df, industry_metrics)
             all_metrics.append(processed_df)
             
-            
-            # Ensure we only take up to the first 3 rows
+            # Initialize regression_data for each row if not exists
             for i in range(min(3, len(processed_df))):
                 if i not in regression_data:
-                    regression_data[i] = {}  # Initialize dictionary for each row index
+                    regression_data[i] = {}
                 
-                # Store row data under the symbol key
-                regression_data[i][symbol] = processed_df.iloc[i, 
-                    [24, 26, 35, 36, 38, 39, 44, 45, 46, 47, 48, 49, 50]].to_dict()
-
+                # Store data for current symbol
+                regression_data[i][symbol] = {}
+                for required_col, actual_col in column_mapping.items():
+                    if actual_col not in processed_df.columns:
+                        logger.warning(f"Missing column in processed_df: {actual_col} (mapped from {required_col})")
+                        regression_data[i][symbol][required_col] = None
+                    else:
+                        # Store the value from processed_df
+                        regression_data[i][symbol][required_col] = processed_df.iloc[i][actual_col]
+            
+            logger.info(f"Stored data for {symbol} in regression_data")
+            
         time.sleep(0.5)  # Prevent rate limiting
     
     # Process regression_data into analyzed_data
@@ -377,173 +403,92 @@ def calculate_financial_metrics(df, industry_metrics):
     
     Args:
         df (pandas.DataFrame): DataFrame with financial metrics
-        industry_metrics (pandas.DataFrame): DataFrame with industry metrics
+        industry_metrics (dict): Dictionary with industry metrics
     
     Returns:
         pandas.DataFrame: DataFrame with additional calculated metrics
     """
     if df is None or df.empty:
         return None
-    
-    try:    
-        # Get industry metrics
+
+    try:
+        # Convert all relevant columns to numeric upfront
+        numeric_columns = [
+            'totalAssets', 'totalLiabilities', 'capitalLeaseObligations', 'longTermDebt',
+            'currentLongTermDebt', 'cashAndShortTermInvestments', 'totalCurrentAssets',
+            'totalCurrentLiabilities', 'totalRevenue', 'ebit', 'depreciationAndAmortization',
+            'incomeTaxExpense', 'incomeBeforeTax', 'propertyPlantEquipment'
+        ]
+        df[numeric_columns] = df[numeric_columns].apply(pd.to_numeric, errors='coerce').fillna(0)
+
+        # Extract industry metrics
         industry_rir = industry_metrics['industry_rir']
         industry_wacc = industry_metrics['industry_wacc']
         unlevered_data = industry_metrics['unlevered_data']
-        
-        # Safe calculation functions to handle NaNs
-        def safe_division(a, b, fill_value=0):
-            return np.where(b != 0, a / b, fill_value)
-        
-        def safe_subtract(a, b, fill_value=0):
-            return np.nan_to_num(a - b, nan=fill_value)
-    
-        # Total Equity Calculation
-        df['Total Equity'] = safe_subtract(
-            df['totalAssets'], df['totalLiabilities'], fill_value=0
-        )
-        # Total Debt Calculation
-        df['Total Debt'] = (
-            df['capitalLeaseObligations'] + 
-            df['longTermDebt'] + 
-            df['currentLongTermDebt']
-            )
-        # Capital Invested Calculation
-        df['Capital Invested'] = (
-            df['totalAssets'] + 
-            df['Total Debt'] + 
-            df['cashAndShortTermInvestments']
-            )
-        # Debt-to-Equity Ratio Calculation
-        df['Debt to Equity'] = safe_division(
-            df['Total Debt'], 
-            (df['Total Debt'] + df['Total Equity']), 
-            fill_value=0
-        )
-        # Working Capital Calculation
-        df['Working Capital'] = safe_subtract(
-            df['totalCurrentAssets'], df['totalCurrentLiabilities'], fill_value=0
-        )
-        # Net Working Capital Calculation
-        df['Net Working Capital'] = safe_subtract(
-            df['Working Capital'], df['Working Capital'].shift(-1), fill_value=0
-        )
-        # Revenue growth rate 
-        df['Revenue Growth'] = safe_division(
-            df['totalRevenue'], df['totalRevenue'].shift(-1), fill_value=-1
-        ) - 1
-        # Operating margin
-        df['Operating Margin'] = safe_division(
-            df['ebit'], df['totalRevenue'], fill_value=0
-        )
-        df['EBITDA'] = (
-            df['ebit'] + df['depreciationAndAmortization']
-            )
-        df['EBITDA Margin'] = safe_division(
-            df['EBITDA'], df['totalRevenue'], fill_value=0
-            )
-        # Effective Tax rate
-        df['Effective Tax'] = safe_division(
-            df['incomeTaxExpense'], df['incomeBeforeTax'], fill_value=0
-        )
-        df['Effective Tax'] = pd.to_numeric(df['Effective Tax'], errors='coerce')
-        # Tax rate 
-        df['Tax Rate'] = (
-            df['Effective Tax'].shift(-2).rolling(window=3, min_periods=1).mean().fillna(0)
-            )
-        
-        # After tax EBIT 
-        df['After Tax EBIT'] = (
-             df['ebit'].astype(float)*(1-df['Tax Rate'])
-        )
-        
-        # After tax Operating Margin
-        df['After Tax Operating Margin'] = (
-            pd.to_numeric(df['Operating Margin'])*(1-pd.to_numeric(df['Tax Rate']))
-        )
-        
-        # Net CapEx 
-        df['Net CapEx'] = safe_subtract(
-            df['propertyPlantEquipment'], df['propertyPlantEquipment'].shift(-1), fill_value=0
-        ) + df['depreciationAndAmortization']
-        
-        # FCF 
-        df['Free Cash Flow'] = (
-            df['Net CapEx'] + df['Net Working Capital']
-        )
-        
-        # Reinvestment Rate 
-        df['Reinvestment Rate'] = safe_division(
-            df['Free Cash Flow'].astype(float), df['After Tax EBIT'], fill_value=0
-        )
-        
-        # Sales to Capital 
-        df['Sales to Capital'] = safe_division(
-            df['totalRevenue'], df['Capital Invested'], fill_value=0
-        )
-        # Return On Invested Capital 
-        df['Return On Invested Capital'] = (
-            df['After Tax Operating Margin'] * 
-            df['Sales to Capital'].astype(float)
-            )
-        # Expected growth rate
-        df['Expected Growth'] = (
-            df['Reinvestment Rate'] * 
-            df['Return On Invested Capital']
-            )
-        # 3Y Exp Growth
-        df['3Y Exp Growth'] = df['Expected Growth'].shift(-2).rolling(window=3).mean().fillna(0)
-        # 3Y Rev Growth
-        df['3Y Rev Growth'] = df['Revenue Growth'].shift(-2).rolling(window=3).mean().fillna(0)
-        # 3Y Reinvestment Rate
-        df['3Y RIR'] = df['Reinvestment Rate'].shift(-2).rolling(window=3).mean().fillna(0)
-        
-        
-        # Levered Beta Calculation
-        df['Levered Beta'] = (
-            unlevered_data *( 1 + pd.to_numeric(df['Debt to Equity']) * (1 - pd.to_numeric(df['Tax Rate'])))
-        )
+
+        # Helper functions for safe calculations
+        safe_division = lambda a, b: np.divide(a, b, out=np.full_like(a, np.nan, dtype=float), where=b != 0)
+        safe_subtract = lambda a, b: a - b if (isinstance(a, (int, float)) and isinstance(b, (int, float))) else np.subtract(a, b)
+
+        # Perform calculations
+        df['Total Equity'] = safe_subtract(df['totalAssets'], df['totalLiabilities'])
+        df['Total Debt'] = df['capitalLeaseObligations'] + df['longTermDebt'] + df['currentLongTermDebt']
+        df['Capital Invested'] = df['totalAssets'] + df['Total Debt'] + df['cashAndShortTermInvestments']
+        df['Debt to Equity'] = safe_division(df['Total Debt'], df['Total Debt'] + df['Total Equity'])
+        df['Working Capital'] = safe_subtract(df['totalCurrentAssets'], df['totalCurrentLiabilities'])
+        df['Net Working Capital'] = safe_subtract(df['Working Capital'], df['Working Capital'].shift(-1))
+        df['Revenue Growth'] = safe_division(df['totalRevenue'], df['totalRevenue'].shift(-1)) - 1
+        df['Operating Margin'] = safe_division(df['ebit'], df['totalRevenue'])
+        df['EBITDA'] = df['ebit'] + df['depreciationAndAmortization']
+        df['EBITDA Margin'] = safe_division(df['EBITDA'], df['totalRevenue'])
+        df['Effective Tax'] = safe_division(df['incomeTaxExpense'], df['incomeBeforeTax'])
+        df['Tax Rate'] = df['Effective Tax'].shift(-2).rolling(window=3, min_periods=1).mean().fillna(0)
+        df['After Tax EBIT'] = df['ebit'] * (1 - df['Tax Rate'])
+        df['After Tax Operating Margin'] = df['Operating Margin'] * (1 - df['Tax Rate'])
+        df['Net CapEx'] = safe_subtract(df['propertyPlantEquipment'], df['propertyPlantEquipment'].shift(-1)) + df['depreciationAndAmortization']
+        df['Free Cash Flow'] = df['Net CapEx'] + df['Net Working Capital']
+        df['Reinvestment Rate'] = safe_division(df['Free Cash Flow'], df['After Tax EBIT'])
+        df['Sales to Capital'] = safe_division(df['totalRevenue'], df['Capital Invested'])
+        df['Return On Invested Capital'] = df['After Tax Operating Margin'] * df['Sales to Capital']
+        df['Expected Growth'] = df['Reinvestment Rate'] * df['Return On Invested Capital']
+        df['3Y Exp Growth'] = df['Expected Growth'].rolling(window=3, min_periods=1).mean()
+        df['3Y Rev Growth'] = df['Revenue Growth'].rolling(window=3, min_periods=1).mean()
+        df['3Y RIR'] = df['Reinvestment Rate'].rolling(window=3, min_periods=1).mean()
+        df['Levered Beta'] = unlevered_data * (1 + df['Debt to Equity'] * (1 - df['Tax Rate']))
         df['Cost of Debt'] = 0.045 + 0.044
-        
-        df['Cost of Equity'] = 0.045 + pd.to_numeric(df['Levered Beta'])*0.055
-        
+        df['Cost of Equity'] = 0.045 + df['Levered Beta'] * 0.055
         df['WACC'] = (
-            pd.to_numeric(df['Cost of Debt'])*(1-pd.to_numeric(df['Tax Rate']))*pd.to_numeric(df['Debt to Equity']) + 
-            pd.to_numeric(df['Cost of Equity'])*(1-pd.to_numeric(df['Debt to Equity']))
-            )
+            df['Cost of Debt'] * (1 - df['Tax Rate']) * df['Debt to Equity'] +
+            df['Cost of Equity'] * (1 - df['Debt to Equity'])
+        )
         
         df['EV'] = (
-            (pd.to_numeric(df['ebit'])*(1-pd.to_numeric(df['Tax Rate']))*(1-pd.to_numeric(df['3Y RIR']))*
-             (1-(((1+pd.to_numeric(df['3Y Rev Growth']))**3)/((1+pd.to_numeric(df['WACC']))**3))))/
-            (pd.to_numeric(df['WACC']) - pd.to_numeric(df['3Y Rev Growth'])) + 
-            (pd.to_numeric(df['ebit'])*(1-pd.to_numeric(df['Tax Rate']))*(1+pd.to_numeric(df['3Y Exp Growth']))*
-             (1-industry_rir)*(1+pd.to_numeric(df['3Y Rev Growth']))**3)/
-            ((industry_wacc-pd.to_numeric(df['3Y Exp Growth']))*((1+pd.to_numeric(df['WACC']))**3))
-            )
-            
-        # Valuation multiples
-        df['EV/EBIT'] = safe_division(pd.to_numeric(df['EV']), pd.to_numeric(df['ebit']), fill_value=0)
-        df['EV/EBITDA'] = safe_division(pd.to_numeric(df['EV']), pd.to_numeric(df['ebit']) + pd.to_numeric(df['depreciationAndAmortization']), fill_value=0)
-        df['EV/After Tax EBIT'] = safe_division(pd.to_numeric(df['EV']), pd.to_numeric(df['After Tax EBIT']), fill_value=0)
-        df['EV/Sales'] = safe_division(pd.to_numeric(df['EV']), pd.to_numeric(df['totalRevenue']), fill_value=0)
-        df['EV/Capital Invested'] = safe_division(pd.to_numeric(df['EV']), pd.to_numeric(df['Capital Invested']), fill_value=0)
-        
-        
+            (df['ebit'] * (1 - df['Tax Rate']) * (1 - df['3Y RIR']) *
+             (1 - ((1 + df['3Y Rev Growth'])**3 / (1 + df['WACC'])**3))) /
+            (df['WACC'] - df['3Y Rev Growth']) +
+            (df['ebit'] * (1 - df['Tax Rate']) * (1 + df['3Y Exp Growth']) *
+             (1 - industry_rir) * (1 + df['3Y Rev Growth'])**3) /
+            ((industry_wacc - df['3Y Exp Growth']) * (1 + df['WACC'])**3)
+        )
+        df['EV/EBIT'] = safe_division(df['EV'], df['ebit'])
+        df['EV/EBITDA'] = safe_division(df['EV'], df['EBITDA'])
+        df['EV/After Tax EBIT'] = safe_division(df['EV'], df['After Tax EBIT'])
+        df['EV/Sales'] = safe_division(df['EV'], df['totalRevenue'])
+        df['EV/Capital Invested'] = safe_division(df['EV'], df['Capital Invested'])
+
         # Fill NaNs with 0 for final return
         df.fillna(0, inplace=True)
         return df
-    
+
     except Exception as e:
-        logger.error(f"Error calculating financial metrics: {str(e)}")
-        # Print full traceback for debugging
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error calculating financial metrics: {str(e)}", exc_info=True)
         return None
     
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
 def analyze_financial_data(data, selected_industry, confidence=0.90):
     try:
+        
         regress_data = {}
 
         regression_format = {
@@ -551,32 +496,32 @@ def analyze_financial_data(data, selected_industry, confidence=0.90):
             'EV/EBITDA': ['Sales to Capital', 'EBITDA Margin'],
             'EV/After Tax EBIT': ['3Y Exp Growth', 'WACC'],
             'EV/Sales': ['Operating Margin', '3Y Rev Growth'],
-            'EV/Capital Invested': ['Return on Invested Capital', 'WACC']
+            'EV/Capital Invested': ['Return On Invested Capital', 'WACC']
         }
+        index = data['Row_Index'].iloc[0]
 
         for multiple, (x1_name, x2_name) in regression_format.items():
-            y_multiple = data[multiple].values
-            x1 = data[x1_name].values
-            x2 = data[x2_name].values
+            # Convert to pandas series first to handle any potential missing values
+            y_multiple = pd.to_numeric(data[multiple], errors='coerce').values
+            x1 = pd.to_numeric(data[x1_name], errors='coerce').values
+            x2 = pd.to_numeric(data[x2_name], errors='coerce').values
+            
+            # Create the design matrix X
             X = np.column_stack((x1, x2))
 
             # Calculate predictions and confidence intervals
-            X1, X2, y_pred, confidence_interval, model = \
-                calculate_predictions_and_confidence(X, y_multiple, confidence)
+            confidence_interval, model = \
+                calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
 
             # Store data in regression dictionary
             regress_data[multiple] = {
-                'X': X,
-                'y': y_multiple,
-                x1_name: X1,  # Store under corresponding name
-                x2_name: X2,  # Store under corresponding name
-                'y_pred': y_pred,
                 'confidence_interval': confidence_interval,
-                'model_coefficients': model.coef_,
-                'model_intercept': model.intercept_,
-            }
+                'model_coefficients': model.params[1:],
+                'model_intercept': model.params[0],
+            }   
 
         data['Regression'] = regress_data
+        
         return data
 
     except Exception as e:
@@ -585,37 +530,90 @@ def analyze_financial_data(data, selected_industry, confidence=0.90):
           
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def calculate_predictions_and_confidence(X, y, confidence=0.90):
-    # Fit the model
-    model = LinearRegression()
-    model.fit(X, y)
+def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index, confidence=0.90, selected_industry=None):
 
-    # Predict new values
-    predictions = model.predict(X)
+    # Add a constant to the predictors for statsmodels
+    X_with_const = sm.add_constant(X)
+
+    # Fit the model using statsmodels
+    model = sm.OLS(y, X_with_const).fit()
+
+    # Convert numpy array to DataFrame for VIF calculation
+    X_df = pd.DataFrame(X, columns=[x1_name, x2_name])
+    vif_data = pd.DataFrame()
+    vif_data["feature"] = X_df.columns
+    vif_data["VIF"] = [variance_inflation_factor(X_df.values, i) for i in range(X_df.shape[1])]
+    print(vif_data)
+
+    bp_test = het_breuschpagan(model.resid, model.model.exog)
+    labels = ['Lagrange multiplier statistic', 'p-value', 'f-value', 'f p-value']
+    print(dict(zip(labels, bp_test)))
 
     # Create meshgrid for the regression plane
-    X1 = np.linspace(X[:, 0].min(), X[:, 0].max(), 100)
-    X2 = np.linspace(X[:, 1].min(), X[:, 1].max(), 100)
+    num_points = int(100)
+    X1 = np.linspace(X[:, 0].min(), X[:, 0].max(), num_points)
+    X2 = np.linspace(X[:, 1].min(), X[:, 1].max(), num_points)
     x1_mesh, x2_mesh = np.meshgrid(X1, X2)
 
-    # Flatten meshgrids to create prediction points
+    # Create prediction points from meshgrid
     X_pred = np.column_stack((x1_mesh.ravel(), x2_mesh.ravel()))
-    y_pred = model.predict(X_pred)
+    X_pred_with_const = sm.add_constant(X_pred)
 
-    # Calculate prediction intervals
-    n, p = X.shape
-    mse = np.sum((y - model.predict(X))**2) / (n - p - 1)
+    # Calculate total points in the meshgrid
+    total_points = num_points * num_points
 
-    X_mean = X.mean(axis=0)
-    X_centered = X - X_mean
-    cov_matrix = np.linalg.inv(X_centered.T @ X_centered)
-    X_pred_centered = X_pred - X_mean
-    pred_var = np.diagonal(X_pred_centered @ cov_matrix @ X_pred_centered.T)
+    # Get predictions
+    y_pred = model.predict(X_pred_with_const)
 
-    t_value = t.ppf((1 + confidence) / 2, n - p - 1)
-    confidence_interval = t_value * np.sqrt(mse * (1 + pred_var))
+    # Calculate prediction intervals (make sure we get exactly the right number)
+    pred = model.get_prediction(X_pred_with_const)
+    pred_var = pred.var_pred_mean
+    t_value = t.ppf((1 + confidence) / 2, df=model.df_resid)
 
-    return x1_mesh, x2_mesh, y_pred, confidence_interval, model
+    # Extract just what we need for the confidence intervals
+    confidence_interval = t_value * np.sqrt(pred_var)
+
+    # Ensure we have exactly the right number of points to reshape
+    if len(confidence_interval) != total_points:
+        confidence_interval = confidence_interval[:total_points]
+
+    # Reshape to match the grid
+    z_mesh = y_pred.reshape((num_points, num_points))
+    ci_mesh = confidence_interval.reshape((num_points, num_points))
+
+    # Create 3D plot
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Plot actual data points
+    ax.scatter(X[:, 0], X[:, 1], y, color='blue', label='Actual Data')
+
+    # Plot regression surface
+    surf = ax.plot_surface(x1_mesh, x2_mesh, z_mesh, 
+                           alpha=0.3, cmap='viridis')
+
+    # Plot upper and lower confidence bounds
+    ax.plot_surface(x1_mesh, x2_mesh, z_mesh + ci_mesh, 
+                    alpha=0.1, color='red')
+    ax.plot_surface(x1_mesh, x2_mesh, z_mesh - ci_mesh, 
+                    alpha=0.1, color='red')
+
+    # Labels and title
+    ax.set_xlabel(f'{x1_name}')
+    ax.set_ylabel(f'{x2_name}')
+    ax.set_zlabel(f'{multiple}')
+    ax.set_title(
+        f"Linear Regression Model of {selected_industry} Industry with {int(confidence * 100)}% Confidence Interval\n"
+        f"Multiple: {multiple}, Year: {index}"
+    )
+
+    # Add colorbar
+    fig.colorbar(surf, ax=ax, shrink=0.5, aspect=5)
+
+    plt.show()
+    print(model.summary())
+
+    return confidence_interval, model
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------    
 

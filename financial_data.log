@@ -1,0 +1,544 @@
+2025-04-22 17:29:26,671 - __main__ - INFO - Processing metrics for CAG
+2025-04-22 17:29:26,751 - __main__ - INFO - Stored data for CAG in regression_data
+2025-04-22 17:29:27,252 - __main__ - INFO - Processing metrics for CPB
+2025-04-22 17:29:27,325 - __main__ - INFO - Stored data for CPB in regression_data
+2025-04-22 17:29:27,826 - __main__ - INFO - Processing metrics for GIS
+2025-04-22 17:29:27,906 - __main__ - INFO - Stored data for GIS in regression_data
+2025-04-22 17:29:28,406 - __main__ - INFO - Processing metrics for HRL
+2025-04-22 17:29:28,486 - __main__ - INFO - Stored data for HRL in regression_data
+2025-04-22 17:29:28,988 - __main__ - INFO - Processing metrics for HSY
+2025-04-22 17:29:29,065 - __main__ - INFO - Stored data for HSY in regression_data
+2025-04-22 17:29:29,565 - __main__ - INFO - Processing metrics for K
+2025-04-22 17:29:29,644 - __main__ - INFO - Stored data for K in regression_data
+2025-04-22 17:29:30,145 - __main__ - INFO - Processing metrics for KHC
+2025-04-22 17:29:30,220 - __main__ - INFO - Stored data for KHC in regression_data
+2025-04-22 17:29:30,721 - __main__ - INFO - Processing metrics for LW
+2025-04-22 17:29:30,790 - __main__ - INFO - Stored data for LW in regression_data
+2025-04-22 17:29:31,292 - __main__ - INFO - Processing metrics for MDLZ
+2025-04-22 17:29:31,358 - __main__ - INFO - Stored data for MDLZ in regression_data
+2025-04-22 17:29:31,860 - __main__ - INFO - Processing metrics for MKC
+2025-04-22 17:29:32,040 - __main__ - INFO - Stored data for MKC in regression_data
+2025-04-22 17:29:32,541 - __main__ - INFO - Processing metrics for SJM
+2025-04-22 17:29:32,613 - __main__ - INFO - Stored data for SJM in regression_data
+2025-04-22 17:29:33,114 - __main__ - INFO - Processing metrics for TSN
+2025-04-22 17:29:33,191 - __main__ - INFO - Stored data for TSN in regression_data
+2025-04-22 17:29:33,723 - root - ERROR - Error in analyze_financial_data: 'PredictionResults' object has no attribute 'variance_obs'
+2025-04-22 17:29:33,723 - root - ERROR - An error occurred in main: 'PredictionResults' object has no attribute 'variance_obs'
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 614, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 216, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 507, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 547, in calculate_predictions_and_confidence
+    pred_var = model.get_prediction(X_pred_with_const).variance_obs
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'PredictionResults' object has no attribute 'variance_obs'
+2025-04-22 17:35:51,663 - __main__ - INFO - Processing metrics for DIS
+2025-04-22 17:35:51,732 - __main__ - INFO - Stored data for DIS in regression_data
+2025-04-22 17:35:52,233 - __main__ - INFO - Processing metrics for EA
+2025-04-22 17:35:52,303 - __main__ - INFO - Stored data for EA in regression_data
+2025-04-22 17:35:52,804 - __main__ - INFO - Processing metrics for LYV
+2025-04-22 17:35:52,879 - __main__ - INFO - Stored data for LYV in regression_data
+2025-04-22 17:35:53,381 - __main__ - INFO - Processing metrics for NFLX
+2025-04-22 17:35:53,444 - __main__ - INFO - Stored data for NFLX in regression_data
+2025-04-22 17:35:53,945 - __main__ - INFO - Processing metrics for PARA
+2025-04-22 17:35:54,018 - __main__ - INFO - Stored data for PARA in regression_data
+2025-04-22 17:35:54,519 - __main__ - INFO - Processing metrics for TTWO
+2025-04-22 17:35:54,597 - __main__ - INFO - Stored data for TTWO in regression_data
+2025-04-22 17:35:55,111 - root - ERROR - Error in analyze_financial_data: 'numpy.ndarray' object has no attribute 'columns'
+2025-04-22 17:35:55,111 - root - ERROR - An error occurred in main: 'numpy.ndarray' object has no attribute 'columns'
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 627, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 510, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 538, in calculate_predictions_and_confidence
+    vif_data["feature"] = X.columns
+                          ^^^^^^^^^
+AttributeError: 'numpy.ndarray' object has no attribute 'columns'
+2025-04-22 17:46:12,050 - __main__ - INFO - Processing metrics for DIS
+2025-04-22 17:46:12,115 - __main__ - INFO - Stored data for DIS in regression_data
+2025-04-22 17:46:12,616 - __main__ - INFO - Processing metrics for EA
+2025-04-22 17:46:12,679 - __main__ - INFO - Stored data for EA in regression_data
+2025-04-22 17:46:13,179 - __main__ - INFO - Processing metrics for LYV
+2025-04-22 17:46:13,242 - __main__ - INFO - Stored data for LYV in regression_data
+2025-04-22 17:46:13,744 - __main__ - INFO - Processing metrics for NFLX
+2025-04-22 17:46:13,807 - __main__ - INFO - Stored data for NFLX in regression_data
+2025-04-22 17:46:14,308 - __main__ - INFO - Processing metrics for PARA
+2025-04-22 17:46:14,373 - __main__ - INFO - Stored data for PARA in regression_data
+2025-04-22 17:46:14,874 - __main__ - INFO - Processing metrics for TTWO
+2025-04-22 17:46:14,939 - __main__ - INFO - Stored data for TTWO in regression_data
+2025-04-22 17:46:15,477 - root - ERROR - Error in analyze_financial_data: 'numpy.ndarray' object has no attribute 'columns'
+2025-04-22 17:46:15,477 - root - ERROR - An error occurred in main: 'numpy.ndarray' object has no attribute 'columns'
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 630, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 541, in calculate_predictions_and_confidence
+    vif_data["feature"] = X.columns
+                          ^^^^^^^^^
+AttributeError: 'numpy.ndarray' object has no attribute 'columns'
+2025-04-22 17:48:00,830 - __main__ - INFO - Processing metrics for DIS
+2025-04-22 17:48:00,890 - __main__ - INFO - Stored data for DIS in regression_data
+2025-04-22 17:48:01,391 - __main__ - INFO - Processing metrics for EA
+2025-04-22 17:48:01,449 - __main__ - INFO - Stored data for EA in regression_data
+2025-04-22 17:48:01,950 - __main__ - INFO - Processing metrics for LYV
+2025-04-22 17:48:02,017 - __main__ - INFO - Stored data for LYV in regression_data
+2025-04-22 17:48:02,518 - __main__ - INFO - Processing metrics for NFLX
+2025-04-22 17:48:02,577 - __main__ - INFO - Stored data for NFLX in regression_data
+2025-04-22 17:48:03,078 - __main__ - INFO - Processing metrics for PARA
+2025-04-22 17:48:03,142 - __main__ - INFO - Stored data for PARA in regression_data
+2025-04-22 17:48:03,643 - __main__ - INFO - Processing metrics for TTWO
+2025-04-22 17:48:03,717 - __main__ - INFO - Stored data for TTWO in regression_data
+2025-04-22 17:48:04,250 - root - ERROR - Error in analyze_financial_data: 'PredictionResults' object has no attribute 'var'
+2025-04-22 17:48:04,250 - root - ERROR - An error occurred in main: 'PredictionResults' object has no attribute 'var'
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 632, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 565, in calculate_predictions_and_confidence
+    pred_var = pred.var
+               ^^^^^^^^
+AttributeError: 'PredictionResults' object has no attribute 'var'
+2025-04-22 17:49:12,795 - __main__ - INFO - Processing metrics for DIS
+2025-04-22 17:49:12,861 - __main__ - INFO - Stored data for DIS in regression_data
+2025-04-22 17:49:13,362 - __main__ - INFO - Processing metrics for EA
+2025-04-22 17:49:13,426 - __main__ - INFO - Stored data for EA in regression_data
+2025-04-22 17:49:13,927 - __main__ - INFO - Processing metrics for LYV
+2025-04-22 17:49:13,992 - __main__ - INFO - Stored data for LYV in regression_data
+2025-04-22 17:49:14,493 - __main__ - INFO - Processing metrics for NFLX
+2025-04-22 17:49:14,548 - __main__ - INFO - Stored data for NFLX in regression_data
+2025-04-22 17:49:15,049 - __main__ - INFO - Processing metrics for PARA
+2025-04-22 17:49:15,114 - __main__ - INFO - Stored data for PARA in regression_data
+2025-04-22 17:49:15,615 - __main__ - INFO - Processing metrics for TTWO
+2025-04-22 17:49:15,671 - __main__ - INFO - Stored data for TTWO in regression_data
+2025-04-22 17:49:16,193 - root - ERROR - Error in analyze_financial_data: 'PredictionResults' object has no attribute 'cov_pred_mean'
+2025-04-22 17:49:16,193 - root - ERROR - An error occurred in main: 'PredictionResults' object has no attribute 'cov_pred_mean'
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 632, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 565, in calculate_predictions_and_confidence
+    pred_var = pred.cov_pred_mean
+               ^^^^^^^^^^^^^^^^^^
+AttributeError: 'PredictionResults' object has no attribute 'cov_pred_mean'. Did you mean: 'var_pred_mean'?
+2025-04-22 17:49:37,249 - __main__ - INFO - Processing metrics for DIS
+2025-04-22 17:49:37,313 - __main__ - INFO - Stored data for DIS in regression_data
+2025-04-22 17:49:37,815 - __main__ - INFO - Processing metrics for EA
+2025-04-22 17:49:37,879 - __main__ - INFO - Stored data for EA in regression_data
+2025-04-22 17:49:38,380 - __main__ - INFO - Processing metrics for LYV
+2025-04-22 17:49:38,443 - __main__ - INFO - Stored data for LYV in regression_data
+2025-04-22 17:49:38,944 - __main__ - INFO - Processing metrics for NFLX
+2025-04-22 17:49:39,008 - __main__ - INFO - Stored data for NFLX in regression_data
+2025-04-22 17:49:39,508 - __main__ - INFO - Processing metrics for PARA
+2025-04-22 17:49:39,572 - __main__ - INFO - Stored data for PARA in regression_data
+2025-04-22 17:49:40,073 - __main__ - INFO - Processing metrics for TTWO
+2025-04-22 17:49:40,138 - __main__ - INFO - Stored data for TTWO in regression_data
+2025-04-22 17:49:41,286 - root - ERROR - Error in analyze_financial_data: cannot reshape array of size 100000000 into shape (100,100)
+2025-04-22 17:49:41,286 - root - ERROR - An error occurred in main: cannot reshape array of size 100000000 into shape (100,100)
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 632, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 571, in calculate_predictions_and_confidence
+    ci_mesh = confidence_interval.reshape(x1_mesh.shape)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: cannot reshape array of size 100000000 into shape (100,100)
+2025-04-22 17:55:47,453 - __main__ - INFO - Processing metrics for DIS
+2025-04-22 17:55:47,517 - __main__ - INFO - Stored data for DIS in regression_data
+2025-04-22 17:55:48,018 - __main__ - INFO - Processing metrics for EA
+2025-04-22 17:55:48,083 - __main__ - INFO - Stored data for EA in regression_data
+2025-04-22 17:55:48,585 - __main__ - INFO - Processing metrics for LYV
+2025-04-22 17:55:48,642 - __main__ - INFO - Stored data for LYV in regression_data
+2025-04-22 17:55:49,144 - __main__ - INFO - Processing metrics for NFLX
+2025-04-22 17:55:49,202 - __main__ - INFO - Stored data for NFLX in regression_data
+2025-04-22 17:55:49,702 - __main__ - INFO - Processing metrics for PARA
+2025-04-22 17:55:49,768 - __main__ - INFO - Stored data for PARA in regression_data
+2025-04-22 17:55:50,270 - __main__ - INFO - Processing metrics for TTWO
+2025-04-22 17:55:50,334 - __main__ - INFO - Stored data for TTWO in regression_data
+2025-04-22 17:55:50,892 - root - ERROR - Error in analyze_financial_data: cannot reshape array of size 6250000 into shape (50,50)
+2025-04-22 17:55:50,892 - root - ERROR - An error occurred in main: cannot reshape array of size 6250000 into shape (50,50)
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 633, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 572, in calculate_predictions_and_confidence
+    ci_mesh = confidence_interval.reshape((num_points, num_points))  # Explicit dimensions
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: cannot reshape array of size 6250000 into shape (50,50)
+2025-04-22 18:07:00,938 - __main__ - INFO - Processing metrics for DIS
+2025-04-22 18:07:01,002 - __main__ - INFO - Stored data for DIS in regression_data
+2025-04-22 18:07:01,503 - __main__ - INFO - Processing metrics for EA
+2025-04-22 18:07:01,563 - __main__ - INFO - Stored data for EA in regression_data
+2025-04-22 18:07:02,063 - __main__ - INFO - Processing metrics for LYV
+2025-04-22 18:07:02,126 - __main__ - INFO - Stored data for LYV in regression_data
+2025-04-22 18:07:02,627 - __main__ - INFO - Processing metrics for NFLX
+2025-04-22 18:07:02,690 - __main__ - INFO - Stored data for NFLX in regression_data
+2025-04-22 18:07:03,192 - __main__ - INFO - Processing metrics for PARA
+2025-04-22 18:07:03,255 - __main__ - INFO - Stored data for PARA in regression_data
+2025-04-22 18:07:03,756 - __main__ - INFO - Processing metrics for TTWO
+2025-04-22 18:07:03,814 - __main__ - INFO - Stored data for TTWO in regression_data
+2025-04-22 18:07:04,372 - root - ERROR - Error in analyze_financial_data: cannot reshape array of size 6250000 into shape (50,50)
+2025-04-22 18:07:04,372 - root - ERROR - An error occurred in main: cannot reshape array of size 6250000 into shape (50,50)
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 633, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 572, in calculate_predictions_and_confidence
+    ci_mesh = confidence_interval.reshape(x1_mesh.shape)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: cannot reshape array of size 6250000 into shape (50,50)
+2025-04-22 18:08:32,054 - __main__ - INFO - Processing metrics for DIS
+2025-04-22 18:08:32,117 - __main__ - INFO - Stored data for DIS in regression_data
+2025-04-22 18:08:32,619 - __main__ - INFO - Processing metrics for EA
+2025-04-22 18:08:32,683 - __main__ - INFO - Stored data for EA in regression_data
+2025-04-22 18:08:33,185 - __main__ - INFO - Processing metrics for LYV
+2025-04-22 18:08:33,247 - __main__ - INFO - Stored data for LYV in regression_data
+2025-04-22 18:08:33,749 - __main__ - INFO - Processing metrics for NFLX
+2025-04-22 18:08:33,813 - __main__ - INFO - Stored data for NFLX in regression_data
+2025-04-22 18:08:34,314 - __main__ - INFO - Processing metrics for PARA
+2025-04-22 18:08:34,387 - __main__ - INFO - Stored data for PARA in regression_data
+2025-04-22 18:08:34,889 - __main__ - INFO - Processing metrics for TTWO
+2025-04-22 18:08:34,955 - __main__ - INFO - Stored data for TTWO in regression_data
+2025-04-22 18:08:36,051 - root - ERROR - Error in analyze_financial_data: cannot reshape array of size 100000000 into shape (100,100)
+2025-04-22 18:08:36,052 - root - ERROR - An error occurred in main: cannot reshape array of size 100000000 into shape (100,100)
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 633, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 572, in calculate_predictions_and_confidence
+    ci_mesh = confidence_interval.reshape(x1_mesh.shape)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: cannot reshape array of size 100000000 into shape (100,100)
+2025-04-22 18:10:36,484 - __main__ - INFO - Processing metrics for DIS
+2025-04-22 18:10:36,541 - __main__ - INFO - Stored data for DIS in regression_data
+2025-04-22 18:10:37,042 - __main__ - INFO - Processing metrics for EA
+2025-04-22 18:10:37,105 - __main__ - INFO - Stored data for EA in regression_data
+2025-04-22 18:10:37,607 - __main__ - INFO - Processing metrics for LYV
+2025-04-22 18:10:37,675 - __main__ - INFO - Stored data for LYV in regression_data
+2025-04-22 18:10:38,176 - __main__ - INFO - Processing metrics for NFLX
+2025-04-22 18:10:38,243 - __main__ - INFO - Stored data for NFLX in regression_data
+2025-04-22 18:10:38,744 - __main__ - INFO - Processing metrics for PARA
+2025-04-22 18:10:38,809 - __main__ - INFO - Stored data for PARA in regression_data
+2025-04-22 18:10:39,310 - __main__ - INFO - Processing metrics for TTWO
+2025-04-22 18:10:39,374 - __main__ - INFO - Stored data for TTWO in regression_data
+2025-04-22 18:10:40,403 - root - ERROR - Error in analyze_financial_data: cannot reshape array of size 100000000 into shape (100,100)
+2025-04-22 18:10:40,404 - root - ERROR - An error occurred in main: cannot reshape array of size 100000000 into shape (100,100)
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 633, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 572, in calculate_predictions_and_confidence
+    ci_mesh = confidence_interval.reshape((num_points, num_points))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: cannot reshape array of size 100000000 into shape (100,100)
+2025-04-22 18:16:57,163 - __main__ - INFO - Processing metrics for DIS
+2025-04-22 18:16:57,220 - __main__ - INFO - Stored data for DIS in regression_data
+2025-04-22 18:16:57,721 - __main__ - INFO - Processing metrics for EA
+2025-04-22 18:16:57,787 - __main__ - INFO - Stored data for EA in regression_data
+2025-04-22 18:16:58,289 - __main__ - INFO - Processing metrics for LYV
+2025-04-22 18:16:58,347 - __main__ - INFO - Stored data for LYV in regression_data
+2025-04-22 18:16:58,848 - __main__ - INFO - Processing metrics for NFLX
+2025-04-22 18:16:58,911 - __main__ - INFO - Stored data for NFLX in regression_data
+2025-04-22 18:16:59,412 - __main__ - INFO - Processing metrics for PARA
+2025-04-22 18:16:59,469 - __main__ - INFO - Stored data for PARA in regression_data
+2025-04-22 18:16:59,970 - __main__ - INFO - Processing metrics for TTWO
+2025-04-22 18:17:00,036 - __main__ - INFO - Stored data for TTWO in regression_data
+2025-04-22 18:17:01,096 - root - ERROR - Error in analyze_financial_data: cannot reshape array of size 100000000 into shape (100,100)
+2025-04-22 18:17:01,097 - root - ERROR - An error occurred in main: cannot reshape array of size 100000000 into shape (100,100)
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 636, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 575, in calculate_predictions_and_confidence
+    ci_mesh = confidence_interval[:total_points].reshape((num_points, num_points))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: cannot reshape array of size 100000000 into shape (100,100)
+2025-04-22 18:17:24,936 - __main__ - INFO - Processing metrics for DIS
+2025-04-22 18:17:24,999 - __main__ - INFO - Stored data for DIS in regression_data
+2025-04-22 18:17:25,501 - __main__ - INFO - Processing metrics for EA
+2025-04-22 18:17:25,566 - __main__ - INFO - Stored data for EA in regression_data
+2025-04-22 18:17:26,067 - __main__ - INFO - Processing metrics for LYV
+2025-04-22 18:17:26,129 - __main__ - INFO - Stored data for LYV in regression_data
+2025-04-22 18:17:26,630 - __main__ - INFO - Processing metrics for NFLX
+2025-04-22 18:17:26,698 - __main__ - INFO - Stored data for NFLX in regression_data
+2025-04-22 18:17:27,199 - __main__ - INFO - Processing metrics for PARA
+2025-04-22 18:17:27,262 - __main__ - INFO - Stored data for PARA in regression_data
+2025-04-22 18:17:27,763 - __main__ - INFO - Processing metrics for TTWO
+2025-04-22 18:17:27,829 - __main__ - INFO - Stored data for TTWO in regression_data
+2025-04-22 18:17:28,348 - root - ERROR - Error in analyze_financial_data: cannot reshape array of size 390625 into shape (25,25)
+2025-04-22 18:17:28,349 - root - ERROR - An error occurred in main: cannot reshape array of size 390625 into shape (25,25)
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 636, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 575, in calculate_predictions_and_confidence
+    ci_mesh = confidence_interval[:total_points].reshape((num_points, num_points))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: cannot reshape array of size 390625 into shape (25,25)
+2025-04-22 18:17:43,358 - __main__ - INFO - Processing metrics for DIS
+2025-04-22 18:17:43,421 - __main__ - INFO - Stored data for DIS in regression_data
+2025-04-22 18:17:43,923 - __main__ - INFO - Processing metrics for EA
+2025-04-22 18:17:43,984 - __main__ - INFO - Stored data for EA in regression_data
+2025-04-22 18:17:44,485 - __main__ - INFO - Processing metrics for LYV
+2025-04-22 18:17:44,547 - __main__ - INFO - Stored data for LYV in regression_data
+2025-04-22 18:17:45,048 - __main__ - INFO - Processing metrics for NFLX
+2025-04-22 18:17:45,112 - __main__ - INFO - Stored data for NFLX in regression_data
+2025-04-22 18:17:45,614 - __main__ - INFO - Processing metrics for PARA
+2025-04-22 18:17:45,680 - __main__ - INFO - Stored data for PARA in regression_data
+2025-04-22 18:17:46,181 - __main__ - INFO - Processing metrics for TTWO
+2025-04-22 18:17:46,245 - __main__ - INFO - Stored data for TTWO in regression_data
+2025-04-22 18:17:46,766 - root - ERROR - Error in analyze_financial_data: cannot reshape array of size 10000 into shape (10,10)
+2025-04-22 18:17:46,766 - root - ERROR - An error occurred in main: cannot reshape array of size 10000 into shape (10,10)
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 636, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 575, in calculate_predictions_and_confidence
+    ci_mesh = confidence_interval[:total_points].reshape((num_points, num_points))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: cannot reshape array of size 10000 into shape (10,10)
+2025-04-22 18:21:15,820 - __main__ - INFO - Processing metrics for DIS
+2025-04-22 18:21:15,887 - __main__ - INFO - Stored data for DIS in regression_data
+2025-04-22 18:21:16,387 - __main__ - INFO - Processing metrics for EA
+2025-04-22 18:21:16,451 - __main__ - INFO - Stored data for EA in regression_data
+2025-04-22 18:21:16,952 - __main__ - INFO - Processing metrics for LYV
+2025-04-22 18:21:17,019 - __main__ - INFO - Stored data for LYV in regression_data
+2025-04-22 18:21:17,521 - __main__ - INFO - Processing metrics for NFLX
+2025-04-22 18:21:17,586 - __main__ - INFO - Stored data for NFLX in regression_data
+2025-04-22 18:21:18,086 - __main__ - INFO - Processing metrics for PARA
+2025-04-22 18:21:18,152 - __main__ - INFO - Stored data for PARA in regression_data
+2025-04-22 18:21:18,652 - __main__ - INFO - Processing metrics for TTWO
+2025-04-22 18:21:18,712 - __main__ - INFO - Stored data for TTWO in regression_data
+2025-04-22 18:21:19,233 - root - ERROR - Error in analyze_financial_data: 'float' object cannot be interpreted as an integer
+2025-04-22 18:21:19,234 - root - ERROR - An error occurred in main: 'float' object cannot be interpreted as an integer
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 636, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 553, in calculate_predictions_and_confidence
+    X1 = np.linspace(X[:, 0].min(), X[:, 0].max(), num_points)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\ProgramData\anaconda3\Lib\site-packages\numpy\core\function_base.py", line 122, in linspace
+    num = operator.index(num)
+          ^^^^^^^^^^^^^^^^^^^
+TypeError: 'float' object cannot be interpreted as an integer
+2025-04-22 18:23:05,776 - __main__ - INFO - Processing metrics for LULU
+2025-04-22 18:23:05,845 - __main__ - INFO - Stored data for LULU in regression_data
+2025-04-22 18:23:06,347 - __main__ - INFO - Processing metrics for NKE
+2025-04-22 18:23:06,409 - __main__ - INFO - Stored data for NKE in regression_data
+2025-04-22 18:23:06,910 - __main__ - INFO - Processing metrics for RL
+2025-04-22 18:23:06,977 - __main__ - INFO - Stored data for RL in regression_data
+2025-04-22 18:23:07,479 - __main__ - INFO - Processing metrics for ROST
+2025-04-22 18:23:07,537 - __main__ - INFO - Stored data for ROST in regression_data
+2025-04-22 18:23:08,038 - __main__ - INFO - Processing metrics for TJX
+2025-04-22 18:23:08,215 - __main__ - INFO - Stored data for TJX in regression_data
+2025-04-22 18:23:08,716 - __main__ - INFO - Processing metrics for TPR
+2025-04-22 18:23:08,781 - __main__ - INFO - Stored data for TPR in regression_data
+2025-04-22 18:23:09,301 - root - ERROR - Error in analyze_financial_data: 'float' object cannot be interpreted as an integer
+2025-04-22 18:23:09,302 - root - ERROR - An error occurred in main: 'float' object cannot be interpreted as an integer
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 642, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 553, in calculate_predictions_and_confidence
+    X1 = np.linspace(X[:, 0].min(), X[:, 0].max(), num_points)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\ProgramData\anaconda3\Lib\site-packages\numpy\core\function_base.py", line 122, in linspace
+    num = operator.index(num)
+          ^^^^^^^^^^^^^^^^^^^
+TypeError: 'float' object cannot be interpreted as an integer
+2025-04-22 18:24:42,465 - __main__ - INFO - Processing metrics for LULU
+2025-04-22 18:24:42,525 - __main__ - INFO - Stored data for LULU in regression_data
+2025-04-22 18:24:43,026 - __main__ - INFO - Processing metrics for NKE
+2025-04-22 18:24:43,091 - __main__ - INFO - Stored data for NKE in regression_data
+2025-04-22 18:24:43,593 - __main__ - INFO - Processing metrics for RL
+2025-04-22 18:24:43,656 - __main__ - INFO - Stored data for RL in regression_data
+2025-04-22 18:24:44,158 - __main__ - INFO - Processing metrics for ROST
+2025-04-22 18:24:44,222 - __main__ - INFO - Stored data for ROST in regression_data
+2025-04-22 18:24:44,723 - __main__ - INFO - Processing metrics for TJX
+2025-04-22 18:24:44,789 - __main__ - INFO - Stored data for TJX in regression_data
+2025-04-22 18:24:45,290 - __main__ - INFO - Processing metrics for TPR
+2025-04-22 18:24:45,363 - __main__ - INFO - Stored data for TPR in regression_data
+2025-04-22 18:24:45,884 - root - ERROR - Error in analyze_financial_data: cannot access local variable 'X_pred' where it is not associated with a value
+2025-04-22 18:24:45,884 - root - ERROR - An error occurred in main: cannot access local variable 'X_pred' where it is not associated with a value
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 642, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 513, in analyze_financial_data
+    calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 561, in calculate_predictions_and_confidence
+    X_pred = X_pred[:total_points]
+             ^^^^^^
+UnboundLocalError: cannot access local variable 'X_pred' where it is not associated with a value
+2025-04-22 18:26:46,588 - __main__ - INFO - Processing metrics for LULU
+2025-04-22 18:26:46,656 - __main__ - INFO - Stored data for LULU in regression_data
+2025-04-22 18:26:47,157 - __main__ - INFO - Processing metrics for NKE
+2025-04-22 18:26:47,334 - __main__ - INFO - Stored data for NKE in regression_data
+2025-04-22 18:26:47,835 - __main__ - INFO - Processing metrics for RL
+2025-04-22 18:26:47,897 - __main__ - INFO - Stored data for RL in regression_data
+2025-04-22 18:26:48,399 - __main__ - INFO - Processing metrics for ROST
+2025-04-22 18:26:48,463 - __main__ - INFO - Stored data for ROST in regression_data
+2025-04-22 18:26:48,965 - __main__ - INFO - Processing metrics for TJX
+2025-04-22 18:26:49,029 - __main__ - INFO - Stored data for TJX in regression_data
+2025-04-22 18:26:49,531 - __main__ - INFO - Processing metrics for TPR
+2025-04-22 18:26:49,595 - __main__ - INFO - Stored data for TPR in regression_data
+2025-04-22 18:27:12,805 - root - ERROR - Error in analyze_financial_data: not enough values to unpack (expected 5, got 2)
+2025-04-22 18:27:12,805 - root - ERROR - An error occurred in main: not enough values to unpack (expected 5, got 2)
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 642, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 512, in analyze_financial_data
+    X1, X2, y_pred, confidence_interval, model = \
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: not enough values to unpack (expected 5, got 2)
+2025-04-22 18:28:39,648 - __main__ - INFO - Processing metrics for ALLE
+2025-04-22 18:28:39,727 - __main__ - INFO - Stored data for ALLE in regression_data
+2025-04-22 18:28:40,227 - __main__ - INFO - Processing metrics for AOS
+2025-04-22 18:28:40,295 - __main__ - INFO - Stored data for AOS in regression_data
+2025-04-22 18:28:40,797 - __main__ - INFO - Processing metrics for BLDR
+2025-04-22 18:28:40,874 - __main__ - INFO - Stored data for BLDR in regression_data
+2025-04-22 18:28:41,375 - __main__ - INFO - Processing metrics for CARR
+2025-04-22 18:28:41,449 - __main__ - INFO - Stored data for CARR in regression_data
+2025-04-22 18:28:41,951 - __main__ - INFO - Processing metrics for JCI
+2025-04-22 18:28:42,022 - __main__ - INFO - Stored data for JCI in regression_data
+2025-04-22 18:28:42,523 - __main__ - INFO - Processing metrics for MAS
+2025-04-22 18:28:42,712 - __main__ - INFO - Stored data for MAS in regression_data
+2025-04-22 18:28:43,213 - __main__ - INFO - Processing metrics for MLM
+2025-04-22 18:28:43,291 - __main__ - INFO - Stored data for MLM in regression_data
+2025-04-22 18:28:43,792 - __main__ - INFO - Processing metrics for TT
+2025-04-22 18:28:43,866 - __main__ - INFO - Stored data for TT in regression_data
+2025-04-22 18:28:44,367 - __main__ - INFO - Processing metrics for VMC
+2025-04-22 18:28:44,433 - __main__ - INFO - Stored data for VMC in regression_data
+2025-04-22 18:29:08,856 - root - ERROR - Error in analyze_financial_data: 'OLSResults' object has no attribute 'coef_'
+2025-04-22 18:29:08,856 - root - ERROR - An error occurred in main: 'OLSResults' object has no attribute 'coef_'
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 642, in main
+    result = process_financial_data(industry_tickers, selected_industry)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 219, in process_financial_data
+    analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 518, in analyze_financial_data
+    'model_coefficients': model.coef_,
+                          ^^^^^^^^^^^
+  File "C:\ProgramData\anaconda3\Lib\site-packages\statsmodels\base\wrapper.py", line 34, in __getattribute__
+    obj = getattr(results, attr)
+          ^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OLSResults' object has no attribute 'coef_'
+2025-04-22 18:32:38,873 - __main__ - INFO - Processing metrics for CAT
+2025-04-22 18:32:38,962 - __main__ - INFO - Stored data for CAT in regression_data
+2025-04-22 18:32:39,463 - __main__ - INFO - Processing metrics for CMI
+2025-04-22 18:32:39,534 - __main__ - INFO - Stored data for CMI in regression_data
+2025-04-22 18:32:40,035 - __main__ - INFO - Processing metrics for DOV
+2025-04-22 18:32:40,113 - __main__ - INFO - Stored data for DOV in regression_data
+2025-04-22 18:32:40,614 - __main__ - INFO - Processing metrics for FTV
+2025-04-22 18:32:40,684 - __main__ - INFO - Stored data for FTV in regression_data
+2025-04-22 18:32:41,185 - __main__ - INFO - Processing metrics for GWW
+2025-04-22 18:32:41,250 - __main__ - INFO - Stored data for GWW in regression_data
+2025-04-22 18:32:41,751 - __main__ - INFO - Processing metrics for HUBB
+2025-04-22 18:32:41,830 - __main__ - INFO - Stored data for HUBB in regression_data
+2025-04-22 18:32:42,332 - __main__ - INFO - Processing metrics for IEX
+2025-04-22 18:32:42,400 - __main__ - INFO - Stored data for IEX in regression_data
+2025-04-22 18:32:42,901 - __main__ - INFO - Processing metrics for IR
+2025-04-22 18:32:42,987 - __main__ - INFO - Stored data for IR in regression_data
+2025-04-22 18:32:43,488 - __main__ - INFO - Processing metrics for ITW
+2025-04-22 18:32:43,555 - __main__ - INFO - Stored data for ITW in regression_data
+2025-04-22 18:32:44,057 - __main__ - INFO - Processing metrics for NDSN
+2025-04-22 18:32:44,133 - __main__ - INFO - Stored data for NDSN in regression_data
+2025-04-22 18:32:44,633 - __main__ - INFO - Processing metrics for OTIS
+2025-04-22 18:32:44,712 - __main__ - INFO - Stored data for OTIS in regression_data
+2025-04-22 18:32:45,214 - __main__ - INFO - Processing metrics for PCAR
+2025-04-22 18:32:45,292 - __main__ - INFO - Stored data for PCAR in regression_data
+2025-04-22 18:32:45,793 - __main__ - INFO - Processing metrics for PH
+2025-04-22 18:32:45,870 - __main__ - INFO - Stored data for PH in regression_data
+2025-04-22 18:32:46,371 - __main__ - INFO - Processing metrics for PNR
+2025-04-22 18:32:46,446 - __main__ - INFO - Stored data for PNR in regression_data
+2025-04-22 18:32:46,948 - __main__ - INFO - Processing metrics for SNA
+2025-04-22 18:32:47,492 - __main__ - INFO - Processing metrics for SWK
+2025-04-22 18:32:47,570 - __main__ - INFO - Stored data for SWK in regression_data
+2025-04-22 18:32:48,070 - __main__ - INFO - Processing metrics for WAB
+2025-04-22 18:32:48,146 - __main__ - INFO - Stored data for WAB in regression_data
+2025-04-22 18:32:48,647 - __main__ - INFO - Processing metrics for XYL
+2025-04-22 18:32:48,726 - __main__ - INFO - Stored data for XYL in regression_data

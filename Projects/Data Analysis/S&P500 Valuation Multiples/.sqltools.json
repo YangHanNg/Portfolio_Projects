@@ -1,7 +1,7 @@
 {
     "connections": [
       {
-        "name": "PostgreSQL from .env",
+        "name": "PostgreSQL",
         "driver": "PostgreSQL",
         "server": "${env:DB_HOST}",
         "port": "${env:DB_PORT}",
