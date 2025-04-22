@@ -1,0 +1,13 @@
+{
+    "connections": [
+      {
+        "name": "PostgreSQL from .env",
+        "driver": "PostgreSQL",
+        "server": "${env:DB_HOST}",
+        "port": "${env:DB_PORT}",
+        "database": "${env:DB_NAME}",
+        "username": "${env:DB_USER}",
+        "password": "${env:DB_PASSWORD}"
+      }
+    ]
+  }

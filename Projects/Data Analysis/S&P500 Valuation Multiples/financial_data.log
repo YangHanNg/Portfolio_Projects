@@ -1,0 +1,28 @@
+2025-04-21 23:04:08,806 - root - ERROR - File not found: SP500.csv
+2025-04-21 23:07:36,148 - root - ERROR - File not found: SP500.csv
+2025-04-21 23:09:02,971 - root - ERROR - File not found: SP500.csv
+2025-04-21 23:11:45,337 - root - ERROR - An error occurred in main: [WinError 3] The system cannot find the path specified: '~/Projects/Data Analysis/S&P500 Valuation Multiples'
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 626, in main
+    os.chdir('~/Projects/Data Analysis/S&P500 Valuation Multiples')
+FileNotFoundError: [WinError 3] The system cannot find the path specified: '~/Projects/Data Analysis/S&P500 Valuation Multiples'
+2025-04-21 23:12:30,473 - root - ERROR - An error occurred in main: [WinError 3] The system cannot find the path specified: '/Projects/Data Analysis/S&P500 Valuation Multiples'
+Traceback (most recent call last):
+  File "c:\Users\ngyan\Portfolio_Projects\Projects\Data Analysis\S&P500 Valuation Multiples\Program 2.py", line 626, in main
+    os.chdir('/Projects/Data Analysis/S&P500 Valuation Multiples')
+FileNotFoundError: [WinError 3] The system cannot find the path specified: '/Projects/Data Analysis/S&P500 Valuation Multiples'
+2025-04-21 23:13:28,196 - __main__ - ERROR - Error creating database connection: connection to server at "localhost" (::1), port 5432 failed: fe_sendauth: no password supplied
+
+2025-04-21 23:13:28,196 - __main__ - ERROR - Error fetching industry metrics for Household Products: connection to server at "localhost" (::1), port 5432 failed: fe_sendauth: no password supplied
+
+2025-04-21 23:13:28,197 - __main__ - WARNING - No industry metrics found for Household Products
+2025-04-21 23:15:29,042 - __main__ - ERROR - Error creating database connection: connection to server at "localhost" (::1), port 5432 failed: fe_sendauth: no password supplied
+
+2025-04-21 23:15:29,042 - __main__ - ERROR - Error fetching industry metrics for Household Products: connection to server at "localhost" (::1), port 5432 failed: fe_sendauth: no password supplied
+
+2025-04-21 23:15:29,043 - __main__ - WARNING - No industry metrics found for Household Products
+2025-04-22 12:00:17,333 - __main__ - ERROR - Error creating database connection: connection to server at "localhost" (::1), port 5432 failed: fe_sendauth: no password supplied
+
+2025-04-22 12:00:17,333 - __main__ - ERROR - Error fetching industry metrics for Household Products: connection to server at "localhost" (::1), port 5432 failed: fe_sendauth: no password supplied
+
+2025-04-22 12:00:17,334 - __main__ - WARNING - No industry metrics found for Household Products

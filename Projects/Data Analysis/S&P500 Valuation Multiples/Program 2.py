@@ -622,6 +622,9 @@ def calculate_predictions_and_confidence(X, y, confidence=0.90):
 def main():
     """Main program execution with industry processing."""
     try:
+        # Set working directory
+        os.chdir('Projects/Data Analysis/S&P500 Valuation Multiples')
+
         # Load SP500 data
         sp500_df = load_sp500_data()
         
