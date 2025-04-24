@@ -1,0 +1,8 @@
+numpy
+pandas
+matplotlib
+scipy
+statsmodels
+requests
+python-dotenv
+psycopg2-binary
