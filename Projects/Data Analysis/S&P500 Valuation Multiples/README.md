@@ -29,7 +29,7 @@ Data are requested from the database in
 
 ### Program 3: Statistical Significance and Visualisation
 
-The statistical calculations
+Contemplating if a third program is needed...
 
 
 ## Financial Technicals
@@ -124,4 +124,4 @@ Both industry averages for RIR and WACC are taken from Prof. Aswath Damodaran's 
 
 ## Statistics Technicals
 
-asd
+Will be populated soon.
