@@ -946,6 +946,9 @@ def process_single_industry(sp500_importer, industry, processor, sp500_df, max_q
 def main():
     """Main program execution with automated industry processing."""
     try:
+        # Set working directory
+        os.chdir('Projects/Data Analysis/S&P500 Valuation Multiples')
+
         # Initialize the database
         if not initialize_database():
             logger.error("Failed to initialize database. Exiting.")
@@ -973,13 +976,8 @@ def main():
         # Load API key
         api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
         if not api_key:
-            # Try to import from a Key module if environment variable isn't set
-            try:
-                from Key import api_keys
-                api_key = api_keys
-            except ImportError:
-                logger.error("No API key found. Please set ALPHA_VANTAGE_API_KEY environment variable or create a Key.py file.")
-                return
+            logger.error("No API key found. Please set ALPHA_VANTAGE_API_KEY environment variable or create a Key.py file.")
+            return
         
         # Initialize the financial data processor
         processor = FinancialDataProcessor(api_key)

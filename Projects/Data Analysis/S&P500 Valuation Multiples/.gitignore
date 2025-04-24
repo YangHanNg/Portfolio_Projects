@@ -1,2 +1,4 @@
 .env
 financial_data.log
+.sqltools.json
+postgres.session.sql

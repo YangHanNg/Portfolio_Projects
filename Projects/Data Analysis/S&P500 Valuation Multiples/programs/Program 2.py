@@ -441,8 +441,9 @@ def calculate_financial_metrics(df, industry_metrics):
         df['Operating Margin'] = safe_division(df['ebit'], df['totalRevenue'])
         df['EBITDA'] = df['ebit'] + df['depreciationAndAmortization']
         df['EBITDA Margin'] = safe_division(df['EBITDA'], df['totalRevenue'])
+        df['DA'] = safe_division(df['depreciationAndAmortization'], df['EBITDA'])
         df['Effective Tax'] = safe_division(df['incomeTaxExpense'], df['incomeBeforeTax'])
-        df['Tax Rate'] = df['Effective Tax'].shift(-2).rolling(window=3, min_periods=1).mean().fillna(0)
+        df['Tax Rate'] = df['Effective Tax'].rolling(window=3, min_periods=1).mean()
         df['After Tax EBIT'] = df['ebit'] * (1 - df['Tax Rate'])
         df['After Tax Operating Margin'] = df['Operating Margin'] * (1 - df['Tax Rate'])
         df['Net CapEx'] = safe_subtract(df['propertyPlantEquipment'], df['propertyPlantEquipment'].shift(-1)) + df['depreciationAndAmortization']
@@ -462,20 +463,17 @@ def calculate_financial_metrics(df, industry_metrics):
             df['Cost of Equity'] * (1 - df['Debt to Equity'])
         )
         
-        df['EV'] = (
-            (df['ebit'] * (1 - df['Tax Rate']) * (1 - df['3Y RIR']) *
-             (1 - ((1 + df['3Y Rev Growth'])**3 / (1 + df['WACC'])**3))) /
+        df['DCF'] = (
+            ((1 - df['3Y RIR']) * (1- df['3Y Rev Growth']) * (1 - ((1 + df['3Y Rev Growth'])**3 / (1 + df['WACC'])**3))) /
             (df['WACC'] - df['3Y Rev Growth']) +
-            (df['ebit'] * (1 - df['Tax Rate']) * (1 + df['3Y Exp Growth']) *
-             (1 - industry_rir) * (1 + df['3Y Rev Growth'])**3) /
+            ((1 - industry_rir) * (1 + df['3Y Rev Growth'])**3 * (1 + df['3Y Exp Growth'])) /
             ((industry_wacc - df['3Y Exp Growth']) * (1 + df['WACC'])**3)
         )
-        df['EV/EBIT'] = safe_division(df['EV'], df['ebit'])
-        df['EV/EBITDA'] = safe_division(df['EV'], df['EBITDA'])
-        df['EV/After Tax EBIT'] = safe_division(df['EV'], df['After Tax EBIT'])
-        df['EV/Sales'] = safe_division(df['EV'], df['totalRevenue'])
-        df['EV/Capital Invested'] = safe_division(df['EV'], df['Capital Invested'])
-
+        df['EV/EBIT'] = (1 - df['Tax Rate']) * df['DCF']
+        df['EV/EBITDA'] = (1 - df['Tax Rate']) * (1 - df['DA']) * df['DCF']
+        df['EV/After Tax EBIT'] = 1 * df['DCF']
+        df['EV/Sales'] = df['After Tax Operating Margin'] * df['DCF']
+        df['EV/Capital Invested'] = df['Return On Invested Capital'] * df['DCF'] 
         # Fill NaNs with 0 for final return
         df.fillna(0, inplace=True)
         return df
@@ -539,15 +537,25 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
     model = sm.OLS(y, X_with_const).fit()
 
     # Convert numpy array to DataFrame for VIF calculation
+    # Calculate VIF
     X_df = pd.DataFrame(X, columns=[x1_name, x2_name])
     vif_data = pd.DataFrame()
-    vif_data["feature"] = X_df.columns
+    vif_data["Metric"] = X_df.columns
     vif_data["VIF"] = [variance_inflation_factor(X_df.values, i) for i in range(X_df.shape[1])]
-    print(vif_data)
-
+    
+    # Calculate BP test
     bp_test = het_breuschpagan(model.resid, model.model.exog)
-    labels = ['Lagrange multiplier statistic', 'p-value', 'f-value', 'f p-value']
-    print(dict(zip(labels, bp_test)))
+    bp_labels = ['LM_statistic', 'p_value', 'f_value', 'f_p_value']
+    bp_data = pd.DataFrame([bp_test], columns=bp_labels)
+    
+    # Create combined diagnostics DataFrame
+    diagnostics = pd.concat([
+        vif_data,
+        pd.DataFrame({'feature': bp_labels, 'value': bp_test})
+    ], ignore_index=True)
+    
+    print("\nRegression Diagnostics:")
+    print(diagnostics)
 
     # Create meshgrid for the regression plane
     num_points = int(100)
@@ -570,8 +578,8 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
     pred_var = pred.var_pred_mean
     t_value = t.ppf((1 + confidence) / 2, df=model.df_resid)
 
-    # Extract just what we need for the confidence intervals
-    confidence_interval = t_value * np.sqrt(pred_var)
+    # Calculate 90% confidence interval directly from standard error
+    confidence_interval = 1.645 * np.sqrt(pred_var)  # 1.645 is the z-score for 90% confidence
 
     # Ensure we have exactly the right number of points to reshape
     if len(confidence_interval) != total_points:
