@@ -1,4 +1,4 @@
-# S&P 500 Valuation Multiples: Linear Regression Data Analysis
+# S&P 500 Valuation Multiples: Statistical Analysis of Trading Multiple Pricing 
 ### Project Outline
 
 This is a data analysis project inspired by NYU Stern Business School Prof. Aswath Damodaran from his Valuations course. It is a relative valuation method built upon traditional comparable companies analysis. It is based upon Discounted Cash Flow (DCF) calculations to derive Enterprise Value (EV) using metrics that is Weighted Average Cost of Capital (WACC), Reinvestment Rate (RIR), Expected Growth Rate Etc. These financial metrics represent independent variables for dependent variable EV, as such, it allows the opportunity for a linear regression study to interpret the performances of companies relative to their industry peers. The regressed line would serve as a projection tool built on the performance of the industry, and thus, it presents the idea of under/over-pricing of companies as their current financial metrics are projected forward. 
