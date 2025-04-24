@@ -35,7 +35,7 @@ The following will be a rolling descriptions of projects I am doing, their brief
 
 <br>
 
-## #1 S&P 500 Valuation Multiple
+## #1 S&P500 Valuation Multiple: Statistical Analysis of Trading Multiple Pricing 
 
 Last Updated: 24/Apr/2025 &nbsp; &nbsp; Status: Ongoing
 
