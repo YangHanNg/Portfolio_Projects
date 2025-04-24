@@ -10,10 +10,11 @@ Hopefully they are organised to your liking and that all README files would fill
 ### S&P 500 Valuation Multiple
 
 Last Updated: 24/Apr/2025 
+
 Status: Ongoing
 
 #### Summary
-
+The 
 
 
 #### Key Features
@@ -25,6 +26,8 @@ Status: Ongoing
 - Finalised database uses SQL queries to retrieve and visualise insights according to industries.
 
 #### Tools & Libraries Used
-
-
+- pandas, numpy
+- matplotlib, seaborn
+- statsmodels / scikit-learn
+- JSON / psycopg2
 
