@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from scipy.stats import t
 import statsmodels.api as sm
 from statsmodels.stats.diagnostic import het_breuschpagan
-from statsmodels.stats.diagnostic import variance_inflation_factor
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 import statsmodels.api as sm
 import logging
 import os
@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import time
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from matplotlib.lines import Line2D
 
 # Load environment variables
 load_dotenv()
@@ -562,83 +563,146 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
     print("\nRegression Diagnostics:")
     print(diagnostics)
 
+    # === Font and style settings ===
     plt.rcParams.update({
-    'font.family': 'Courier New',  # monospace font
-    'font.size': 20,
-    'axes.titlesize': 20,
-    'axes.labelsize': 20,
-    'xtick.labelsize': 20,
-    'ytick.labelsize': 20,
-    'legend.fontsize': 20,
-    'figure.titlesize': 20
-    }) 
+    'font.family': 'Courier New',
+    'font.size': 14,
+    'axes.titlesize': 18,
+    'axes.labelsize': 14,
+    'xtick.labelsize': 12,
+    'ytick.labelsize': 12,
+    'legend.fontsize': 14,
+    'figure.titlesize': 20,
+    'axes.grid': True,
+    'grid.alpha': 0.3,
+    'grid.linestyle': '--',
+    })
 
-    # Create meshgrid for the regression plane
-    num_points = int(100)
-    X1 = np.linspace(X[:, 0].min(), X[:, 0].max(), num_points)
-    X2 = np.linspace(X[:, 1].min(), X[:, 1].max(), num_points)
+    # === Color palette ===
+    scatter_color = '#9671bd'        # soft purple
+    scatter_edge_color = '#6a408d'   # deeper purple
+    surface_cmap = 'plasma'          # colorful surface
+    confidence_color = 'red'         # light red CI surfaces
+
+    # === Create meshgrid for the regression plane ===
+    num_points = 100
+    buffer_ratio = 0.10  # 10% buffer for x and y axes
+
+    x_min, x_max = X[:, 0].min(), X[:, 0].max()
+    y_min, y_max = X[:, 1].min(), X[:, 1].max()
+
+    x_buffer = buffer_ratio * (x_max - x_min)
+    y_buffer = buffer_ratio * (y_max - y_min)
+
+    X1 = np.linspace(x_min - x_buffer, x_max + x_buffer, num_points)
+    X2 = np.linspace(y_min - y_buffer, y_max + y_buffer, num_points)
     x1_mesh, x2_mesh = np.meshgrid(X1, X2)
 
-    # Create prediction points from meshgrid
+    # Predict on mesh
     X_pred = np.column_stack((x1_mesh.ravel(), x2_mesh.ravel()))
     X_pred_with_const = sm.add_constant(X_pred)
-
-    # Calculate total points in the meshgrid
-    total_points = num_points * num_points
-
-    # Get predictions
     y_pred = model.predict(X_pred_with_const)
 
-    # Calculate prediction intervals (make sure we get exactly the right number)
-    pred = model.get_prediction(X_pred_with_const)
-    pred_var = pred.var_pred_mean
+    # Calculate constant confidence interval based on residual variance
+    sigma = np.sqrt(np.mean(model.resid**2))  # Root mean squared error
     t_value = t.ppf((1 + confidence) / 2, df=model.df_resid)
+    confidence_margin = t_value * sigma
 
-    # Calculate 90% confidence interval directly from standard error
-    confidence_interval = t_value * np.sqrt(pred_var)  # 1.645 is the z-score for 90% confidence
-
-    # Ensure we have exactly the right number of points to reshape
-    if len(confidence_interval) != total_points:
-        confidence_interval = confidence_interval[:total_points]
-
-    # Reshape to match the grid
+    # Reshape predicted surface
     z_mesh = y_pred.reshape((num_points, num_points))
-    ci_mesh = confidence_interval.reshape((num_points, num_points))
 
-    # Create 3D plot
-    fig = plt.figure(figsize=(12, 8))
+    # === Create 3D figure ===
+    fig = plt.figure(figsize=(14, 10))
     ax = fig.add_subplot(111, projection='3d')
 
-    # Plot actual data points
-    ax.scatter(X[:, 0], X[:, 1], y, color='blue', label='Actual Data')
+    # Set background color
+    ax.set_facecolor('white')
+    fig.patch.set_facecolor('white')
 
-    # Plot regression surface
-    surf = ax.plot_surface(x1_mesh, x2_mesh, z_mesh, 
-                           alpha=0.3, cmap='viridis')
+    # === Plot actual data points ===
+    ax.scatter(
+    X[:, 0], X[:, 1], y,
+    s=100,
+    color=scatter_color,
+    edgecolors=scatter_edge_color,
+    linewidths=2.0,
+    alpha=1.0,
+    label='Actual Data',
+    zorder=10
+    )
 
-    # Plot upper and lower confidence bounds
-    ax.plot_surface(x1_mesh, x2_mesh, z_mesh + ci_mesh, 
-                    alpha=0.1, color='red')
-    ax.plot_surface(x1_mesh, x2_mesh, z_mesh - ci_mesh, 
-                    alpha=0.1, color='red')
-    
+    # === Plot regression surface ===
+    surf = ax.plot_surface(
+    x1_mesh, x2_mesh, z_mesh,
+    cmap=surface_cmap,
+    alpha=0.6,
+    edgecolor='gray',
+    linewidth=0.5,
+    rstride=10, cstride=10
+    )
 
-    # Labels and title
+    # === Plot confidence interval surfaces (linear CI) ===
+    ax.plot_surface(
+    x1_mesh, x2_mesh, z_mesh + confidence_margin,
+    color=confidence_color, alpha=0.2, edgecolor='none'
+    )
+    ax.plot_surface(
+    x1_mesh, x2_mesh, z_mesh - confidence_margin,
+    color=confidence_color, alpha=0.2, edgecolor='none'
+    )
+
+    # === Set colorbar ===
+    mappable = plt.cm.ScalarMappable(cmap=surface_cmap)
+    mappable.set_array(z_mesh)
+    fig.colorbar(mappable, ax=ax, shrink=0.5, aspect=10, pad=0.1)
+
+    # === Axes labels and title ===
     ax.set_xlabel(f'{x1_name}')
     ax.set_ylabel(f'{x2_name}')
     ax.set_zlabel(f'{multiple}')
-    ax.set_title(
-        f"Linear Regression Model of {selected_industry} Industry with {int(confidence * 100)}% Confidence Interval\n"
-        f"Multiple: {multiple}, Year: {index}"
+    fig.suptitle(
+    f"3D Regression Model of {selected_industry} Industry\n"
+    f"Multiple: {multiple}, Year: {index} ({int(confidence * 100)}% CI)",
+    fontsize=20,
+    y=0.95
     )
 
-    # Add colorbar
-    fig.colorbar(surf, ax=ax, shrink=0.5, aspect=5)
+    # === Dynamic axis limits ===
+    ax.set_xlim(x_min - x_buffer, x_max + x_buffer)
+    ax.set_ylim(y_min - y_buffer, y_max + y_buffer)
+
+    z_min, z_max = y.min(), y.max()
+    z_buffer = 0.2 * (z_max - z_min)
+    ax.set_zlim(z_min - z_buffer, z_max + z_buffer)
+
+    # === Grid styling ===
+    ax.xaxis._axinfo['grid'].update(color='gray', linestyle='--', alpha=0.3)
+    ax.yaxis._axinfo['grid'].update(color='gray', linestyle='--', alpha=0.3)
+    ax.zaxis._axinfo['grid'].update(color='gray', linestyle='--', alpha=0.3)
+
+    # === Adjust 3D view ===
+    ax.view_init(elev=35, azim=140)
+
+    # === Legend (custom, positioned manually) ===
+    custom_lines = [
+    Line2D([0], [0], marker='o', color='w', label='Actual Data',
+           markerfacecolor=scatter_color, markeredgecolor=scatter_edge_color, markersize=10),
+    Line2D([0], [0], color='black', lw=4, label='Regression Surface'), 
+    Line2D([0], [0], color='red', lw=4, linestyle='--', label='Confidence Interval')
+    ]
+
+    fig.legend(
+        handles=custom_lines,
+        loc='upper center',
+        bbox_to_anchor=(0.5, 0.88),
+        ncol=3,
+        frameon=False
+    )
 
     plt.show()
     print(model.summary())
 
-    return confidence_interval, model
+    return confidence_margin, model
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------    
 
