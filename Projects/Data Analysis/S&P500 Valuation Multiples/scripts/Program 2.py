@@ -1,11 +1,10 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt 
-pd.set_option('future.no_silent_downcasting', True)
 from scipy.stats import t
 import statsmodels.api as sm
-from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.stats.diagnostic import het_breuschpagan
+from statsmodels.stats.diagnostic import variance_inflation_factor
 import statsmodels.api as sm
 import logging
 import os
@@ -18,14 +17,20 @@ from psycopg2.extras import RealDictCursor
 load_dotenv()
 
 # Logging setup
+# Create logs directory if it doesn't exist
+log_dir = 'Projects/Data Analysis/S&P500 Valuation Multiples'
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("financial_data.log"),
+        logging.FileHandler(os.path.join(log_dir, "financial_data.log")),
         logging.StreamHandler()
     ]
 )
+
 logger = logging.getLogger(__name__)
 
 # Database configuration
@@ -39,7 +44,7 @@ DB_CONFIG = {
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def load_sp500_data(file_path='SP500.csv'):
+def load_sp500_data(file_path='data/SP500.csv'):
     """
     Load and validate SP500 CSV data.
     
@@ -557,6 +562,17 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
     print("\nRegression Diagnostics:")
     print(diagnostics)
 
+    plt.rcParams.update({
+    'font.family': 'Courier New',  # monospace font
+    'font.size': 20,
+    'axes.titlesize': 20,
+    'axes.labelsize': 20,
+    'xtick.labelsize': 20,
+    'ytick.labelsize': 20,
+    'legend.fontsize': 20,
+    'figure.titlesize': 20
+    }) 
+
     # Create meshgrid for the regression plane
     num_points = int(100)
     X1 = np.linspace(X[:, 0].min(), X[:, 0].max(), num_points)
@@ -579,7 +595,7 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
     t_value = t.ppf((1 + confidence) / 2, df=model.df_resid)
 
     # Calculate 90% confidence interval directly from standard error
-    confidence_interval = 1.645 * np.sqrt(pred_var)  # 1.645 is the z-score for 90% confidence
+    confidence_interval = t_value * np.sqrt(pred_var)  # 1.645 is the z-score for 90% confidence
 
     # Ensure we have exactly the right number of points to reshape
     if len(confidence_interval) != total_points:
@@ -605,6 +621,7 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
                     alpha=0.1, color='red')
     ax.plot_surface(x1_mesh, x2_mesh, z_mesh - ci_mesh, 
                     alpha=0.1, color='red')
+    
 
     # Labels and title
     ax.set_xlabel(f'{x1_name}')

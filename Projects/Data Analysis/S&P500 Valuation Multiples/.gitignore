@@ -1,3 +1,2 @@
 .env
 financial_data.log
-postgres.session.sql
