@@ -11,6 +11,8 @@ This is a data analysis project inspired by NYU Stern Business School Prof. Aswa
 - Reinserting the XYZ financials of Company A to the regressed line would threfore predict their potential EV/EBITDA in the industry.
 - The potential EV/EBITDA of Company A could be higher or lower than the current multiple, therefore, higher potential EV/EBITDA indicates an underpricing of Company A in the industry and vice versa.
 
+<br>
+
 ## Execution
 
 The project is broken into three distinct stages represented by the respective python program files from Program 1-3. Each program aims to cover different aspects the project beginning from the data retrieval and database storage in Program 1, data request and metric calculations in Program 2, and finally the presentation of data through visualisation in Program 3. 
@@ -29,8 +31,9 @@ Data are requested from the database in
 
 ### Program 3: Statistical Significance and Visualisation
 
-The statistical calculations
+Contemplating if a third program is needed...
 
+<br>
 
 ## Financial Technicals
 
@@ -122,6 +125,8 @@ To acquire each specific credit rating as well as the ERP for the 500 companies 
 
 Both industry averages for RIR and WACC are taken from Prof. Aswath Damodaran's website because the WACC calculations used for the large scale analysis are inaccurate as discussed previously. The RIR should in theory be used as the average of RIR accross industry, however to implement this feature would increase the operation performed as metrics need to be calculated, stored, and further calculations before the actual analysis. The unlevered beta used for WACC are also source from Prof. Aswath Damodaran on the same basis that levered beta are company specific that needs the unlevered and re-levered for WACC calculations.
 
+<br>
+
 ## Statistics Technicals
 
-asd
+Will be populated soon.
