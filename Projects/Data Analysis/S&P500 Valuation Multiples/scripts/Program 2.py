@@ -169,10 +169,8 @@ def process_financial_data(symbols, selected_industry):
     
     # Create column mapping in case of different column names
     column_mapping = {
-        'Operating Margin': 'Operating Margin',
-        'WACC': 'WACC',
-        'Sales to Capital': 'Sales to Capital',
-        'EBITDA Margin': 'EBITDA Margin',
+        'After Tax Operating Margin': 'After Tax Operating Margin',
+        'DA': 'DA',
         '3Y Exp Growth': '3Y Exp Growth',  # Possible different name
         '3Y Rev Growth': '3Y Rev Growth',   # Possible different name
         'Return On Invested Capital': 'Return On Invested Capital',  # Note the 'On' vs 'on'
@@ -181,7 +179,7 @@ def process_financial_data(symbols, selected_industry):
         'EV/After Tax EBIT': 'EV/After Tax EBIT',
         'EV/Sales': 'EV/Sales',
         'EV/Capital Invested': 'EV/Capital Invested'
-        }
+        }  
     
     for symbol in symbols:
         logger.info(f"Processing metrics for {symbol}")
@@ -496,33 +494,51 @@ def analyze_financial_data(data, selected_industry, confidence=0.90):
         regress_data = {}
 
         regression_format = {
-            'EV/EBIT': ['Operating Margin', 'WACC'],
-            'EV/EBITDA': ['Sales to Capital', 'EBITDA Margin'],
-            'EV/After Tax EBIT': ['3Y Exp Growth', 'WACC'],
-            'EV/Sales': ['Operating Margin', '3Y Rev Growth'],
-            'EV/Capital Invested': ['Return On Invested Capital', 'WACC']
+            'EV/EBIT': ['Return On Invested Capital', '3Y Rev Growth'],
+            'EV/After Tax EBIT': ['Return On Invested Capital', 'After Tax Operating Margin'],
+            'EV/EBITDA': ['Return On Invested Capital', 'DA'],
+            'EV/Sales': ['After Tax Operating Margin', '3Y Rev Growth'],
+            'EV/Capital Invested': ['Return On Invested Capital', '3Y Exp Growth']
         }
         index = data['Row_Index'].iloc[0]
 
         for multiple, (x1_name, x2_name) in regression_format.items():
             # Convert to pandas series first to handle any potential missing values
-            y_multiple = pd.to_numeric(data[multiple], errors='coerce').values
-            x1 = pd.to_numeric(data[x1_name], errors='coerce').values
-            x2 = pd.to_numeric(data[x2_name], errors='coerce').values
+            numeric_data = data[[multiple, x1_name, x2_name]].apply(pd.to_numeric, errors='coerce')
+            y_multiple = numeric_data[multiple].values
+            x1 = numeric_data[x1_name].values
+            x2 = numeric_data[x2_name].values
             
             # Create the design matrix X
             X = np.column_stack((x1, x2))
 
             # Calculate predictions and confidence intervals
-            confidence_interval, model = \
+            confidence_interval, model, diagnostics = \
                 calculate_predictions_and_confidence(X, y_multiple,multiple, x1_name, x2_name, index, confidence, selected_industry=selected_industry)
 
             # Store data in regression dictionary
             regress_data[multiple] = {
-                'confidence_interval': confidence_interval,
-                'model_coefficients': model.params[1:],
-                'model_intercept': model.params[0],
-            }   
+                'Summary':{
+                'coefficients': model.params,
+                'standard_errors': model.bse,
+                'p_values': model.pvalues,
+                't_values': model.tvalues,
+                'r_squared': model.rsquared,
+                'adj_r_squared': model.rsquared_adj,
+                'f_statistic': model.fvalue,
+                'f_pvalue': model.f_pvalue,
+                'degrees_of_freedom_model': model.df_model,
+                'degrees_of_freedom_resid': model.df_resid
+                },
+                'Diagnostics': {
+                    metric: [val, passed] for metric, val, passed in zip(
+                        diagnostics['Metric'], 
+                        diagnostics['Value'],
+                        diagnostics['Pass']
+                    )
+                }}
+            print(f"\nRegression Analysis for {multiple}:\n")
+            print(regress_data)
 
         data['Regression'] = regress_data
         
@@ -542,23 +558,28 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
     # Fit the model using statsmodels
     model = sm.OLS(y, X_with_const).fit()
 
-    # Convert numpy array to DataFrame for VIF calculation
-    # Calculate VIF
+    # === Calculate VIF ===
     X_df = pd.DataFrame(X, columns=[x1_name, x2_name])
     vif_data = pd.DataFrame()
     vif_data["Metric"] = X_df.columns
-    vif_data["VIF"] = [variance_inflation_factor(X_df.values, i) for i in range(X_df.shape[1])]
-    
-    # Calculate BP test
+    vif_data["Value"] = [variance_inflation_factor(X_df.values, i) for i in range(X_df.shape[1])]
+    vif_data["Pass"] = vif_data["Value"] < 5  # VIF < 5 considered pass
+
+    # === Calculate Breusch-Pagan ===
     bp_test = het_breuschpagan(model.resid, model.model.exog)
     bp_labels = ['LM_statistic', 'p_value', 'f_value', 'f_p_value']
-    bp_data = pd.DataFrame([bp_test], columns=bp_labels)
-    
-    # Create combined diagnostics DataFrame
-    diagnostics = pd.concat([
-        vif_data,
-        pd.DataFrame({'feature': bp_labels, 'value': bp_test})
-    ], ignore_index=True)
+    bp_values = bp_test
+
+    bp_pass_flags = [False, bp_values[1] > 0.05, False, False]
+
+    bp_data = pd.DataFrame({
+        "Metric": bp_labels,
+        "Value": bp_values,
+        "Pass": bp_pass_flags
+    })
+
+    # === Combine all into one table ===
+    diagnostics = pd.concat([vif_data, bp_data], ignore_index=True)
     
     print("\nRegression Diagnostics:")
     print(diagnostics)
@@ -699,10 +720,7 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
         frameon=False
     )
 
-    plt.show()
-    print(model.summary())
-
-    return confidence_margin, model
+    return confidence_margin, model, diagnostics
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------    
 
