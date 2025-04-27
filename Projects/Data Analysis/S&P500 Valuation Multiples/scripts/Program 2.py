@@ -1,11 +1,10 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt 
-from scipy.stats import t
+from scipy.stats import t, normaltest
 import statsmodels.api as sm
-from statsmodels.stats.diagnostic import het_breuschpagan
+from statsmodels.stats.diagnostic import het_breuschpagan, linear_reset
 from statsmodels.stats.outliers_influence import variance_inflation_factor
-import statsmodels.api as sm
 import logging
 import os
 from dotenv import load_dotenv
@@ -468,7 +467,7 @@ def calculate_financial_metrics(df, industry_metrics):
         )
         
         df['DCF'] = (
-            ((1 - df['3Y RIR']) * (1- df['3Y Rev Growth']) * (1 - ((1 + df['3Y Rev Growth'])**3 / (1 + df['WACC'])**3))) /
+            ((1 - df['3Y RIR']) * (1- df['3Y Rev Growth']) * (1 - ((1 + df['3Y Rev Growth'])**3 / (1 + df['WACC'])**3))) / 
             (df['WACC'] - df['3Y Rev Growth']) +
             ((1 - industry_rir) * (1 + df['3Y Rev Growth'])**3 * (1 + df['3Y Exp Growth'])) /
             ((industry_wacc - df['3Y Exp Growth']) * (1 + df['WACC'])**3)
@@ -509,7 +508,7 @@ def analyze_financial_data(data, selected_industry, confidence=0.90):
             x1 = numeric_data[x1_name].values
             x2 = numeric_data[x2_name].values
             
-            # Create the design matrix X
+            # Create the design matrix X 
             X = np.column_stack((x1, x2))
 
             # Calculate predictions and confidence intervals
@@ -565,6 +564,14 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
     vif_data["Value"] = [variance_inflation_factor(X_df.values, i) for i in range(X_df.shape[1])]
     vif_data["Pass"] = vif_data["Value"] < 5  # VIF < 5 considered pass
 
+    # === Check for linearity ===
+    reset = linear_reset(model, power=2, use_f=True)
+    reset_data = pd.DataFrame({
+    "Metric": ["RESET_f_statistic", "RESET_p_value"],
+    "Value": [reset.fvalue, reset.pvalue],
+    "Pass": [False, reset.pvalue > 0.05]  # Only p-value gets pass/fail
+    })  
+
     # === Calculate Breusch-Pagan ===
     bp_test = het_breuschpagan(model.resid, model.model.exog)
     bp_labels = ['LM_statistic', 'p_value', 'f_value', 'f_p_value']
@@ -578,8 +585,16 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
         "Pass": bp_pass_flags
     })
 
-    # === Combine all into one table ===
-    diagnostics = pd.concat([vif_data, bp_data], ignore_index=True)
+    # === Check for normality using scipy.stats.normaltest ===
+    stat, pval = normaltest(model.resid)
+    normality_data = pd.DataFrame({
+        "Metric": ["Normaltest_statistic", "Normaltest_p_value"],
+        "Value": [stat, pval],
+        "Pass": [False, pval > 0.05]  # Only p-value gets pass/fail
+    })
+
+    # === Combine diagnostics ===
+    diagnostics = pd.concat([vif_data, bp_data, reset_data, normality_data], ignore_index=True)
     
     print("\nRegression Diagnostics:")
     print(diagnostics)
