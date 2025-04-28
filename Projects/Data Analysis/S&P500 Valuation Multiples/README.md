@@ -199,12 +199,179 @@ $$
 - Individual company differences are not captured, which may lead to generalization bias.
 - Collecting firm-specific betas, capital structures, and reinvestment behaviors was out of project scope.
 
+
 ---
 <br>
 
 ## Statistics Technicals
 
-Will be populated soon...
+The statistical analysis framework employs multiple regression diagnostics to ensure the robustness and validity of our EV multiple predictions. Each regression model undergoes four key diagnostic tests, with specific thresholds determining the reliability of the results.
+
+### Regression Diagnostics
+
+1. **Heteroscedasticity Testing**:
+   - Implements Breusch-Pagan test to check for constant variance in residuals
+   - Null hypothesis: Homoscedasticity exists (constant variance)
+   - Test threshold: p-value > 0.05 indicates passing condition
+   - Critical for ensuring unbiased coefficient estimates
+
+2. **Multicollinearity Assessment**:
+   - Utilizes Variance Inflation Factor (VIF) for each predictor
+   - VIF threshold: < 5.0 for all independent variables
+   - Tests independence between:
+     - Return On Invested Capital & Revenue Growth (EV/EBIT)
+     - Return On Invested Capital & Operating Margin (EV/After Tax EBIT)
+     - Return On Invested Capital & DA (EV/EBITDA)
+     - Operating Margin & Revenue Growth (EV/Sales)
+     - Return On Invested Capital & Expected Growth (EV/Capital Invested)
+
+3. **Normality Testing**:
+   - Examines standardized residuals for normal distribution
+   - Calculates mean absolute standardized residuals
+   - Threshold: Mean absolute value < 2.0
+   - Important for valid confidence interval estimation
+
+4. **Linearity Assessment**:
+   - Employs Ramsey RESET test for linear relationship validity
+   - Tests against quadratic terms of fitted values
+   - Passing condition: p-value > 0.05
+   - Essential for regression model specification
+
+### Confidence Interval Construction
+
+The model implements linear confidence intervals for regression predictions using:
+
+$$ CI = \hat{y} \pm t_{\alpha/2,df} \times \sqrt{MSE \times (1 + x_i^T(X^TX)^{-1}x_i)} $$
+
+where:
+- $\hat{y}$ is the predicted value
+- $t_{\alpha/2,df}$ is the t-distribution critical value
+- MSE is the mean squared error
+- $x_i^T(X^TX)^{-1}x_i$ accounts for prediction variance
+
+Key parameters:
+- Confidence level: 90% (adjustable parameter)
+- Degrees of freedom: n - k - 1 (n: observations, k: predictors)
+- Surface visualization: Main regression plane with upper/lower CI bounds
+
+### Model Evaluation Metrics
+
+Each regression analysis captures comprehensive model performance statistics:
+
+1. **Goodness of Fit**:
+   - R² (coefficient of determination)
+   - Adjusted R² (accounts for model complexity)
+   - AIC (Akaike Information Criterion)
+   - BIC (Bayesian Information Criterion)
+
+2. **Statistical Significance**:
+   - F-statistic and corresponding p-value
+   - Individual t-statistics for coefficients
+   - Standard errors for parameter estimates
+
+3. **Theoretical Value Calculation**:
+   For each EV multiple, theoretical values are computed using:
+   
+   $$ Theoretical = \beta_0 + \beta_1X_1 + \beta_2X_2 $$
+   
+   where:
+   - $\beta_0$ is the y-intercept
+   - $\beta_1, \beta_2$ are predictor coefficients
+   - $X_1, X_2$ are the respective financial metrics
+
+### Visualization Framework
+
+The analysis employs 3D visualization techniques to represent:
+
+1. **Surface Plot**:
+   - Regression plane showing predicted relationships
+   - Color gradient indicating prediction magnitude
+   - Mesh grid density: 100 x 100 points
+
+2. **Confidence Bounds**:
+   - Semi-transparent surfaces showing 90% CI
+   - Linear uncertainty bands across prediction space
+   - Buffer ratio: 10% for axis extensions
+
+3. **Data Points**:
+   - Actual observations plotted as scattered points
+   - Color-coded by prediction accuracy
+   - Size: 100 units with edge highlighting
+
+The statistical framework ensures robust analysis across different industry sectors while maintaining interpretability through comprehensive visualization and diagnostics.
+
+--- 
+
+### Financial Context of Regression Models
+
+Each EV multiple regression analyzes specific financial relationships:
+
+1. **EV/EBIT Model**:
+   - Predictors: ROIC and Revenue Growth
+   - Financial Interpretation:
+     - ROIC measures operational efficiency in generating profits from invested capital
+     - Revenue Growth captures company's market expansion and scale potential
+     - Heteroscedasticity here would indicate varying prediction reliability across different company sizes
+     - High VIF would suggest redundancy between operational efficiency and growth metrics
+
+2. **EV/After Tax EBIT Model**:
+   - Predictors: ROIC and After Tax Operating Margin
+   - Financial Interpretation:
+     - ROIC represents capital efficiency
+     - After Tax Operating Margin shows true operational profitability
+     - Normality violations might indicate industry-specific tax treatment effects
+     - Non-linearity could suggest diminishing returns in operational efficiency
+
+3. **EV/EBITDA Model**:
+   - Predictors: ROIC and DA%
+   - Financial Interpretation:
+     - ROIC maintains focus on operational efficiency
+     - DA% captures capital intensity and reinvestment needs
+     - Heteroscedasticity might indicate varying reliability across capital-intensive vs. light industries
+     - Multicollinearity would suggest overlapping information between efficiency and capital intensity
+
+4. **EV/Sales Model**:
+   - Predictors: After Tax Operating Margin and Revenue Growth
+   - Financial Interpretation:
+     - Operating Margin shows pricing power and cost control
+     - Revenue Growth indicates market penetration
+     - Non-linearity could reveal scaling effects in different growth phases
+     - Residual patterns might show industry-specific margin-growth trade-offs
+
+5. **EV/Capital Invested Model**:
+   - Predictors: ROIC and Expected Growth
+   - Financial Interpretation:
+     - ROIC shows current capital efficiency
+     - Expected Growth represents future value creation potential
+     - Heteroscedasticity might indicate varying reliability across growth stages
+     - High VIF could suggest current efficiency predicting future growth
+
+### Diagnostic Implications for Financial Analysis
+
+1. **Heteroscedasticity Impact**:
+   - Higher variance in larger companies could indicate size-related risk factors
+   - Industry-specific volatility patterns might suggest structural differences
+   - Market cycle effects on prediction reliability
+   - Capital structure influence on valuation stability
+
+2. **Multicollinearity Considerations**:
+   - Strong ROIC-Growth correlation might indicate sustainable competitive advantages
+   - Margin-Growth relationships could reveal industry maturity stage
+   - Operating leverage effects on multiple relationships
+   - Capital intensity influence on operational metrics
+
+3. **Normality Implications**:
+   - Skewed residuals might indicate industry transformation phases
+   - Outliers could represent companies with unique business models
+   - Heavy tails might suggest higher frequency of extreme valuations
+   - Industry consolidation effects on valuation distribution
+
+4. **Linearity Context**:
+   - Non-linear relationships might indicate:
+     - Economies of scale effects
+     - Market saturation points
+     - Competitive dynamics changes
+     - Industry lifecycle stages
 
 ---
 <br>
