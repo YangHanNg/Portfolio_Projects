@@ -70,8 +70,6 @@ Program 2 focuses on retrieving the stored financial data and performing complex
 
 <br>
 
-## Financial Technicals
-
 ## EV Multiples and Financial Metric Methodology
 
 This section describes how EV multiples are calculated using company financial metrics. An intrinsic DCF framework is applied to approximate the relationship between financial ratios and EV multiples. Project limitations are discussed, focusing on assumptions and generalizations necessary for large-scale S&P 500 analysis.
@@ -92,13 +90,13 @@ $$ FCFF = EBIT \times (1 - Tax\ Rate) \times (1 - RIR) $$
 
 | Metric | Notation | Formula |
 |--------|----------|---------|
-| Revenue Growth Rate | **Rev. Growth** | \( 1 - \frac{Current\ Revenue}{Previous\ Revenue} \) |
-| After-Tax Operating Margin | **ATOM** | \( EBIT \times (1 - Tax\ Rate) \) |
-| Reinvestment Rate | **RIR** | \( \frac{Free\ Cash\ Flow}{ATOM} \) |
-| Sales to Capital | **SC** | \( \frac{Sales}{Capital\ Invested} \) |
-| Return on Invested Capital | **ROIC** | \( ATOM \times Sales\ to\ Capital \) |
-| Percentage D&A | **DA%** | \( \frac{DA}{EBITDA} \) |
-| Expected Growth Rate | **Exp. Growth** | \( RIR \times ROIC \) |
+| Revenue Growth Rate | **Rev. Growth** | $\left( 1 - \frac{Current\ Revenue}{Previous\ Revenue} \right) $|
+| After-Tax Operating Margin | **ATOM** | $\( EBIT \times (1 - Tax\ Rate) \)$ |
+| Reinvestment Rate | **RIR** | $\left( \frac{Free\ Cash\ Flow}{ATOM} \right)$ |
+| Sales to Capital | **SC** | $\left( \frac{Sales}{Capital\ Invested} \right)$ |
+| Return on Invested Capital | **ROIC** | $\( ATOM \times Sales\ to\ Capital \)$ |
+| Percentage D&A | **DA%** | $\left( \frac{DA}{EBITDA} \right)$ |
+| Expected Growth Rate | **Exp. Growth** | $\( RIR \times ROIC \)$ |
 | Industry WACC | **IWACC** | Industry Average WACC |
 | Industry Reinvestment Rate | **IRIR** | Industry Average RIR |
 
