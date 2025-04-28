@@ -71,7 +71,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("S&P500 Valuation Multiples/financial_data.log"),
+        logging.FileHandler(os.path.join(BASE_DIR, "financial_data.log")),
         logging.StreamHandler()
     ]
 )
@@ -280,31 +280,67 @@ def create_tables():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """,
-            "RegressionAnalysis": """
-                CREATE TABLE IF NOT EXISTS RegressionAnalysis (
-                    regression_id SERIAL PRIMARY KEY,
+            "regression_analysis": """
+                CREATE TABLE IF NOT EXISTS regression_analysis (
+                    analysis_id SERIAL PRIMARY KEY,
                     company_id INTEGER REFERENCES Companies(company_id),
                     period_id INTEGER REFERENCES ReportingPeriods(period_id),
-                    multiple_type VARCHAR(50) NOT NULL,
-                    variable1_name VARCHAR(100) NOT NULL,
-                    variable2_name VARCHAR(100) NOT NULL,
+                    multiple_type VARCHAR(50),
+                    analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    r_squared FLOAT,
+                    adj_r_squared FLOAT,
+                    f_statistic FLOAT,
+                    f_pvalue FLOAT,
+                    aic FLOAT,
+                    bic FLOAT,
                     coefficients JSONB,
                     standard_errors JSONB,
-                    p_values JSONB,
                     t_values JSONB,
-                    r_squared DECIMAL(10,4),
-                    adj_r_squared DECIMAL(10,4),
-                    f_statistic DECIMAL(10,4),
-                    f_pvalue DECIMAL(10,4),
-                    diagnostics JSONB,
-                    plot_data BYTEA,
+                    p_values JSONB,
+                    confidence_intervals JSONB,
+                    heteroscedasticity_test JSONB,
+                    multicollinearity_test JSONB,
+                    normality_test JSONB,
+                    linearity_test JSONB,
+                    regression_plot BYTEA,
+                    UNIQUE(company_id, period_id, multiple_type)
+                )
+            """,
+            "regression_diagnostics": """
+                CREATE TABLE IF NOT EXISTS regression_diagnostics (
+                    diagnostic_id SERIAL PRIMARY KEY,
+                    analysis_id INTEGER REFERENCES regression_analysis(analysis_id),
+                    diagnostic_type VARCHAR(50),
+                    test_name VARCHAR(100),
+                    test_value FLOAT,
+                    p_value FLOAT,
+                    passes_threshold BOOLEAN,
+                    threshold_value FLOAT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """,
+            "RegressionCoefficients": """
+                CREATE TABLE IF NOT EXISTS RegressionCoefficients (
+                    coefficient_id SERIAL PRIMARY KEY,
+                    analysis_id INTEGER REFERENCES regression_analysis(analysis_id),
+                    multiple_type VARCHAR(50),
+                    x1_name VARCHAR(100),
+                    x2_name VARCHAR(100),
+                    c1_coefficient FLOAT,
+                    c2_coefficient FLOAT,
+                    y_intercept FLOAT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    CONSTRAINT unique_regression UNIQUE (company_id, period_id, multiple_type)
+                    UNIQUE(analysis_id, multiple_type)
                 )
             """
         }
         
-        # Indexes to create
+        # Execute all table creation statements
+        for name, query in tables.items():
+            execute_query(query)
+            logger.debug(f"Created table: {name}")
+        
+        # Create indexes
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_financial_data_report_id ON FinancialData(report_id)",
             "CREATE INDEX IF NOT EXISTS idx_financial_reports_company_id ON FinancialReports(company_id)",
@@ -315,15 +351,13 @@ def create_tables():
             "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_company ON CalculatedMetrics(company_id)",
             "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_period ON CalculatedMetrics(period_id)",
             "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_name ON CalculatedMetrics(metric_name)",
-            "CREATE INDEX IF NOT EXISTS idx_regression_company ON RegressionAnalysis(company_id)",
-            "CREATE INDEX IF NOT EXISTS idx_regression_period ON RegressionAnalysis(period_id)",
-            "CREATE INDEX IF NOT EXISTS idx_regression_multiple ON RegressionAnalysis(multiple_type)"
+            "CREATE INDEX IF NOT EXISTS idx_regression_company ON regression_analysis(company_id)",
+            "CREATE INDEX IF NOT EXISTS idx_regression_period ON regression_analysis(period_id)",
+            "CREATE INDEX IF NOT EXISTS idx_regression_multiple ON regression_analysis(multiple_type)",
+            "CREATE INDEX IF NOT EXISTS idx_diagnostics_analysis ON regression_diagnostics(analysis_id)",
+            "CREATE INDEX IF NOT EXISTS idx_coefficients_analysis ON RegressionCoefficients(analysis_id)",
+            "CREATE INDEX IF NOT EXISTS idx_coefficients_multiple ON RegressionCoefficients(multiple_type)"
         ]
-        
-        # Execute all table creation statements
-        for name, query in tables.items():
-            execute_query(query)
-            logger.debug(f"Created table: {name}")
         
         # Create all indexes
         for index_query in indexes:
@@ -831,17 +865,18 @@ class SP500DataImporter:
     
     #----------------------------------------------------------------------------------------------------------------------------------
     
-    def get_categorized_industries(self, medium_min=6, medium_max=12):
+def get_categorized_industries(self, medium_min=6, medium_max=12, automated=False):
         """
         Categorize industries into groups based on company count and return filtered results.
     
         Args:
             medium_min (int): Minimum number of companies for medium category
             medium_max (int): Maximum number of companies for medium category
+            automated (bool): Whether the program is running in automated mode
     
         Returns:
             dict: Dictionary with categories of industries and their counts
-            """
+        """
         if self.sp500_df is None:
             self.load_data()
         
@@ -853,10 +888,11 @@ class SP500DataImporter:
                                       (industry_counts <= medium_max)]
         large_industries = industry_counts[industry_counts > medium_max]
     
-        # Log the medium industries (previously done in filter_industries)
-        logger.info(f"Industries with {medium_min}-{medium_max} companies:")
-        for industry, count in medium_industries.items():
-            logger.info(f"{industry}: {count} companies")
+        # Log the medium industries only when not in automated mode
+        if not automated:
+            logger.info(f"Industries with {medium_min}-{medium_max} companies:")
+            for industry, count in medium_industries.items():
+                logger.info(f"{industry}: {count} companies")
     
         # Return categorized industries with counts
         return {
@@ -1061,6 +1097,19 @@ def process_industries(sp500_importer, industry_groups, processor, sp500_df, aut
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+def get_metric_formula(metric_name):
+    """Return formula for calculated metrics."""
+    formulas = {
+        'EV/EBIT_Theoretical': 'C1*Return On Invested Capital + C2*3Y Rev Growth + y-intercept',
+        'EV/After Tax EBIT_Theoretical': 'C1*Return On Invested Capital + C2*After Tax Operating Margin + y-intercept',
+        'EV/EBITDA_Theoretical': 'C1*Return On Invested Capital + C2*DA + y-intercept',
+        'EV/Sales_Theoretical': 'C1*After Tax Operating Margin + C2*3Y Rev Growth + y-intercept',
+        'EV/Capital Invested_Theoretical': 'C1*Return On Invested Capital + C2*3Y Exp Growth + y-intercept'
+    }
+    return formulas.get(metric_name)
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------
+
 def main(run_automated=False):
     """
     Main program execution.
@@ -1086,7 +1135,7 @@ def main(run_automated=False):
         logger.info(f"Loaded {len(sp500_df)} companies from S&P 500 data")
         
         # Get categorized industries
-        industry_groups = sp500_importer.get_categorized_industries()
+        industry_groups = sp500_importer.get_categorized_industries(automated=run_automated)
         
         # Load API key
         api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
