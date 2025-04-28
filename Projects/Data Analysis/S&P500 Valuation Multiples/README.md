@@ -1,15 +1,9 @@
 # S&P 500 Valuation Multiples: Statistical Analysis of Trading Multiple Pricing 
 ### Project Outline
 
-This is a data analysis project inspired by NYU Stern Business School Prof. Aswath Damodaran from his Valuations course. It is a relative valuation method built upon traditional comparable companies analysis. It is based upon Discounted Cash Flow (DCF) calculations to derive Enterprise Value (EV) using metrics that is Weighted Average Cost of Capital (WACC), Reinvestment Rate (RIR), Expected Growth Rate Etc. These financial metrics represent independent variables for dependent variable EV, as such, it allows the opportunity for a linear regression study to interpret the performances of companies relative to their industry peers. The regressed line would serve as a projection tool built on the performance of the industry, and thus, it presents the idea of under/over-pricing of companies as their current financial metrics are projected forward. 
+This is a data analysis project inspired by NYU Stern Business School Prof. Aswath Damodaran from his Valuations course. It is a relative valuation method built upon traditional comparable companies analysis. It is based upon Discounted Cash Flow (DCF) calculations to derive Enterprise Value (EV) using metrics like Weighted Average Cost of Capital (WACC), Reinvestment Rate (RIR), Expected Growth Rate Etc. These financial metrics represent independent variables for dependent variable EV, as such, it allows the opportunity for a linear regression study to interpret the performances of companies relative to their industry peers. The regressed line would serve as a projection tool built on the performance of the industry, and thus, it presents the concept of under/over-pricing of companies as their current financial metrics are projected forward. 
 
-#### For short:
-
-- Company A with XYZ financial metrics would have X EV/EBITDA.
-- The linear regression studies the financials of each company within the industry.
-- The regressed model represent the performance of the industry from the weighted performances of each company.
-- Reinserting the XYZ financials of Company A to the regressed line would threfore predict their potential EV/EBITDA in the industry.
-- The potential EV/EBITDA of Company A could be higher or lower than the current multiple, therefore, higher potential EV/EBITDA indicates an underpricing of Company A in the industry and vice versa.
+The project utilises AlphaVantage API to gather financial data from companies listed in the S&P 500 index. The data includes annual and quarterly Income Statement and Balance Sheet information which are stored in a PostgreSQL database for efficient data management and analysis. The project implements a caching system to track processing progress and avoid redundant API calls, making it resilient to interruptions and mindful of API rate limits.
 
 <br>
 
@@ -17,21 +11,59 @@ This is a data analysis project inspired by NYU Stern Business School Prof. Aswa
 
 The project is broken into three distinct stages represented by the respective python program files from Program 1-3. Each program aims to cover different aspects the project beginning from the data retrieval and database storage in Program 1, data request and metric calculations in Program 2, and finally the presentation of data through visualisation in Program 3. 
 
-### Program 1: Data Retrival from Alpha Vantaga API and Storage to Local PostgreSQL Database
+### Program 1: Data Retrival from Alpha Vantage API and Storage to Local PostgreSQL Database
 
-To maximise the efficiency of data gathering and reducing the redundancy of 
+To maximise the efficiency of data gathering and reducing the redundancy of API calls, Program 1 implements a robust data retrieval and storage system. The program first initializes a PostgreSQL database with a comprehensive schema designed to store company information, financial reports, and various metrics. Key features include:
 
-The data structure of Income Statement and Balance Sheet financials from AlphaVantag are shown in the following .JSON format.
+1. **Database Schema**:
+   - Companies table for storing basic company information including sector and industry classification
+   - Industries table containing sector-specific metrics like cost of capital and growth rates
+   - ReportingPeriods table to track fiscal periods
+   - FinancialReports and FinancialData tables for storing the actual financial data
+   - Additional tables for calculated metrics and regression analysis results
 
+2. **Data Processing**:
+   - Processes companies by industry groups (small: <6 companies, medium: 6-12 companies, large: >12 companies)
+   - Implements a caching system to track progress and resume interrupted processing
+   - Handles both annual and quarterly reports with configurable limits
+   - Includes robust error handling and logging
 
-### Program 2: Database Requests, Metric Calculations, and Appending Data to Database
+3. **API Integration**:
+   - Manages API rate limits with configurable delays between calls
+   - Processes both Balance Sheet and Income Statement data
+   - Validates and transforms data before storage
 
-Data are requested from the database in 
+The data structure retrieved from AlphaVantage follows a standardized JSON format, with separate endpoints for Balance Sheet and Income Statement data. The program processes this data and stores it in a normalized database structure for efficient querying and analysis.
 
+### Program 2: Database Requests, Metric Calculations, and Regression Analysis
 
-### Program 3: Statistical Significance and Visualisation
+Program 2 focuses on retrieving the stored financial data and performing complex calculations to derive various financial metrics and conduct regression analysis. The program features:
 
-Contemplating if a third program is needed...
+1. **Financial Metrics Calculation**:
+   - Computes key metrics including:
+     - Working Capital and Net Working Capital changes
+     - Revenue Growth and Operating Margins
+     - EBITDA and related margins
+     - Reinvestment Rate and Return on Invested Capital
+     - Expected Growth rates and Beta calculations
+
+2. **Industry Analysis**:
+   - Processes companies within their industry groups
+   - Calculates industry-specific metrics and benchmarks
+   - Incorporates industry-level cost of capital and reinvestment rates
+
+3. **Regression Analysis**:
+   - Performs statistical analysis on various EV multiples
+   - Conducts diagnostic tests including:
+     - Heteroscedasticity testing (Breusch-Pagan)
+     - Multicollinearity analysis (VIF)
+     - Normality checks on residuals
+   - Generates confidence intervals and statistical significance measures
+
+4. **Data Storage**:
+   - Stores calculated metrics in dedicated tables
+   - Maintains regression results including coefficients, diagnostics, and visualizations
+   - Preserves analysis history for trending and comparison
 
 <br>
 
