@@ -6,19 +6,72 @@ from psycopg2 import sql
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import logging
 import os
+import time
+from datetime import datetime
+import pickle
+from pathlib import Path
 from dotenv import load_dotenv
 from contextlib import contextmanager
-import time
+from typing import Dict, List, Any
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Cache configuration
+BASE_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DATA_DIR = BASE_DIR / "data"
+CACHE_FILE = DATA_DIR / "processing_state.pkl"
+
+# Create data directory if it doesn't exist
+DATA_DIR.mkdir(exist_ok=True, parents=True)
+
+class ProcessingCache:
+    def __init__(self):
+        self.processed_industries: List[str] = []
+        self.current_industry: str = None
+        self.last_company: str = None
+        self.start_time: float = None
+        self.industry_times: Dict[str, float] = {}
+
+    @classmethod
+    def load(cls) -> 'ProcessingCache':
+        try:
+            if CACHE_FILE.exists():
+                with open(CACHE_FILE, 'rb') as f:
+                    return pickle.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load cache: {e}")
+        return cls()
+
+    def save(self):
+        try:
+            with open(CACHE_FILE, 'wb') as f:
+                pickle.dump(self, f)
+        except Exception as e:
+            logger.error(f"Failed to save cache: {e}")
+
+    def mark_industry_complete(self, industry: str, processing_time: float):
+        self.processed_industries.append(industry)
+        self.industry_times[industry] = processing_time
+        self.current_industry = None
+        self.last_company = None
+        self.save()
+
+    def start_industry(self, industry: str):
+        self.current_industry = industry
+        self.start_time = time.time()
+        self.save()
+
+    def update_progress(self, company: str):
+        self.last_company = company
+        self.save()
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("financial_data.log"),
+        logging.FileHandler("S&P500 Valuation Multiples/financial_data.log"),
         logging.StreamHandler()
     ]
 )
@@ -26,7 +79,7 @@ logger = logging.getLogger(__name__)
 
 # Database configuration from environment variables
 DB_CONFIG = {
-    "dbname": os.getenv("DB_NAME"),
+    "dbname": "postgres",  # Changed from os.getenv("DB_NAME") to use postgres directly
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
     "host": os.getenv("DB_HOST"),
@@ -49,18 +102,18 @@ REPORT_TYPES = {
 def get_db_connection(dbname=None):
     """
     Context manager for database connections.
+    Always connects to postgres database.
     
     Args:
-        dbname (str, optional): Database name. If None, connects to default PostgreSQL server.
+        dbname (str, optional): Not used, kept for compatibility
     
     Yields:
         connection: PostgreSQL connection object
     """
     conn_params = DB_CONFIG.copy()
-    if dbname is None:
-        conn_params.pop("dbname", None)
-    elif dbname != DB_CONFIG["dbname"]:
-        conn_params["dbname"] = dbname
+    
+    # Always use postgres database
+    conn_params["dbname"] = "postgres"
     
     conn = psycopg2.connect(**conn_params)
     try:
@@ -79,18 +132,19 @@ def get_db_connection(dbname=None):
 def execute_query(query, params=None, fetch=False, many=False, dbname=None):
     """
     Execute a database query with proper error handling.
+    Always uses postgres database.
     
     Args:
         query (str): SQL query to execute
         params (tuple or list, optional): Parameters for the query
         fetch (bool, optional): Whether to fetch results
         many (bool, optional): Whether to execute many statements
-        dbname (str, optional): Database name
+        dbname (str, optional): Not used, kept for compatibility
         
     Returns:
         list or None: Query results if fetch is True, otherwise None
     """
-    with get_db_connection(dbname) as conn:
+    with get_db_connection() as conn:
         with conn.cursor() as cursor:
             try:
                 if many and params:
@@ -112,23 +166,15 @@ def execute_query(query, params=None, fetch=False, many=False, dbname=None):
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
 def create_database():
-    """Create the financial database if it doesn't exist."""
+    """Initialize the postgres database schema if needed."""
     try:
-        # Connect to PostgreSQL server (without specifying a database)
-        with get_db_connection(dbname="postgres") as conn:
+        # Connect directly to postgres database
+        with get_db_connection() as conn:
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-            with conn.cursor() as cursor:
-                # Check if database exists
-                cursor.execute("SELECT 1 FROM pg_catalog.pg_database WHERE datname = %s", (DB_CONFIG["dbname"],))
-                exists = cursor.fetchone()
-                
-                if not exists:
-                    cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(DB_CONFIG["dbname"])))
-                    logger.info(f"Database {DB_CONFIG['dbname']} created successfully")
-                else:
-                    logger.info(f"Database {DB_CONFIG['dbname']} already exists")
+            logger.info("Connected to postgres database successfully")
+            return True
     except Exception as e:
-        logger.error(f"Failed to create database: {str(e)}")
+        logger.error(f"Failed to connect to database: {str(e)}")
         raise
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -233,6 +279,28 @@ def create_tables():
                     is_percentage BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
+            """,
+            "RegressionAnalysis": """
+                CREATE TABLE IF NOT EXISTS RegressionAnalysis (
+                    regression_id SERIAL PRIMARY KEY,
+                    company_id INTEGER REFERENCES Companies(company_id),
+                    period_id INTEGER REFERENCES ReportingPeriods(period_id),
+                    multiple_type VARCHAR(50) NOT NULL,
+                    variable1_name VARCHAR(100) NOT NULL,
+                    variable2_name VARCHAR(100) NOT NULL,
+                    coefficients JSONB,
+                    standard_errors JSONB,
+                    p_values JSONB,
+                    t_values JSONB,
+                    r_squared DECIMAL(10,4),
+                    adj_r_squared DECIMAL(10,4),
+                    f_statistic DECIMAL(10,4),
+                    f_pvalue DECIMAL(10,4),
+                    diagnostics JSONB,
+                    plot_data BYTEA,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT unique_regression UNIQUE (company_id, period_id, multiple_type)
+                )
             """
         }
         
@@ -246,7 +314,10 @@ def create_tables():
             "CREATE INDEX IF NOT EXISTS idx_industries_sector ON Industries(sector_name)",
             "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_company ON CalculatedMetrics(company_id)",
             "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_period ON CalculatedMetrics(period_id)",
-            "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_name ON CalculatedMetrics(metric_name)"
+            "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_name ON CalculatedMetrics(metric_name)",
+            "CREATE INDEX IF NOT EXISTS idx_regression_company ON RegressionAnalysis(company_id)",
+            "CREATE INDEX IF NOT EXISTS idx_regression_period ON RegressionAnalysis(period_id)",
+            "CREATE INDEX IF NOT EXISTS idx_regression_multiple ON RegressionAnalysis(multiple_type)"
         ]
         
         # Execute all table creation statements
@@ -591,7 +662,7 @@ class SP500DataImporter:
     
     #----------------------------------------------------------------------------------------------------------------------------------
     
-    def __init__(self, csv_path="SP500.csv"):
+    def __init__(self, csv_path="data/SP500.csv"):  # Updated default path
         """
         Initialize the importer with CSV path, but don't connect to DB yet.
         
@@ -941,11 +1012,85 @@ def process_single_industry(sp500_importer, industry, processor, sp500_df, max_q
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def main():
-    """Main program execution with automated industry processing."""
+def process_industries_automated(sp500_importer, industry_groups, processor, sp500_df):
+    """
+    Automatically process industries starting from smallest to largest with caching and time tracking.
+    
+    Args:
+        sp500_importer: SP500DataImporter instance
+        industry_groups: Dictionary containing categorized industries
+        processor: FinancialDataProcessor instance
+        sp500_df: DataFrame with S&P 500 data
+    """
+    # Initialize cache
+    cache = ProcessingCache.load()
+    
+    # Process industries in order: small -> medium -> large
+    categories = [
+        ('small', industry_groups['small']['industries']),
+        ('medium', industry_groups['medium']['industries']),
+        ('large', industry_groups['large']['industries'])
+    ]
+    
+    total_start_time = time.time()
+    
+    for category, industries in categories:
+        logger.info(f"\nProcessing {category} industries")
+        
+        # Sort industries by company count (ascending)
+        industry_counts = {ind: len(sp500_df[sp500_df['Sector'] == ind]) for ind in industries}
+        sorted_industries = sorted(industries, key=lambda x: industry_counts[x])
+        
+        for industry in sorted_industries:
+            # Skip if already processed
+            if industry in cache.processed_industries:
+                logger.info(f"Skipping {industry} - already processed")
+                continue
+            
+            # Start timing for this industry
+            cache.start_industry(industry)
+            industry_start_time = time.time()
+            
+            try:
+                logger.info(f"\nProcessing {industry} ({industry_counts[industry]} companies)")
+                process_single_industry(sp500_importer, industry, processor, sp500_df)
+                
+                # Calculate and log processing time
+                industry_time = time.time() - industry_start_time
+                cache.mark_industry_complete(industry, industry_time)
+                
+                logger.info(f"Completed {industry} in {industry_time:.2f} seconds")
+                
+            except Exception as e:
+                logger.error(f"Error processing {industry}: {str(e)}")
+                # Save progress even if there's an error
+                cache.save()
+                raise
+            
+            # Add delay between industries
+            if industry != sorted_industries[-1]:
+                logger.info("Waiting 60 seconds before next industry...")
+                time.sleep(60)
+    
+    total_time = time.time() - total_start_time
+    logger.info(f"\nAll industries processed in {total_time:.2f} seconds")
+    logger.info("\nIndustry processing times:")
+    for ind, proc_time in cache.industry_times.items():
+        logger.info(f"{ind}: {proc_time:.2f} seconds")
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------
+
+def main(run_automated=False):
+    """
+    Main program execution.
+    
+    Args:
+        run_automated (bool): If True, runs automated processing instead of menu-based
+    """
     try:
-        # Set working directory
-        os.chdir('Projects/Data Analysis/S&P500 Valuation Multiples')
+        # Set working directory using absolute path
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        os.chdir(os.path.dirname(script_dir))
 
         # Initialize the database
         if not initialize_database():
@@ -962,33 +1107,30 @@ def main():
         # Get categorized industries
         industry_groups = sp500_importer.get_categorized_industries()
         
-        # Medium industries that have already been imported
-        already_imported = ["Information Technology", "Healthcare", "Financials", "Consumer Discretionary"]
-        
-        # Remove already imported industries from the medium list
-        for industry in already_imported:
-            if industry in industry_groups['medium']['industries']:
-                industry_groups['medium']['industries'].remove(industry)
-                logger.info(f"Removed {industry} from medium industries as it has already been imported")
-        
         # Load API key
         api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
         if not api_key:
-            logger.error("No API key found. Please set ALPHA_VANTAGE_API_KEY environment variable or create a Key.py file.")
+            logger.error("No API key found. Please set ALPHA_VANTAGE_API_KEY environment variable.")
             return
         
         # Initialize the financial data processor
         processor = FinancialDataProcessor(api_key)
         
-        # Process industries based on user choice
-        process_industries_menu(sp500_importer, industry_groups, processor, sp500_df)
+        if run_automated:
+            # Run automated processing
+            process_industries_automated(sp500_importer, industry_groups, processor, sp500_df)
+        else:
+            # Process industries based on user choice through menu
+            process_industries_menu(sp500_importer, industry_groups, processor, sp500_df)
             
         logger.info("Financial data processing complete")
         
     except Exception as e:
         logger.error(f"An error occurred in main: {str(e)}", exc_info=True)
 
-#------------------------------------------------------------------------------------------------------------------------------------------------------
-
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Process S&P 500 financial data')
+    parser.add_argument('--automated', action='store_true', help='Run in automated mode')
+    args = parser.parse_args()
+    main(run_automated=args.automated)

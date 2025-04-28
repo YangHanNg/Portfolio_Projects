@@ -9,6 +9,7 @@ import logging
 import os
 from dotenv import load_dotenv
 import time
+import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from matplotlib.lines import Line2D
@@ -66,53 +67,98 @@ def load_sp500_data(file_path='data/SP500.csv'):
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def display_available_industries(sp500_df):
+def process_industries(sp500_df):
     """
-    Display available industries with more than 8 companies.
-    
-    Args:
-        sp500_df (pd.DataFrame): DataFrame containing SP500 data
-    """
-    industry_counts = sp500_df['Sector'].value_counts()
-    print("Available Industries:")
-    for industry, count in industry_counts.items():
-        if count >= 8:
-            print(f"{industry}: {count} companies")
-
-#------------------------------------------------------------------------------------------------------------------------------------------------------
-
-def select_industry(sp500_df):
-    """
-    Interactively select an industry from available options.
+    Process industries by splitting them into two groups: 
+    small industries (< 8 companies) and large industries (>= 8 companies).
+    Small industries skip regression analysis.
     
     Args:
         sp500_df (pd.DataFrame): DataFrame containing SP500 data
     
     Returns:
-        tuple: (selected_industry, industry_tickers) or (None, None)
+        tuple: (small_industries_results, large_industries_results)
     """
-    while True:
-        # Prompt user to select an industry
-        selected_industry = input("\nSelect an industry (or type 'exit' to quit): ").strip()
-        if not selected_industry:
-            logger.warning("Input cannot be empty. Please enter a valid industry.")
-            continue
+    try:
+        # Group industries by size
+        industry_sizes = sp500_df['Sector'].value_counts()
+        small_industries = industry_sizes[industry_sizes < 8].index.tolist()
+        large_industries = industry_sizes[industry_sizes >= 8].index.tolist()
         
-        # Allow user to exit
-        if selected_industry.lower() == 'exit':
-            logger.info("Exiting the program.")
-        if 'Sector' in sp500_df.columns and not sp500_df['Sector'].empty and selected_industry in sp500_df['Sector'].unique():
+        logger.info(f"Found {len(small_industries)} small industries and {len(large_industries)} large industries")
         
-            # Retrieve tickers for the selected industry
-            filtered_df = sp500_df.loc[sp500_df['Sector'] == selected_industry]
-            industry_tickers = filtered_df['Symbol'].tolist()
+        small_industries_results = {}
+        large_industries_results = {}
         
-            print(f"\nSelected Industry: {selected_industry}")
-            print(f"Number of companies: {len(industry_tickers)}")
-            print("Tickers:", ', '.join(industry_tickers))
+        # Process small industries first (skip regression)
+        for industry in small_industries:
+            logger.info(f"Processing small industry: {industry}")
+            industry_tickers = sp500_df[sp500_df['Sector'] == industry]['Symbol'].tolist()
+            
+            try:
+                # Create db connection for this industry
+                conn, cur = create_db_connection()
+                
+                all_metrics = []
+                
+                for symbol in industry_tickers:
+                    logger.info(f"Processing metrics for {symbol} in {industry}")
+                    
+                    # Fetch company financial metrics
+                    df = fetch_financial_metrics(symbol)
+                    
+                    if df is not None and not df.empty:
+                        # Fetch industry metrics
+                        industry_metrics = fetch_industry_metrics(industry)
+                        
+                        if industry_metrics:
+                            # Calculate additional metrics
+                            processed_df = calculate_financial_metrics(df, industry_metrics)
+                            all_metrics.append(processed_df)
+                            
+                            # Get company_id
+                            cur.execute("SELECT company_id FROM Companies WHERE symbol = %s", (symbol,))
+                            company_id = cur.fetchone()['company_id']
+                            
+                            # Save calculated metrics for each reporting period
+                            for i, row in processed_df.iterrows():
+                                cur.execute("""
+                                    SELECT period_id 
+                                    FROM ReportingPeriods 
+                                    WHERE fiscal_date_ending = %s AND period_type = 'Annual'
+                                """, (row['fiscal_date_ending'],))
+                                period_id = cur.fetchone()['period_id']
+                                
+                                # Save the calculated metrics
+                                save_calculated_metrics(processed_df.iloc[[i]], company_id, period_id)
+                
+                if all_metrics:
+                    small_industries_results[industry] = pd.concat(all_metrics, ignore_index=True)
+                    
+            except Exception as e:
+                logger.error(f"Error processing small industry {industry}: {str(e)}")
+                if conn:
+                    conn.rollback()
+            finally:
+                if cur:
+                    cur.close()
+                if conn:
+                    conn.close()
         
-        return selected_industry, industry_tickers
- 
+        # Process large industries (include regression)
+        for industry in large_industries:
+            logger.info(f"Processing large industry: {industry}")
+            industry_tickers = sp500_df[sp500_df['Sector'] == industry]['Symbol'].tolist()
+            result = process_financial_data(industry_tickers, industry)
+            if result is not None:
+                large_industries_results[industry] = result
+        
+        return small_industries_results, large_industries_results
+    
+    except Exception as e:
+        logger.error(f"Error in process_industries: {str(e)}")
+        return None, None
+
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
 def create_db_connection():
@@ -170,69 +216,117 @@ def process_financial_data(symbols, selected_industry):
     column_mapping = {
         'After Tax Operating Margin': 'After Tax Operating Margin',
         'DA': 'DA',
-        '3Y Exp Growth': '3Y Exp Growth',  # Possible different name
-        '3Y Rev Growth': '3Y Rev Growth',   # Possible different name
-        'Return On Invested Capital': 'Return On Invested Capital',  # Note the 'On' vs 'on'
+        '3Y Exp Growth': '3Y Exp Growth',
+        '3Y Rev Growth': '3Y Rev Growth',
+        'Return On Invested Capital': 'Return On Invested Capital',
         'EV/EBIT': 'EV/EBIT',
         'EV/EBITDA': 'EV/EBITDA',
         'EV/After Tax EBIT': 'EV/After Tax EBIT',
         'EV/Sales': 'EV/Sales',
         'EV/Capital Invested': 'EV/Capital Invested'
-        }  
+    }
     
-    for symbol in symbols:
-        logger.info(f"Processing metrics for {symbol}")
-        
-        # Step 1: Fetch company financial metrics
-        df = fetch_financial_metrics(symbol)
-        
-        # Step 2: Calculate additional metrics
-        if df is not None and not df.empty:
-            processed_df = calculate_financial_metrics(df, industry_metrics)
-            all_metrics.append(processed_df)
+    conn, cur = create_db_connection()
+    try:
+        for symbol in symbols:
+            logger.info(f"Processing metrics for {symbol}")
             
-            # Initialize regression_data for each row if not exists
-            for i in range(min(3, len(processed_df))):
-                if i not in regression_data:
-                    regression_data[i] = {}
+            # Fetch company financial metrics
+            df = fetch_financial_metrics(symbol)
+            
+            if df is not None and not df.empty:
+                # Get company_id and period_id
+                cur.execute("SELECT company_id FROM Companies WHERE symbol = %s", (symbol,))
+                company_id = cur.fetchone()['company_id']
                 
-                # Store data for current symbol
-                regression_data[i][symbol] = {}
-                for required_col, actual_col in column_mapping.items():
-                    if actual_col not in processed_df.columns:
-                        logger.warning(f"Missing column in processed_df: {actual_col} (mapped from {required_col})")
-                        regression_data[i][symbol][required_col] = None
-                    else:
-                        # Store the value from processed_df
-                        regression_data[i][symbol][required_col] = processed_df.iloc[i][actual_col]
-            
-            logger.info(f"Stored data for {symbol} in regression_data")
-            
-        time.sleep(0.5)  # Prevent rate limiting
-    
-    # Process regression_data into analyzed_data
-    analyzed_data_list = []  # Store analyzed DataFrames
-    for row_index, row_data in regression_data.items():
-        # Convert row data into a DataFrame
-        row_df = pd.DataFrame.from_dict(row_data, orient='index')
-        row_df.reset_index(inplace=True)
-        row_df.rename(columns={'index': 'Symbol'}, inplace=True)
-        row_df['Row_Index'] = row_index  # Track original row index
-
-        # Pass row_df through analyze_financial_data
-        analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+                # Calculate additional metrics
+                processed_df = calculate_financial_metrics(df, industry_metrics)
+                all_metrics.append(processed_df)
+                
+                # Save calculated metrics for each reporting period
+                for i, row in processed_df.iterrows():
+                    cur.execute("""
+                        SELECT period_id 
+                        FROM ReportingPeriods 
+                        WHERE fiscal_date_ending = %s AND period_type = 'Annual'
+                    """, (row['fiscal_date_ending'],))
+                    period_id = cur.fetchone()['period_id']
+                    
+                    # Save the calculated metrics
+                    save_calculated_metrics(processed_df.iloc[[i]], company_id, period_id)
+                
+                # Initialize regression_data for each row
+                for i in range(min(3, len(processed_df))):
+                    if i not in regression_data:
+                        regression_data[i] = {}
+                    
+                    regression_data[i][symbol] = {}
+                    for required_col, actual_col in column_mapping.items():
+                        if actual_col not in processed_df.columns:
+                            logger.warning(f"Missing column in processed_df: {actual_col}")
+                            regression_data[i][symbol][required_col] = None
+                        else:
+                            regression_data[i][symbol][required_col] = processed_df.iloc[i][actual_col]
+                            
+                logger.info(f"Stored data for {symbol} in regression_data")
+                
+            time.sleep(0.5)  # Prevent rate limiting
         
-        if analyzed_df is not None:
-            analyzed_data_list.append(analyzed_df)
-
-    # Combine all analyzed data into a single DataFrame
-    analyzed_data = pd.concat(analyzed_data_list, ignore_index=True) if analyzed_data_list else None
-    
-    if all_metrics:
-        combined_df = pd.concat(all_metrics, ignore_index=True)
-        return combined_df
-    
-    return None
+        # Process regression_data into analyzed_data
+        analyzed_data_list = []
+        for row_index, row_data in regression_data.items():
+            # Convert row data into a DataFrame
+            row_df = pd.DataFrame.from_dict(row_data, orient='index')
+            row_df.reset_index(inplace=True)
+            row_df.rename(columns={'index': 'Symbol'}, inplace=True)
+            row_df['Row_Index'] = row_index
+            
+            # Get period_id for this row
+            fiscal_date = processed_df.iloc[row_index]['fiscal_date_ending']
+            cur.execute("""
+                SELECT period_id 
+                FROM ReportingPeriods 
+                WHERE fiscal_date_ending = %s AND period_type = 'Annual'
+            """, (fiscal_date,))
+            period_id = cur.fetchone()['period_id']
+            
+            # Analyze financial data
+            analyzed_df = analyze_financial_data(row_df, selected_industry, confidence=0.90)
+            
+            if analyzed_df is not None:
+                analyzed_data_list.append(analyzed_df)
+                
+                # Save regression results for each multiple
+                for symbol in symbols:
+                    cur.execute("SELECT company_id FROM Companies WHERE symbol = %s", (symbol,))
+                    company_id = cur.fetchone()['company_id']
+                    
+                    for multiple, reg_data in analyzed_df['Regression'].iloc[0].items():
+                        # Get the matplotlib figure for this regression
+                        fig = plt.figure()  # This should be the figure created in analyze_financial_data
+                        save_regression_results(company_id, period_id, multiple, reg_data, fig)
+                        plt.close(fig)
+        
+        # Combine all analyzed data
+        analyzed_data = pd.concat(analyzed_data_list, ignore_index=True) if analyzed_data_list else None
+        
+        if all_metrics:
+            combined_df = pd.concat(all_metrics, ignore_index=True)
+            return combined_df
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error in process_financial_data: {str(e)}")
+        if conn:
+            conn.rollback()
+        return None
+        
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -739,8 +833,156 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------    
 
+def save_calculated_metrics(df, company_id, period_id):
+    """Save calculated metrics to database."""
+    try:
+        conn, cur = create_db_connection()
+        for col in df.columns:
+            # Skip non-numeric columns
+            if col in ['symbol', 'fiscal_date_ending']:
+                continue
+
+            # Insert metric definition first
+            formula = get_metric_formula(col)
+            if formula:
+                cur.execute("""
+                    INSERT INTO CalculatedMetricDefinitions (metric_name, formula, description)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (metric_name) DO NOTHING
+                """, (col, formula, f"Formula for {col}"))
+
+            # Insert calculated metric values
+            cur.execute("""
+                INSERT INTO CalculatedMetrics 
+                (company_id, period_id, metric_name, metric_value, data_source)
+                VALUES (%s, %s, %s, %s, 'calculated')
+                ON CONFLICT (company_id, period_id, metric_name)
+                DO UPDATE SET 
+                    metric_value = EXCLUDED.metric_value,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (company_id, period_id, col, float(df[col].iloc[0])))
+        
+        conn.commit()
+        logger.info(f"Saved calculated metrics for company_id {company_id}, period_id {period_id}")
+        
+    except Exception as e:
+        logger.error(f"Error saving calculated metrics: {str(e)}")
+        if conn:
+            conn.rollback()
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+def get_metric_formula(metric_name):
+    """Return formula for calculated metrics."""
+    formulas = {
+        'Total Equity': 'totalAssets - totalLiabilities',
+        'Total Debt': 'capitalLeaseObligations + longTermDebt + currentLongTermDebt',
+        'Capital Invested': 'totalAssets + Total Debt + cashAndShortTermInvestments',
+        'Debt to Equity': 'Total Debt / (Total Debt + Total Equity)',
+        'Working Capital': 'totalCurrentAssets - totalCurrentLiabilities',
+        'Net Working Capital': 'Working Capital - Previous Working Capital',
+        'Revenue Growth': '(totalRevenue / Previous totalRevenue) - 1',
+        'Operating Margin': 'ebit / totalRevenue',
+        'EBITDA': 'ebit + depreciationAndAmortization',
+        'EBITDA Margin': 'EBITDA / totalRevenue',
+        'DA': 'depreciationAndAmortization / EBITDA',
+        'Effective Tax': 'incomeTaxExpense / incomeBeforeTax',
+        'Tax Rate': '3-year rolling average of Effective Tax',
+        'After Tax EBIT': 'ebit * (1 - Tax Rate)',
+        'After Tax Operating Margin': 'Operating Margin * (1 - Tax Rate)',
+        'Net CapEx': '(propertyPlantEquipment - Previous propertyPlantEquipment) + depreciationAndAmortization',
+        'Free Cash Flow': 'Net CapEx + Net Working Capital',
+        'Reinvestment Rate': 'Free Cash Flow / After Tax EBIT',
+        'Sales to Capital': 'totalRevenue / Capital Invested',
+        'Return On Invested Capital': 'After Tax Operating Margin * Sales to Capital',
+        'Expected Growth': 'Reinvestment Rate * Return On Invested Capital',
+        '3Y Exp Growth': '3-year rolling average of Expected Growth',
+        '3Y Rev Growth': '3-year rolling average of Revenue Growth',
+        '3Y RIR': '3-year rolling average of Reinvestment Rate',
+        'Levered Beta': 'unlevered_data * (1 + Debt to Equity * (1 - Tax Rate))',
+        'Cost of Debt': '0.045 + 0.044',
+        'Cost of Equity': '0.045 + Levered Beta * 0.055',
+        'WACC': 'Cost of Debt * (1 - Tax Rate) * Debt to Equity + Cost of Equity * (1 - Debt to Equity)',
+        'DCF': 'Complex DCF formula based on growth rates and WACC',
+        'EV/EBIT': '(1 - Tax Rate) * DCF',
+        'EV/EBITDA': '(1 - Tax Rate) * (1 - DA) * DCF',
+        'EV/After Tax EBIT': '1 * DCF',
+        'EV/Sales': 'After Tax Operating Margin * DCF',
+        'EV/Capital Invested': 'Return On Invested Capital * DCF'
+    }
+    return formulas.get(metric_name)
+
+def save_regression_results(company_id, period_id, multiple, regress_data, fig):
+    """Save regression analysis results to database."""
+    try:
+        conn, cur = create_db_connection()
+        
+        # Convert plot to binary data
+        import io
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png')
+        plot_data = buf.getvalue()
+        buf.close()
+
+        # Extract regression data
+        summary = regress_data['Summary']
+        diagnostics = regress_data['Diagnostics']
+
+        cur.execute("""
+            INSERT INTO RegressionAnalysis 
+            (company_id, period_id, multiple_type, variable1_name, variable2_name,
+             coefficients, standard_errors, p_values, t_values,
+             r_squared, adj_r_squared, f_statistic, f_pvalue,
+             diagnostics, plot_data)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (company_id, period_id, multiple_type)
+            DO UPDATE SET 
+                coefficients = EXCLUDED.coefficients,
+                standard_errors = EXCLUDED.standard_errors,
+                p_values = EXCLUDED.p_values,
+                t_values = EXCLUDED.t_values,
+                r_squared = EXCLUDED.r_squared,
+                adj_r_squared = EXCLUDED.adj_r_squared,
+                f_statistic = EXCLUDED.f_statistic,
+                f_pvalue = EXCLUDED.f_pvalue,
+                diagnostics = EXCLUDED.diagnostics,
+                plot_data = EXCLUDED.plot_data,
+                updated_at = CURRENT_TIMESTAMP
+        """, (
+            company_id, period_id, multiple,
+            regress_data['variable1_name'], regress_data['variable2_name'],
+            json.dumps(summary['coefficients'].tolist()),
+            json.dumps(summary['standard_errors'].tolist()),
+            json.dumps(summary['p_values'].tolist()),
+            json.dumps(summary['t_values'].tolist()),
+            float(summary['r_squared']),
+            float(summary['adj_r_squared']),
+            float(summary['f_statistic']),
+            float(summary['f_pvalue']),
+            json.dumps(diagnostics),
+            plot_data
+        ))
+        
+        conn.commit()
+        logger.info(f"Saved regression results for {multiple}")
+        
+    except Exception as e:
+        logger.error(f"Error saving regression results: {str(e)}")
+        if conn:
+            conn.rollback()
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------    
+
 def main():
-    """Main program execution with industry processing."""
+    """Main program execution with split industry processing."""
     try:
         # Set working directory
         os.chdir('Projects/Data Analysis/S&P500 Valuation Multiples')
@@ -751,19 +993,13 @@ def main():
         if sp500_df is None:
             return None
         
-        # Display available industries
-        display_available_industries(sp500_df)
+        # Process industries based on size
+        small_industries_results, large_industries_results = process_industries(sp500_df)
         
-        # Select industry
-        selected_industry, industry_tickers = select_industry(sp500_df)
-        
-        # If user exits or selects invalid industry
-        if selected_industry is None:
-            return None
-        
-        # Process financial data
-        result = process_financial_data(industry_tickers, selected_industry)
-        return result
+        return {
+            'small_industries': small_industries_results,
+            'large_industries': large_industries_results
+        }
     
     except Exception as e:
         logging.error(f"An error occurred in main: {str(e)}", exc_info=True)
