@@ -892,95 +892,9 @@ def initialize_database():
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def process_industries_menu(sp500_importer, industry_groups, processor, sp500_df):
+def process_industry(sp500_importer, industry, processor, sp500_df, max_quarterly_reports=12, delay=12):
     """
-    Display menu and process industries based on user choice.
-    
-    Args:
-        sp500_importer: SP500DataImporter instance
-        industry_groups: Dictionary containing categorized industries
-        processor: FinancialDataProcessor instance
-        sp500_df: DataFrame with S&P 500 data
-    """
-    while True:
-        # Display menu for user selection
-        print("\nSelect an industry group to process:")
-        print("1. Medium Industries (6-12 companies)")
-        print("2. Small Industries (<6 companies)")
-        print("3. Large Industries (>12 companies)")
-        print("4. Process a single specific industry")
-        print("5. Exit")
-        
-        choice = input("Enter your choice (1-5): ").strip()
-        
-        # Process based on user choice
-        if choice == '1':
-            process_industry_group(sp500_importer, industry_groups['medium']['industries'], processor, sp500_df)
-        elif choice == '2':
-            process_industry_group(sp500_importer, industry_groups['small']['industries'], processor, sp500_df)
-        elif choice == '3':
-            process_industry_group(sp500_importer, industry_groups['large']['industries'], processor, sp500_df)
-        elif choice == '4':
-            # Display all industries for user selection
-            all_industries = []
-            for category in ['small', 'medium', 'large']:
-                all_industries.extend(industry_groups[category]['industries'])
-            
-            print("\nAvailable industries:")
-            for i, industry in enumerate(all_industries, 1):
-                print(f"{i}. {industry}")
-            
-            try:
-                industry_index = int(input("\nSelect industry number: ")) - 1
-                if 0 <= industry_index < len(all_industries):
-                    selected_industry = all_industries[industry_index]
-                    process_single_industry(sp500_importer, selected_industry, processor, sp500_df)
-                else:
-                    logger.error("Invalid industry selection.")
-            except ValueError:
-                logger.error("Please enter a valid number.")
-        elif choice == '5':
-            logger.info("Exiting industry processing")
-            break
-        else:
-            logger.error("Invalid choice. Please try again.")
-
-#------------------------------------------------------------------------------------------------------------------------------------------------------
-
-def process_industry_group(sp500_importer, industry_list, processor, sp500_df, delay_between_industries=60):
-    """
-    Process a group of industries with delay between each.
-    
-    Args:
-        sp500_importer: SP500DataImporter instance
-        industry_list: List of industries to process
-        processor: FinancialDataProcessor instance
-        sp500_df: DataFrame with S&P 500 data
-        delay_between_industries: Delay in seconds between processing industries
-    """
-    total_industries = len(industry_list)
-    
-    for i, industry in enumerate(industry_list, 1):
-        logger.info(f"Processing industry {i}/{total_industries}: {industry}")
-        
-        # Check if industry data is current
-        if sp500_importer.is_industry_data_current(industry):
-            logger.info(f"Industry data for {industry} is current. Skipping data import.")
-        else:
-            process_single_industry(sp500_importer, industry, processor, sp500_df)
-        
-        # Delay between industries (except after the last one)
-        if i < total_industries:
-            logger.info(f"Waiting {delay_between_industries} seconds before processing next industry...")
-            time.sleep(delay_between_industries)
-    
-    logger.info(f"Finished processing {total_industries} industries")
-
-#------------------------------------------------------------------------------------------------------------------------------------------------------
-
-def process_single_industry(sp500_importer, industry, processor, sp500_df, max_quarterly_reports=12):
-    """
-    Process a single industry.
+    Process a single industry with caching and time tracking.
     
     Args:
         sp500_importer: SP500DataImporter instance
@@ -988,90 +902,157 @@ def process_single_industry(sp500_importer, industry, processor, sp500_df, max_q
         processor: FinancialDataProcessor instance
         sp500_df: DataFrame with S&P 500 data
         max_quarterly_reports: Maximum number of quarterly reports to process
+        delay: Delay in seconds between API calls
     """
     # Get tickers for the selected industry
     industry_tickers = sp500_df[sp500_df['Sector'] == industry]['Symbol'].tolist()
     logger.info(f"Selected {industry} with {len(industry_tickers)} companies")
     
+    # Check if industry data needs updating
+    if sp500_importer.is_industry_data_current(industry):
+        logger.info(f"Industry data for {industry} is current. Skipping data import.")
+        return False
+
     # Fetch and process data for each ticker
     reports = ['BALANCE_SHEET', 'INCOME_STATEMENT']
     
     for ticker in industry_tickers:
         for report in reports:
-            # Fetch data from API
             data = processor.fetch_financial_data(ticker, report)
-            
-            # Process the data with limited quarterly reports
             if data:
                 processor.process_financial_data(ticker, data, report, max_quarterly_reports)
-                
-            # Add a delay to avoid API rate limits
-            time.sleep(12)  # 12 seconds between API calls
-    
+            time.sleep(delay)  # Delay between API calls
+
     logger.info(f"Completed processing {industry}")
+    return True
 
-#------------------------------------------------------------------------------------------------------------------------------------------------------
-
-def process_industries_automated(sp500_importer, industry_groups, processor, sp500_df):
+def process_industries(sp500_importer, industry_groups, processor, sp500_df, automated=False):
     """
-    Automatically process industries starting from smallest to largest with caching and time tracking.
+    Process industries either automatically or through menu selection.
     
     Args:
         sp500_importer: SP500DataImporter instance
         industry_groups: Dictionary containing categorized industries
         processor: FinancialDataProcessor instance
         sp500_df: DataFrame with S&P 500 data
+        automated: Whether to run in automated mode
     """
-    # Initialize cache
     cache = ProcessingCache.load()
-    
-    # Process industries in order: small -> medium -> large
-    categories = [
-        ('small', industry_groups['small']['industries']),
-        ('medium', industry_groups['medium']['industries']),
-        ('large', industry_groups['large']['industries'])
-    ]
-    
     total_start_time = time.time()
-    
-    for category, industries in categories:
-        logger.info(f"\nProcessing {category} industries")
-        
-        # Sort industries by company count (ascending)
-        industry_counts = {ind: len(sp500_df[sp500_df['Sector'] == ind]) for ind in industries}
-        sorted_industries = sorted(industries, key=lambda x: industry_counts[x])
-        
-        for industry in sorted_industries:
-            # Skip if already processed
-            if industry in cache.processed_industries:
-                logger.info(f"Skipping {industry} - already processed")
-                continue
+
+    if automated:
+        # Process industries in order: small -> medium -> large
+        categories = [
+            ('small', industry_groups['small']['industries']),
+            ('medium', industry_groups['medium']['industries']),
+            ('large', industry_groups['large']['industries'])
+        ]
+
+        for category, industries in categories:
+            logger.info(f"\nProcessing {category} industries")
+            industry_counts = {ind: len(sp500_df[sp500_df['Sector'] == ind]) for ind in industries}
+            sorted_industries = sorted(industries, key=lambda x: industry_counts[x])
+
+            for industry in sorted_industries:
+                if industry in cache.processed_industries:
+                    logger.info(f"Skipping {industry} - already processed")
+                    continue
+
+                cache.start_industry(industry)
+                industry_start_time = time.time()
+
+                try:
+                    logger.info(f"\nProcessing {industry} ({industry_counts[industry]} companies)")
+                    process_industry(sp500_importer, industry, processor, sp500_df)
+                    
+                    industry_time = time.time() - industry_start_time
+                    cache.mark_industry_complete(industry, industry_time)
+                    logger.info(f"Completed {industry} in {industry_time:.2f} seconds")
+
+                except Exception as e:
+                    logger.error(f"Error processing {industry}: {str(e)}")
+                    cache.save()
+                    raise
+
+                if industry != sorted_industries[-1]:
+                    logger.info("Waiting 60 seconds before next industry...")
+                    time.sleep(60)
+
+    else:
+        while True:
+            print("\nSelect an industry group to process:")
+            print("1. Medium Industries (6-12 companies)")
+            print("2. Small Industries (<6 companies)")
+            print("3. Large Industries (>12 companies)")
+            print("4. Process a single specific industry")
+            print("5. Exit")
             
-            # Start timing for this industry
-            cache.start_industry(industry)
-            industry_start_time = time.time()
+            choice = input("Enter your choice (1-5): ").strip()
             
-            try:
-                logger.info(f"\nProcessing {industry} ({industry_counts[industry]} companies)")
-                process_single_industry(sp500_importer, industry, processor, sp500_df)
+            if choice in ['1', '2', '3']:
+                category = {
+                    '1': 'medium',
+                    '2': 'small',
+                    '3': 'large'
+                }[choice]
                 
-                # Calculate and log processing time
-                industry_time = time.time() - industry_start_time
-                cache.mark_industry_complete(industry, industry_time)
+                industries = industry_groups[category]['industries']
+                for industry in industries:
+                    if industry in cache.processed_industries:
+                        logger.info(f"Skipping {industry} - already processed")
+                        continue
+
+                    cache.start_industry(industry)
+                    industry_start_time = time.time()
+                    
+                    try:
+                        process_industry(sp500_importer, industry, processor, sp500_df)
+                        
+                        industry_time = time.time() - industry_start_time
+                        cache.mark_industry_complete(industry, industry_time)
+                        logger.info(f"Completed {industry} in {industry_time:.2f} seconds")
+
+                    except Exception as e:
+                        logger.error(f"Error processing {industry}: {str(e)}")
+                        cache.save()
+                        continue
+
+                    if industry != industries[-1]:
+                        logger.info("Waiting 60 seconds before next industry...")
+                        time.sleep(60)
+                        
+            elif choice == '4':
+                all_industries = []
+                for cat in ['small', 'medium', 'large']:
+                    all_industries.extend(industry_groups[cat]['industries'])
                 
-                logger.info(f"Completed {industry} in {industry_time:.2f} seconds")
+                print("\nAvailable industries:")
+                for i, ind in enumerate(all_industries, 1):
+                    print(f"{i}. {ind}")
                 
-            except Exception as e:
-                logger.error(f"Error processing {industry}: {str(e)}")
-                # Save progress even if there's an error
-                cache.save()
-                raise
-            
-            # Add delay between industries
-            if industry != sorted_industries[-1]:
-                logger.info("Waiting 60 seconds before next industry...")
-                time.sleep(60)
-    
+                try:
+                    industry_index = int(input("\nSelect industry number: ")) - 1
+                    if 0 <= industry_index < len(all_industries):
+                        industry = all_industries[industry_index]
+                        cache.start_industry(industry)
+                        industry_start_time = time.time()
+                        
+                        process_industry(sp500_importer, industry, processor, sp500_df)
+                        
+                        industry_time = time.time() - industry_start_time
+                        cache.mark_industry_complete(industry, industry_time)
+                        logger.info(f"Completed {industry} in {industry_time:.2f} seconds")
+                    else:
+                        logger.error("Invalid industry selection.")
+                except ValueError:
+                    logger.error("Please enter a valid number.")
+                    
+            elif choice == '5':
+                logger.info("Exiting industry processing")
+                break
+            else:
+                logger.error("Invalid choice. Please try again.")
+
     total_time = time.time() - total_start_time
     logger.info(f"\nAll industries processed in {total_time:.2f} seconds")
     logger.info("\nIndustry processing times:")
@@ -1116,12 +1097,8 @@ def main(run_automated=False):
         # Initialize the financial data processor
         processor = FinancialDataProcessor(api_key)
         
-        if run_automated:
-            # Run automated processing
-            process_industries_automated(sp500_importer, industry_groups, processor, sp500_df)
-        else:
-            # Process industries based on user choice through menu
-            process_industries_menu(sp500_importer, industry_groups, processor, sp500_df)
+        # Process industries
+        process_industries(sp500_importer, industry_groups, processor, sp500_df, automated=run_automated)
             
         logger.info("Financial data processing complete")
         
