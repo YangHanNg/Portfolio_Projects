@@ -5,11 +5,14 @@ This is a data analysis project inspired by NYU Stern Business School Prof. Aswa
 
 The project utilises AlphaVantage API to gather financial data from companies listed in the S&P 500 index. The data includes annual and quarterly Income Statement and Balance Sheet information which are stored in a PostgreSQL database for efficient data management and analysis. The project implements a caching system to track processing progress and avoid redundant API calls, making it resilient to interruptions and mindful of API rate limits. The SP500 CSV data is sourced from Kaggle in late 2024 and consolidate with a few data points published by Prof. Aswath.
 
+---
 <br>
 
 ## Execution
 
 The project is broken into three distinct stages to tackle specific goals of the project. The first stage involve the creation and configuration of the database, as it is the base to which the requested data are stored. A function execute requests through API keys to append the data points accordingly. The next stage involve the bulk of the project operation where financial data are used to compute metrics, placed through statistical tests and a regression model, plotted 3-dimensionally for visualisation, and stored additionaly into the database. It is a long automated pipeline that processes industries within the S&P 500 index to produce the crucial data points we are aiming for. The last stage focuses on visualising the derived data points and validifying their models from the statistical tests. It aims to be present a company and its peer industry like a comparable companies analysis output page with an added focus on the theoretical EV trading multiples.
+
+---
 
 ### Program 1: Data Retrival from Alpha Vantage API and Storage to Local PostgreSQL Database
 
@@ -33,7 +36,18 @@ To maximise the efficiency of data gathering and reducing the redundancy of API 
    - Processes both Balance Sheet and Income Statement data
    - Validates and transforms data before storage
 
-The data structure retrieved from AlphaVantage follows a standardized JSON format, with separate endpoints for Balance Sheet and Income Statement data. The program processes this data and stores it in a normalized database structure for efficient querying and analysis.
+The data structure retrieved from AlphaVantage follows a standardized JSON format, with separate endpoints for Balance Sheet and Income Statement data shown below. The program processes this data and stores it in a normalized database structure for efficient querying and analysis.
+
+<p align="center">
+  <img src="figures/example_balance_sheet_data.png" width="400"/>
+  <img src="figures/example_income_statement_data.png" width="400"/>
+</p>
+
+<p align="center">
+  <b>Figure 1:</b> Example Balance Sheet data | <b>Figure 2:</b> Example Income Statement data
+</p>
+
+---
 
 ### Program 2: Database Requests, Metric Calculations, and Regression Analysis
 
@@ -65,9 +79,12 @@ Program 2 focuses on retrieving the stored financial data and performing complex
    - Maintains regression results including coefficients, diagnostics, and visualizations
    - Preserves analysis history for trending and comparison
 
+---
+
 ### Stage 3: SQL Queries, Data Visualisation, and Statistical Validation
 
 
+---
 <br>
 
 ## EV Multiples and Financial Metric Methodology
@@ -182,13 +199,15 @@ $$
 - Individual company differences are not captured, which may lead to generalization bias.
 - Collecting firm-specific betas, capital structures, and reinvestment behaviors was out of project scope.
 
-
+---
 <br>
 
 ## Statistics Technicals
 
 Will be populated soon...
 
+---
+<br>
 
 ## References
 To be added....
