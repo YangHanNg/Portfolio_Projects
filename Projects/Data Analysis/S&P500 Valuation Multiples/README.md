@@ -144,10 +144,10 @@ $$
 | EV Metric | Scaling Factor | Proof |
 |-----------|----------------|-------|
 | EV/EBIT | \( 1/(1 - tax) \) |  |
-| EV/EBIT(1-Tax) | 1 | EBIT(1-tax)/EBIT(1-tax) |
-| EV/EBITDA | \( (1 - DA\%) (1 - tax) \) | \( EBIT(1-tax) = (EBITDA - DA)(1-tax) \) |
-| EV/Sales | ATOM | \( EBIT(1-tax)/Sales = ATOM \) |
-| EV/Capital Invested | ROIC | \( EBIT(1-tax) = ROIC \times IC \) |
+| EV/EBIT(1-Tax) | 1 | $EBIT(1-tax)/EBIT(1-tax)$ |
+| EV/EBITDA | \( (1 - DA\%) (1 - tax) \) | $\( EBIT(1-tax) = (EBITDA - DA)(1-tax) \) $|
+| EV/Sales | ATOM | $\( EBIT(1-tax)/Sales = ATOM \$) |
+| EV/Capital Invested | ROIC | $\( EBIT(1-tax) = ROIC \times IC \)$ |
 
 ---
 
@@ -273,7 +273,9 @@ Each regression analysis captures comprehensive model performance statistics:
 3. **Theoretical Value Calculation**:
    For each EV multiple, theoretical values are computed using:
    
-   $$ Theoretical = \beta_0 + \beta_1X_1 + \beta_2X_2 $$
+$$
+\text{Theoretical} = \beta_0 + \beta_1 X_1 + \beta_2 X_2
+$$
    
    where:
    - $\beta_0$ is the y-intercept
