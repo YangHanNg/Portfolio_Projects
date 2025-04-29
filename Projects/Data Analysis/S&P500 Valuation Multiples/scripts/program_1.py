@@ -1,3 +1,4 @@
+# Import necessary libraries
 import pandas as pd
 import requests
 import json
@@ -17,7 +18,7 @@ from typing import Dict, List, Any
 # Load environment variables from .env file
 load_dotenv()
 
-# Cache configuration
+# Cache configuration for temporary storage of processing state
 BASE_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA_DIR = BASE_DIR / "data"
 CACHE_FILE = DATA_DIR / "processing_state.pkl"
@@ -25,6 +26,9 @@ CACHE_FILE = DATA_DIR / "processing_state.pkl"
 # Create data directory if it doesn't exist
 DATA_DIR.mkdir(exist_ok=True, parents=True)
 
+#------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Class module for processing cache
 class ProcessingCache:
     def __init__(self):
         self.processed_industries: List[str] = []
@@ -66,6 +70,8 @@ class ProcessingCache:
         self.last_company = company
         self.save()
 
+# ------------------------------------------------------------------------------------------------------------------------------------------------------
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -79,17 +85,17 @@ logger = logging.getLogger(__name__)
 
 # Database configuration from environment variables
 DB_CONFIG = {
-    "dbname": "postgres",  # Changed from os.getenv("DB_NAME") to use postgres directly
+    "dbname": "postgres",  # Input the database name here
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
     "host": os.getenv("DB_HOST"),
     "port": os.getenv("DB_PORT")
 }
 
-# API configuration
+# API directory configuration
 API_URL = "https://www.alphavantage.co/query"
 
-# Constants
+# Constants for report types
 REPORT_TYPES = {
     "BALANCE_SHEET": "Balance Sheet",
     "INCOME_STATEMENT": "Income Statement",
@@ -98,18 +104,10 @@ REPORT_TYPES = {
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Context manager for database connections
 @contextmanager
 def get_db_connection(dbname=None):
-    """
-    Context manager for database connections.
-    Always connects to postgres database.
     
-    Args:
-        dbname (str, optional): Not used, kept for compatibility
-    
-    Yields:
-        connection: PostgreSQL connection object
-    """
     conn_params = DB_CONFIG.copy()
     
     # Always use postgres database
@@ -129,20 +127,28 @@ def get_db_connection(dbname=None):
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Function to initialize the database and create tables function
+def initialize_database():
+    """Initialize the database and create necessary tables."""
+    try:
+        create_database()
+        create_tables()
+        logger.info("Database initialization complete")
+        return True
+    except Exception as e:
+        logger.error(f"Database initialization failed: {str(e)}")
+        return False
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Function to execute SQL queries with error handling
 def execute_query(query, params=None, fetch=False, many=False, dbname=None):
     """
-    Execute a database query with proper error handling.
-    Always uses postgres database.
-    
     Args:
         query (str): SQL query to execute
         params (tuple or list, optional): Parameters for the query
         fetch (bool, optional): Whether to fetch results
         many (bool, optional): Whether to execute many statements
-        dbname (str, optional): Not used, kept for compatibility
-        
-    Returns:
-        list or None: Query results if fetch is True, otherwise None
     """
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
@@ -165,6 +171,7 @@ def execute_query(query, params=None, fetch=False, many=False, dbname=None):
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Function to create the database if it doesn't exist
 def create_database():
     """Initialize the postgres database schema if needed."""
     try:
@@ -179,6 +186,7 @@ def create_database():
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Function to create all necessary tables for the financial database
 def create_tables():
     """Create all necessary tables for the financial database."""
     try:
@@ -370,22 +378,15 @@ def create_tables():
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Class module to handle all database queries for operations
 class FinancialDataAccess:
-    """Class to handle all database operations related to financial data."""
     
     #----------------------------------------------------------------------------------------------------------------------------------
     
+    # Function to retrieve industry-level financial data for a given sector_name
     def get_industry(self, sector_name):
-        """
-        Retrieve industry-level financial data for a given sector_name from the database.
         
-        Args:
-            sector_name (str): Name of the sector (as used in CSV)
-        
-        Returns:
-            dict or None: A dictionary with keys cost_of_capital, growth_rate, reinvestment_rate,
-                          or None if not found.
-        """
+        # SQL query to fetch industry data
         query = """
             SELECT cost_of_capital, growth_rate, reinvestment_rate
             FROM industries
@@ -409,12 +410,11 @@ class FinancialDataAccess:
     
     #----------------------------------------------------------------------------------------------------------------------------------
     
+    # Function to insert new company data or update existing one
     @staticmethod
     def insert_company(symbol, name=None, sector=None, industry=None, description=None, unlevered_data=0.0):
-        """
-        Insert a new company or update if it exists.
-        Returns the company_id.
-        """
+        
+        # SQL query to insert or update company data
         query = """
         INSERT INTO Companies (symbol, name, sector, industry, description, unlevered_data)
         VALUES (%s, %s, %s, %s, %s, %s)
@@ -436,19 +436,17 @@ class FinancialDataAccess:
     
     #----------------------------------------------------------------------------------------------------------------------------------
     
+    # Function to insert new reporting period or update existing one
     @staticmethod
     def insert_reporting_period(fiscal_date_ending, period_type):
-        """
-        Insert a new reporting period or return existing one.
-        Returns the period_id.
-        """
+        
         # Extract year and quarter if applicable
         year = int(fiscal_date_ending.split('-')[0])
         quarter = None
         if period_type == 'Quarterly':
             month = int(fiscal_date_ending.split('-')[1])
             quarter = (month - 1) // 3 + 1
-        
+        # SQL query to insert or update reporting period data
         query = """
         INSERT INTO ReportingPeriods (period_type, fiscal_date_ending, year, quarter)
         VALUES (%s, %s, %s, %s)
@@ -465,12 +463,11 @@ class FinancialDataAccess:
     
     #----------------------------------------------------------------------------------------------------------------------------------
     
+    # Function to insert new financial report or update existing one
     @staticmethod
     def insert_financial_report(company_id, period_id, report_type, reported_currency=None):
-        """
-        Insert a new financial report or update if it exists.
-        Returns the report_id.
-        """
+        
+        # SQL query to insert or update financial report data
         query = """
         INSERT INTO FinancialReports (company_id, period_id, report_type, reported_currency)
         VALUES (%s, %s, %s, %s)
@@ -487,16 +484,15 @@ class FinancialDataAccess:
     
     #----------------------------------------------------------------------------------------------------------------------------------
     
+    # Function to retrieve or create a financial metric
     @staticmethod
     def get_or_create_metric(metric_name, display_name=None, category=None, data_type='currency'):
-        """
-        Get an existing metric or create a new one.
-        Returns the metric_id.
-        """
+       
         # If display_name is not provided, create one from the metric_name
         if not display_name:
             display_name = ' '.join(word.capitalize() for word in metric_name.split('_'))
         
+        #SQL query to insert or update financial metric data
         query = """
         INSERT INTO FinancialMetrics (metric_name, display_name, category, data_type)
         VALUES (%s, %s, %s, %s)
@@ -514,14 +510,14 @@ class FinancialDataAccess:
     
     #----------------------------------------------------------------------------------------------------------------------------------
     
+    # Function to insert financial data or update if it exists
     @staticmethod
     def insert_financial_data(report_id, metric_id, value):
-        """
-        Insert financial data or update if it exists.
-        """
+        
         is_null = (value == "None" or value is None)
         numeric_value = None if is_null else value
         
+        # SQL query to insert or update financial data
         query = """
         INSERT INTO FinancialData (report_id, metric_id, value, is_null)
         VALUES (%s, %s, %s, %s)
@@ -537,12 +533,11 @@ class FinancialDataAccess:
     
     #----------------------------------------------------------------------------------------------------------------------------------
     
+    # Function to insert new industry or update existing one
     @staticmethod
     def insert_industry(sector_name, industry_name, cost_of_capital=None, growth_rate=None, reinvestment_rate=None):
-        """
-        Insert a new industry or update if it exists.
-        Returns the industry_id.
-        """
+        
+        # SQL query to insert or update industry data
         query = """
         INSERT INTO Industries (sector_name, industry_name, cost_of_capital, growth_rate, reinvestment_rate)
         VALUES (%s, %s, %s, %s, %s)
@@ -562,169 +557,31 @@ class FinancialDataAccess:
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
-class FinancialDataProcessor:
-    """Class to handle financial data processing operations."""
-    
-    #----------------------------------------------------------------------------------------------------------------------------------
-    
-    def __init__(self, api_key):
-        """
-        Initialize the processor with API key.
-        
-        Args:
-            api_key (str): API key for financial data service
-        """
-        self.api_key = api_key
-        self.db = FinancialDataAccess()
-    
-    #----------------------------------------------------------------------------------------------------------------------------------
-    
-    def fetch_financial_data(self, symbol, function):
-        """
-        Fetch financial data from API.
-        
-        Args:
-            symbol (str): Company symbol
-            function (str): API function name
-            
-        Returns:
-            dict: API response data or None if error
-        """
-        try:
-            response = requests.get(API_URL, params={
-                "function": function,
-                "symbol": symbol,
-                "apikey": self.api_key
-            }, timeout=30)
-            
-            response.raise_for_status()
-            data = response.json()
-            
-            # Check for error messages in the response
-            if "Error Message" in data:
-                logger.error(f"API Error for {symbol}: {data['Error Message']}")
-                return None
-                
-            logger.info(f"Retrieved {function} for {symbol}")
-            return data
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request error retrieving {function} for {symbol}: {str(e)}")
-            return None
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON response for {symbol} {function}")
-            return None
-    
-    #----------------------------------------------------------------------------------------------------------------------------------
-    
-    def process_financial_data(self, symbol, data, report_type, max_quarterly_reports=12):
-        """
-        Process financial data from API response and store in database.
-    
-        Args:
-            symbol (str): The company symbol (e.g., 'IBM')
-            data (dict): The API response data
-            report_type (str): The type of report (e.g., 'BALANCE_SHEET', 'INCOME_STATEMENT')
-            max_quarterly_reports (int): Maximum number of quarterly reports to process
-            """
-        if not data:
-            logger.warning(f"No data to process for {symbol} {report_type}")
-            return
-        
-        # Insert company data
-        company_id = self.db.insert_company(symbol)
-        if not company_id:
-            logger.error(f"Failed to insert company {symbol}")
-            return
-    
-        # Process annual reports
-        if "annualReports" in data:
-            self._process_reports(company_id, data["annualReports"], report_type, "Annual")
-    
-        # Process quarterly reports with limit
-        if "quarterlyReports" in data:
-            # Sort quarterly reports by date (most recent first)
-            if len(data["quarterlyReports"]) > 0 and "fiscalDateEnding" in data["quarterlyReports"][0]:
-                sorted_reports = sorted(
-                    data["quarterlyReports"], 
-                    key=lambda x: x["fiscalDateEnding"], 
-                    reverse=True
-                    )
-                # Take only the most recent reports up to the limit
-                limited_reports = sorted_reports[:max_quarterly_reports]
-                logger.info(f"Processing {len(limited_reports)} of {len(sorted_reports)} available quarterly reports for {symbol}")
-                self._process_reports(company_id, limited_reports, report_type, "Quarterly")
-            else:
-                logger.warning(f"Quarterly reports for {symbol} are missing date information")
-    
-    #----------------------------------------------------------------------------------------------------------------------------------
-    
-    def _process_reports(self, company_id, reports, report_type, period_type):
-        """
-        Process a list of financial reports.
-        
-        Args:
-            company_id (int): Company ID
-            reports (list): List of report dictionaries
-            report_type (str): Report type
-            period_type (str): Period type ('Annual' or 'Quarterly')
-        """
-        for report in reports:
-            fiscal_date_ending = report.get("fiscalDateEnding")
-            reported_currency = report.get("reportedCurrency")
-            
-            if not fiscal_date_ending:
-                logger.warning(f"Missing fiscal_date_ending in report for company {company_id}")
-                continue
-                
-            # Insert reporting period
-            period_id = self.db.insert_reporting_period(fiscal_date_ending, period_type)
-            
-            # Insert financial report
-            report_id = self.db.insert_financial_report(company_id, period_id, report_type, reported_currency)
-            
-            # Insert financial data
-            for key, value in report.items():
-                if key not in ["fiscalDateEnding", "reportedCurrency"]:
-                    metric_id = self.db.get_or_create_metric(key)
-                    self.db.insert_financial_data(report_id, metric_id, value)
-
-#------------------------------------------------------------------------------------------------------------------------------------------------------
-
+# Class module to handle S&P 500 data import and processing
 class SP500DataImporter:
-    """Class to handle S&P 500 data import operations."""
     
     #----------------------------------------------------------------------------------------------------------------------------------
     
+    # Function to initialize the importer with CSV path
     def __init__(self, csv_path="data/SP500.csv"):  # Updated default path
-        """
-        Initialize the importer with CSV path, but don't connect to DB yet.
         
-        Args:
-            csv_path (str): Path to S&P 500 CSV file
-        """
         self.csv_path = csv_path
         self.db = None
         self.sp500_df = None
     
     #----------------------------------------------------------------------------------------------------------------------------------    
-        
+
+    # Function to connect to the database   
     def connect_db(self):
-        """
-        Connect to the database only when needed.
-        """
+
         if self.db is None:
             self.db = FinancialDataAccess()
     
     #----------------------------------------------------------------------------------------------------------------------------------
-            
+    
+    # Function to load S&P 500 company data from CSV file
     def load_data(self):
-        """
-        Load S&P 500 data from CSV file.
-        
-        Returns:
-            DataFrame: Pandas DataFrame with S&P 500 data
-        """
+
         try:
             logger.info(f"Reading SP500 data from {self.csv_path}")
             self.sp500_df = pd.read_csv(self.csv_path)
@@ -735,16 +592,9 @@ class SP500DataImporter:
             
     #----------------------------------------------------------------------------------------------------------------------------------
     
+    # Function to import all industry data from the CSV file
     def import_industry_data(self, sector_name):
-        """
-        Import data for a specific industry.
         
-        Args:
-            industry_name (str): Name of the industry to import
-            
-        Returns:
-            int: Number of companies imported
-        """
         self.connect_db()
         
         if self.sp500_df is None:
@@ -763,7 +613,7 @@ class SP500DataImporter:
         # Get industry details from first company
         first_company = industry_data[0]
         
-        # Insert/update the industry once
+        # Insert/update the industry into the database
         self.db.insert_industry(
             sector_name=first_company['Sector'],
             industry_name=first_company.get('Industry', 'N/A'),
@@ -794,17 +644,9 @@ class SP500DataImporter:
     
     #----------------------------------------------------------------------------------------------------------------------------------
     
+    # Function to check the relevance of industry data in the database
     def is_industry_data_current(self, sector_name):
-        """
-        Check if the industry data in the database is current by comparing
-        with a random company from that industry in the CSV.
-    
-        Args:
-           industry_name (str): Name of the industry to check
         
-        Returns:
-            bool: True if data is current, False if update needed
-            """
         self.connect_db()
     
         if self.sp500_df is None:
@@ -844,16 +686,9 @@ class SP500DataImporter:
     
     #----------------------------------------------------------------------------------------------------------------------------------
     
+    # Function to process the idnustry if data is not current
     def process_industry(self, industry_name):
-        """
-        Process a single industry - check if data is current and import if needed.
-    
-        Args:
-            industry_name (str): Name of the industry to process
-    
-        Returns:
-            bool: True if processed, False if skipped
-            """
+        
         if self.is_industry_data_current(industry_name):
             logger.info(f"Skipping import for {industry_name} - data is current")
             return False
@@ -864,19 +699,115 @@ class SP500DataImporter:
         return True
     
     #----------------------------------------------------------------------------------------------------------------------------------
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Class module to handle financial data processing operations
+class FinancialDataProcessor:
     
+    #----------------------------------------------------------------------------------------------------------------------------------
+    
+    # Function to initialize the processor with API key and connection to the database
+    def __init__(self, api_key):
+        
+        self.api_key = api_key
+        self.db = FinancialDataAccess()
+    
+    #----------------------------------------------------------------------------------------------------------------------------------
+    
+    # Function  to fetch financial data from the API source
+    def fetch_financial_data(self, symbol, function):
+        
+        try:
+            response = requests.get(API_URL, params={
+                "function": function,
+                "symbol": symbol,
+                "apikey": self.api_key
+            }, timeout=30)
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            # Check for error messages in the response
+            if "Error Message" in data:
+                logger.error(f"API Error for {symbol}: {data['Error Message']}")
+                return None
+                
+            logger.info(f"Retrieved {function} for {symbol}")
+            return data
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error retrieving {function} for {symbol}: {str(e)}")
+            return None
+        except json.JSONDecodeError:
+            logger.error(f"Invalid JSON response for {symbol} {function}")
+            return None
+    
+    #----------------------------------------------------------------------------------------------------------------------------------
+    
+    # Main function that process financial data from API request to tables in the database
+    def process_financial_data(self, symbol, data, report_type, max_quarterly_reports=12):
+        
+        if not data:
+            logger.warning(f"No data to process for {symbol} {report_type}")
+            return
+        
+        # Insert company data
+        company_id = self.db.insert_company(symbol)
+        if not company_id:
+            logger.error(f"Failed to insert company {symbol}")
+            return
+    
+        # Process annual reports
+        if "annualReports" in data:
+            self._process_reports(company_id, data["annualReports"], report_type, "Annual")
+    
+        # Process quarterly reports with limit
+        if "quarterlyReports" in data:
+            # Sort quarterly reports by date (most recent first)
+            if len(data["quarterlyReports"]) > 0 and "fiscalDateEnding" in data["quarterlyReports"][0]:
+                sorted_reports = sorted(
+                    data["quarterlyReports"], 
+                    key=lambda x: x["fiscalDateEnding"], 
+                    reverse=True
+                    )
+                # Take only the most recent reports up to the limit to reduce processing time
+                limited_reports = sorted_reports[:max_quarterly_reports]
+                logger.info(f"Processing {len(limited_reports)} of {len(sorted_reports)} available quarterly reports for {symbol}")
+                self._process_reports(company_id, limited_reports, report_type, "Quarterly")
+            else:
+                logger.warning(f"Quarterly reports for {symbol} are missing date information")
+    
+    #----------------------------------------------------------------------------------------------------------------------------------
+    
+    # Function to process the reporting periods
+    def _process_reports(self, company_id, reports, report_type, period_type):
+        
+        for report in reports:
+            fiscal_date_ending = report.get("fiscalDateEnding")
+            reported_currency = report.get("reportedCurrency")
+            
+            if not fiscal_date_ending:
+                logger.warning(f"Missing fiscal_date_ending in report for company {company_id}")
+                continue
+                
+            # Insert reporting period
+            period_id = self.db.insert_reporting_period(fiscal_date_ending, period_type)
+            
+            # Insert financial report
+            report_id = self.db.insert_financial_report(company_id, period_id, report_type, reported_currency)
+            
+            # Insert financial data
+            for key, value in report.items():
+                if key not in ["fiscalDateEnding", "reportedCurrency"]:
+                    metric_id = self.db.get_or_create_metric(key)
+                    self.db.insert_financial_data(report_id, metric_id, value)
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Function to categorize industries based on company count
 def get_categorized_industries(self, medium_min=6, medium_max=12, automated=False):
-        """
-        Categorize industries into groups based on company count and return filtered results.
-    
-        Args:
-            medium_min (int): Minimum number of companies for medium category
-            medium_max (int): Maximum number of companies for medium category
-            automated (bool): Whether the program is running in automated mode
-    
-        Returns:
-            dict: Dictionary with categories of industries and their counts
-        """
+        
         if self.sp500_df is None:
             self.load_data()
         
@@ -915,31 +846,9 @@ def get_categorized_industries(self, medium_min=6, medium_max=12, automated=Fals
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def initialize_database():
-    """Initialize the database and create necessary tables."""
-    try:
-        create_database()
-        create_tables()
-        logger.info("Database initialization complete")
-        return True
-    except Exception as e:
-        logger.error(f"Database initialization failed: {str(e)}")
-        return False
-
-#------------------------------------------------------------------------------------------------------------------------------------------------------
-
+# Main function to process all companies in a given industry
 def process_industry(sp500_importer, industry, processor, sp500_df, max_quarterly_reports=12, delay=12):
-    """
-    Process a single industry with caching and time tracking.
     
-    Args:
-        sp500_importer: SP500DataImporter instance
-        industry: Industry name
-        processor: FinancialDataProcessor instance
-        sp500_df: DataFrame with S&P 500 data
-        max_quarterly_reports: Maximum number of quarterly reports to process
-        delay: Delay in seconds between API calls
-    """
     # Get tickers for the selected industry
     industry_tickers = sp500_df[sp500_df['Sector'] == industry]['Symbol'].tolist()
     logger.info(f"Selected {industry} with {len(industry_tickers)} companies")
@@ -962,20 +871,15 @@ def process_industry(sp500_importer, industry, processor, sp500_df, max_quarterl
     logger.info(f"Completed processing {industry}")
     return True
 
+#------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# This function processes all industries in the S&P 500, either automatically or through user selection.
 def process_industries(sp500_importer, industry_groups, processor, sp500_df, automated=False):
-    """
-    Process industries either automatically or through menu selection.
     
-    Args:
-        sp500_importer: SP500DataImporter instance
-        industry_groups: Dictionary containing categorized industries
-        processor: FinancialDataProcessor instance
-        sp500_df: DataFrame with S&P 500 data
-        automated: Whether to run in automated mode
-    """
     cache = ProcessingCache.load()
     total_start_time = time.time()
 
+    #----------------------------------------------------------------------------------------------------------------------------------
     if automated:
         # Process industries in order: small -> medium -> large
         categories = [
@@ -1014,6 +918,7 @@ def process_industries(sp500_importer, industry_groups, processor, sp500_df, aut
                     logger.info("Waiting 60 seconds before next industry...")
                     time.sleep(60)
 
+    #----------------------------------------------------------------------------------------------------------------------------------
     else:
         while True:
             print("\nSelect an industry group to process:")
@@ -1097,8 +1002,9 @@ def process_industries(sp500_importer, industry_groups, processor, sp500_df, aut
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Function for all theoretical multiple formula
 def get_metric_formula(metric_name):
-    """Return formula for calculated metrics."""
+    
     formulas = {
         'EV/EBIT_Theoretical': 'C1*Return On Invested Capital + C2*3Y Rev Growth + y-intercept',
         'EV/After Tax EBIT_Theoretical': 'C1*Return On Invested Capital + C2*After Tax Operating Margin + y-intercept',
@@ -1110,13 +1016,8 @@ def get_metric_formula(metric_name):
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Main function to run the program
 def main(run_automated=False):
-    """
-    Main program execution.
-    
-    Args:
-        run_automated (bool): If True, runs automated processing instead of menu-based
-    """
     try:
         # Set working directory using absolute path
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1134,7 +1035,7 @@ def main(run_automated=False):
         # Display some basic information
         logger.info(f"Loaded {len(sp500_df)} companies from S&P 500 data")
         
-        # Get categorized industries
+        # Get categorised groups of industries
         industry_groups = sp500_importer.get_categorized_industries(automated=run_automated)
         
         # Load API key
@@ -1153,6 +1054,8 @@ def main(run_automated=False):
         
     except Exception as e:
         logger.error(f"An error occurred in main: {str(e)}", exc_info=True)
+
+# ------------------------------------------------------------------------------------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import argparse

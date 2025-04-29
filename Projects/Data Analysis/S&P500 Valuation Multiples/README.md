@@ -83,6 +83,7 @@ Program 2 focuses on retrieving the stored financial data and performing complex
 
 ### Stage 3: SQL Queries, Data Visualisation, and Statistical Validation
 
+Appending data takes quite sometime, there is an estimated 600,000+ data points to be retrieved and more to be calculated. (64 data points for one year of reporting, roughly 8-10 years of reporting done for 500 listed companies. If we include quarterly reporting then it is a 192 extra data points a year....)
 
 ---
 <br>

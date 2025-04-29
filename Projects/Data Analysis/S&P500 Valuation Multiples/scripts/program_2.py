@@ -1,3 +1,4 @@
+# Import necessary libraries
 import pandas as pd
 import numpy as np
 import psycopg2
@@ -24,6 +25,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.append(script_dir)
 
+# Import modules from program_1.py script
 from program_1 import (
     ProcessingCache, 
     get_db_connection, 
@@ -31,7 +33,7 @@ from program_1 import (
     FinancialDataAccess
 )
 
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
 
 # Set up logging
@@ -66,7 +68,7 @@ plt.rcParams.update({
     'grid.linestyle': '--',
 })
 
-# Define color palette
+# Define color palette for plots
 PLOT_COLORS = {
     'scatter': '#9671bd',        # soft purple
     'scatter_edge': '#6a408d',   # deeper purple
@@ -77,8 +79,9 @@ PLOT_COLORS = {
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Function to load S&P 500 data from CSV file
 def load_sp500_data(file_path='data/SP500.csv'):
-    """Load S&P 500 data from CSV file."""
+
     try:
         logger.info(f"Reading SP500 data from {file_path}")
         return pd.read_csv(file_path)
@@ -88,16 +91,9 @@ def load_sp500_data(file_path='data/SP500.csv'):
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Function to retrieve industry data for a specific industry in the database
 def fetch_industry_metrics(selected_industry):
-    """
-    Fetch metrics for a specific industry.
     
-    Args:
-        selected_industry (str): Specific industry to fetch metrics for
-    
-    Returns:
-        dict: Dictionary with industry metrics
-    """
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -140,19 +136,13 @@ def fetch_industry_metrics(selected_industry):
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Function to retrieve financial metrics for a specific company in the database
 def fetch_financial_metrics(symbol):
-    """
-    Fetch financial metrics for a company.
     
-    Args:
-        symbol (str): Company symbol
-        
-    Returns:
-        DataFrame: Financial metrics for the company
-    """
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
+                # Query to fetch financial metrics for the specific company
                 query = """
                 WITH LatestReports AS (
                     SELECT DISTINCT ON (fr.company_id, rp.fiscal_date_ending) 
@@ -208,17 +198,9 @@ def fetch_financial_metrics(symbol):
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Main function hanlding all financial calculations
 def calculate_financial_metrics(df, industry_metrics):
-    """
-    Calculate additional financial metrics with robust NaN handling.
-    
-    Args:
-        df (pandas.DataFrame): DataFrame with financial metrics
-        industry_metrics (dict): Dictionary with industry metrics
-    
-    Returns:
-        pandas.DataFrame: DataFrame with additional calculated metrics
-    """
+
     if df is None or df.empty:
         return None
 
@@ -297,35 +279,9 @@ def calculate_financial_metrics(df, industry_metrics):
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def calculate_theoretical_values(X, coefficients):
-    """
-    Calculate theoretical values using regression coefficients.
-    
-    Args:
-        X (ndarray): Input features array
-        coefficients (dict): Dictionary containing c1_coefficient, c2_coefficient, and y_intercept
-        
-    Returns:
-        ndarray: Theoretical values
-    """
-    return (coefficients['y_intercept'] + 
-            coefficients['c1_coefficient'] * X[:, 0] + 
-            coefficients['c2_coefficient'] * X[:, 1])
-
-#------------------------------------------------------------------------------------------------------------------------------------------------------
-
+# Main function to run regression analysis and save results
 def analyze_financial_data(data, selected_industry, confidence=0.90):
-    """
-    Perform regression analysis on financial data and store results in database.
     
-    Args:
-        data (DataFrame): Financial data
-        selected_industry (str): Industry name
-        confidence (float): Confidence level for analysis
-        
-    Returns:
-        DataFrame: Original data frame with added theoretical values
-    """
     try:
         regression_format = {
             'EV/EBIT': ['Return On Invested Capital', '3Y Rev Growth'],
@@ -396,8 +352,17 @@ def analyze_financial_data(data, selected_industry, confidence=0.90):
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Function to calculate theoretical values based on regression coefficients
+def calculate_theoretical_values(X, coefficients):
+    
+    return (coefficients['y_intercept'] + 
+            coefficients['c1_coefficient'] * X[:, 0] + 
+            coefficients['c2_coefficient'] * X[:, 1])
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Function to create a beautiful 3D plot of the regression model
 def create_beautiful_3d_plot(X, y, model, x1_name, x2_name, multiple, selected_industry=None, confidence=0.90):
-    """Create a beautiful 3D plot with enhanced visuals and linear confidence intervals."""
     # Create meshgrid with buffer
     num_points = 100
     buffer_ratio = 0.10
@@ -536,8 +501,9 @@ def create_beautiful_3d_plot(X, y, model, x1_name, x2_name, multiple, selected_i
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Function for regression analysis, statistical tests, and plotting
 def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index, confidence=0.90, selected_industry=None):
-    """Calculate regression predictions and confidence intervals with beautiful 3D visualization."""
+    
     try:
         # Fit the model with constant term
         X_with_const = sm.add_constant(X)
@@ -596,8 +562,9 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------    
 
+# Main function to save all calculated metrics to the database
 def save_calculated_metrics(df, company_id, period_id):
-    """Save calculated metrics to database."""
+
     try:
         conn, cur = get_db_connection()
         for col in df.columns:
@@ -640,8 +607,9 @@ def save_calculated_metrics(df, company_id, period_id):
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Function that defines the formulas for calculated metrics
 def get_metric_formula(metric_name):
-    """Return formula for calculated metrics."""
+    
     formulas = {
         'Total Equity': 'totalAssets - totalLiabilities',
         'Total Debt': 'capitalLeaseObligations + longTermDebt + currentLongTermDebt',
@@ -669,8 +637,9 @@ def get_metric_formula(metric_name):
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# Function to save regression and statistical results to the database
 def save_regression_results(company_id, period_id, multiple, model, diagnostics, plot_binary):
-    """Save comprehensive regression analysis results to database."""
+
     try:
         conn, cur = get_db_connection()
         
@@ -830,8 +799,8 @@ def save_regression_results(company_id, period_id, multiple, model, diagnostics,
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------    
 
+# Main function to execute the program
 def main():
-    """Main program execution with industry processing."""
     try:
         # Set working directory
         os.chdir('Projects/Data Analysis/S&P500 Valuation Multiples')
@@ -858,19 +827,27 @@ def main():
             
             industry_data = []
             for symbol in industry_companies:
-                # Fetch and calculate metrics
+                # Fetch financial data
                 financial_data = fetch_financial_metrics(symbol)
                 if financial_data is not None:
+                    # Calculate metrics
                     calculated_data = calculate_financial_metrics(financial_data, metrics)
                     if calculated_data is not None:
+                        # Save calculated metrics first
+                        company_id = calculated_data['company_id'].iloc[0]
+                        period_id = calculated_data['period_id'].iloc[0]
+                        save_calculated_metrics(calculated_data, company_id, period_id)
                         industry_data.append(calculated_data)
             
             if industry_data:
                 results[industry] = pd.concat(industry_data, ignore_index=True)
                 
-                # Perform regression analysis if enough companies
+                # Only perform regression if enough companies (8 or more)
                 if len(industry_companies) >= 8:
+                    logger.info(f"Performing regression analysis for {industry} with {len(industry_companies)} companies")
                     results[industry] = analyze_financial_data(results[industry], industry)
+                else:
+                    logger.info(f"Skipping regression analysis for {industry} - insufficient companies ({len(industry_companies)})")
         
         return results
     

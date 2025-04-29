@@ -1,8 +1,10 @@
 numpy
 pandas
-matplotlib
+matplotli
 scipy
 statsmodels
 requests
 python-dotenv
 psycopg2-binary
+pathlib
+typing
