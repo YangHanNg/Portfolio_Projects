@@ -806,43 +806,44 @@ class FinancialDataProcessor:
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # Function to categorize industries based on company count
-def get_categorized_industries(self, medium_min=6, medium_max=12, automated=False):
-        
-        if self.sp500_df is None:
-            self.load_data()
-        
-        industry_counts = self.sp500_df['Sector'].value_counts()
+def get_categorized_industries(sp500_df, medium_min=6, medium_max=12, automated=False):
     
-        # Categorize industries
-        small_industries = industry_counts[industry_counts < medium_min]
-        medium_industries = industry_counts[(industry_counts >= medium_min) & 
-                                      (industry_counts <= medium_max)]
-        large_industries = industry_counts[industry_counts > medium_max]
+    if sp500_df is None:
+        logger.error("S&P 500 data not loaded")
+        return None
     
-        # Log the medium industries only when not in automated mode
-        if not automated:
-            logger.info(f"Industries with {medium_min}-{medium_max} companies:")
-            for industry, count in medium_industries.items():
-                logger.info(f"{industry}: {count} companies")
-    
-        # Return categorized industries with counts
-        return {
-            'small': {
-                'industries': small_industries.sort_values().index.tolist(),
-                'counts': small_industries.to_dict(),
-                'description': f"Industries with <{medium_min} companies"
-                },
-            'medium': {
-                'industries': medium_industries.sort_values().index.tolist(),
-                'counts': medium_industries.to_dict(),
-                'description': f"Industries with {medium_min}-{medium_max} companies"
-                },
-            'large': {
-                'industries': large_industries.sort_values().index.tolist(),
-                'counts': large_industries.to_dict(),
-                'description': f"Industries with >{medium_max} companies"
-                }
-            }
+    industry_counts = sp500_df['Sector'].value_counts()
+
+    # Categorize industries
+    small_industries = industry_counts[industry_counts < medium_min]
+    medium_industries = industry_counts[(industry_counts >= medium_min) & 
+                                  (industry_counts <= medium_max)]
+    large_industries = industry_counts[industry_counts > medium_max]
+
+    # Log the medium industries only when not in automated mode
+    if not automated:
+        logger.info(f"Industries with {medium_min}-{medium_max} companies:")
+        for industry, count in medium_industries.items():
+            logger.info(f"{industry}: {count} companies")
+
+    # Return categorized industries with counts
+    return {
+        'small': {
+            'industries': small_industries.sort_values().index.tolist(),
+            'counts': small_industries.to_dict(),
+            'description': f"Industries with <{medium_min} companies"
+        },
+        'medium': {
+            'industries': medium_industries.sort_values().index.tolist(),
+            'counts': medium_industries.to_dict(),
+            'description': f"Industries with {medium_min}-{medium_max} companies"
+        },
+        'large': {
+            'industries': large_industries.sort_values().index.tolist(),
+            'counts': large_industries.to_dict(),
+            'description': f"Industries with >{medium_max} companies"
+        }
+    }
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -1036,7 +1037,7 @@ def main(run_automated=False):
         logger.info(f"Loaded {len(sp500_df)} companies from S&P 500 data")
         
         # Get categorised groups of industries
-        industry_groups = sp500_importer.get_categorized_industries(automated=run_automated)
+        industry_groups = get_categorized_industries(sp500_df, automated=run_automated)
         
         # Load API key
         api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
