@@ -60,7 +60,6 @@ plt.rcParams.update({
     'axes.labelsize': 14,
     'xtick.labelsize': 12,
     'ytick.labelsize': 12,
-    'ztick.labelsize': 12,
     'legend.fontsize': 14,
     'figure.titlesize': 20,
     'axes.grid': True,
