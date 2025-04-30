@@ -1,4 +1,5 @@
 # Import necessary libraries
+from __future__ import annotations  # For Python 3.7+ type hints
 import pandas as pd
 import numpy as np
 import psycopg2
@@ -12,8 +13,8 @@ from dotenv import load_dotenv
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d import Axes3D
-from statsmodels.regression.linear_model import OLS
 import statsmodels.api as sm
+from statsmodels.regression.linear_model import OLS
 from statsmodels.stats.diagnostic import het_breuschpagan
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from scipy import stats
@@ -135,43 +136,50 @@ def fetch_industry_metrics(selected_industry):
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
-# Function to retrieve financial metrics for a specific company in the database
-def fetch_financial_metrics(symbol):
-    
+# Function to retrieve financial data for a company from the database
+def fetch_financial_data(symbol):
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # Query to fetch financial metrics for the specific company
+                # Query to fetch all available financial metrics with fiscal dates
                 query = """
-                WITH LatestReports AS (
-                    SELECT DISTINCT ON (fr.company_id, rp.fiscal_date_ending) 
-                        fr.report_id,
+                WITH RankedMetrics AS (
+                    SELECT 
+                        c.company_id,
+                        fr.period_id,
                         c.symbol,
+                        c.sector,
                         rp.fiscal_date_ending,
-                        fr.report_type
-                    FROM 
-                        FinancialReports fr
-                        JOIN Companies c ON fr.company_id = c.company_id
-                        JOIN ReportingPeriods rp ON fr.period_id = rp.period_id
-                    WHERE 
-                        c.symbol = %s
-                        AND rp.period_type = 'Annual'
-                    ORDER BY 
-                        fr.company_id, 
-                        rp.fiscal_date_ending DESC,
-                        fr.report_type
-                )
-                SELECT 
-                    lr.symbol,
-                    lr.fiscal_date_ending,
-                    m.metric_name,
-                    fd.value
-                FROM 
-                    LatestReports lr
-                    JOIN FinancialData fd ON lr.report_id = fd.report_id
+                        MAX(CASE WHEN m.metric_name = 'totalRevenue' THEN fd.value END) AS "totalRevenue",
+                        MAX(CASE WHEN m.metric_name = 'ebit' THEN fd.value END) AS "ebit",
+                        MAX(CASE WHEN m.metric_name = 'researchAndDevelopment' THEN fd.value END) AS "researchAndDevelopment",
+                        MAX(CASE WHEN m.metric_name = 'interestExpense' THEN fd.value END) AS "interestExpense",
+                        MAX(CASE WHEN m.metric_name = 'incomeBeforeTax' THEN fd.value END) AS "incomeBeforeTax",
+                        MAX(CASE WHEN m.metric_name = 'incomeTaxExpense' THEN fd.value END) AS "incomeTaxExpense",
+                        MAX(CASE WHEN m.metric_name = 'cashAndShortTermInvestments' THEN fd.value END) AS "cashAndShortTermInvestments",
+                        MAX(CASE WHEN m.metric_name = 'totalCurrentAssets' THEN fd.value END) AS "totalCurrentAssets",
+                        MAX(CASE WHEN m.metric_name = 'totalCurrentLiabilities' THEN fd.value END) AS "totalCurrentLiabilities",
+                        MAX(CASE WHEN m.metric_name = 'totalAssets' THEN fd.value END) AS "totalAssets",
+                        MAX(CASE WHEN m.metric_name = 'totalLiabilities' THEN fd.value END) AS "totalLiabilities",
+                        MAX(CASE WHEN m.metric_name = 'depreciationAndAmortization' THEN fd.value END) AS "depreciationAndAmortization",
+                        MAX(CASE WHEN m.metric_name = 'capitalLeaseObligations' THEN fd.value END) AS "capitalLeaseObligations",
+                        MAX(CASE WHEN m.metric_name = 'longTermDebt' THEN fd.value END) AS "longTermDebt",
+                        MAX(CASE WHEN m.metric_name = 'currentLongTermDebt' THEN fd.value END) AS "currentLongTermDebt",
+                        MAX(CASE WHEN m.metric_name = 'propertyPlantEquipment' THEN fd.value END) AS "propertyPlantEquipment",
+                        ROW_NUMBER() OVER (PARTITION BY c.symbol ORDER BY rp.fiscal_date_ending DESC) as row_num
+                    FROM FinancialData fd
                     JOIN FinancialMetrics m ON fd.metric_id = m.metric_id
-                ORDER BY 
-                    lr.fiscal_date_ending DESC;
+                    JOIN FinancialReports fr ON fd.report_id = fr.report_id
+                    JOIN ReportingPeriods rp ON fr.period_id = rp.period_id
+                    JOIN Companies c ON fr.company_id = c.company_id
+                    WHERE 
+                        c.symbol = %s AND 
+                        rp.period_type = 'Annual'
+                    GROUP BY c.company_id, fr.period_id, c.symbol, c.sector, rp.fiscal_date_ending
+                )
+                SELECT *
+                FROM RankedMetrics
+                ORDER BY fiscal_date_ending DESC;
                 """
                 
                 cur.execute(query, (symbol,))
@@ -181,25 +189,27 @@ def fetch_financial_metrics(symbol):
                     logger.warning(f"No financial data found for {symbol}")
                     return None
                 
-                # Convert to DataFrame and pivot
-                df = pd.DataFrame(results)
-                df_pivot = df.pivot(
-                    index=['symbol', 'fiscal_date_ending'],
-                    columns='metric_name',
-                    values='value'
-                ).reset_index()
-                
-                return df_pivot
+                # Create DataFrame with explicit column names
+                columns = [
+                    'company_id', 'period_id', 'symbol', 'sector', 'fiscal_date_ending', 
+                    'totalRevenue', 'ebit', 'researchAndDevelopment', 'interestExpense',
+                    'incomeBeforeTax', 'incomeTaxExpense', 'cashAndShortTermInvestments',
+                    'totalCurrentAssets', 'totalCurrentLiabilities', 'totalAssets',
+                    'totalLiabilities', 'depreciationAndAmortization', 'capitalLeaseObligations',
+                    'longTermDebt', 'currentLongTermDebt', 'propertyPlantEquipment', 'row_num'
+                ]
+                df = pd.DataFrame(results, columns=columns)
+                logger.info(f"Successfully fetched {len(df)} years of financial data for {symbol}")
+                return df
                 
     except Exception as e:
-        logger.error(f"Error fetching financial metrics for {symbol}: {str(e)}")
+        logger.error(f"Error fetching financial data for {symbol}: {str(e)}")
         return None
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
-# Main function hanlding all financial calculations
+# Main function hanlding all financial calculations and regression data preparation
 def calculate_financial_metrics(df, industry_metrics):
-
     if df is None or df.empty:
         return None
 
@@ -222,7 +232,7 @@ def calculate_financial_metrics(df, industry_metrics):
         ]
         df[numeric_columns] = df[numeric_columns].apply(pd.to_numeric, errors='coerce').fillna(0)
 
-        # Calculate metrics
+        # Calculate basic metrics first
         df['Total Equity'] = safe_subtract(df['totalAssets'], df['totalLiabilities'])
         df['Total Debt'] = df['capitalLeaseObligations'] + df['longTermDebt'] + df['currentLongTermDebt']
         df['Capital Invested'] = df['totalAssets'] + df['Total Debt'] + df['cashAndShortTermInvestments']
@@ -236,6 +246,8 @@ def calculate_financial_metrics(df, industry_metrics):
         df['DA'] = safe_division(df['depreciationAndAmortization'], df['EBITDA'])
         df['Effective Tax'] = safe_division(df['incomeTaxExpense'], df['incomeBeforeTax'])
         df['Tax Rate'] = df['Effective Tax'].rolling(window=3, min_periods=1).mean()
+
+        # Calculate metrics needed for regression analysis
         df['After Tax EBIT'] = df['ebit'] * (1 - df['Tax Rate'])
         df['After Tax Operating Margin'] = df['Operating Margin'] * (1 - df['Tax Rate'])
         df['Net CapEx'] = safe_subtract(df['propertyPlantEquipment'], df['propertyPlantEquipment'].shift(-1)) + df['depreciationAndAmortization']
@@ -247,6 +259,8 @@ def calculate_financial_metrics(df, industry_metrics):
         df['3Y Exp Growth'] = df['Expected Growth'].rolling(window=3, min_periods=1).mean()
         df['3Y Rev Growth'] = df['Revenue Growth'].rolling(window=3, min_periods=1).mean()
         df['3Y RIR'] = df['Reinvestment Rate'].rolling(window=3, min_periods=1).mean()
+
+        # Calculate beta and cost metrics
         df['Levered Beta'] = unlevered_data * (1 + df['Debt to Equity'] * (1 - df['Tax Rate']))
         df['Cost of Debt'] = 0.045 + 0.044
         df['Cost of Equity'] = 0.045 + df['Levered Beta'] * 0.055
@@ -254,34 +268,105 @@ def calculate_financial_metrics(df, industry_metrics):
             df['Cost of Debt'] * (1 - df['Tax Rate']) * df['Debt to Equity'] +
             df['Cost of Equity'] * (1 - df['Debt to Equity'])
         )
-        
+
+        # Calculate DCF and multiples
         df['DCF'] = (
             ((1 - df['3Y RIR']) * (1- df['3Y Rev Growth']) * (1 - ((1 + df['3Y Rev Growth'])**3 / (1 + df['WACC'])**3))) / 
             (df['WACC'] - df['3Y Rev Growth']) +
             ((1 - industry_rir) * (1 + df['3Y Rev Growth'])**3 * (1 + df['3Y Exp Growth'])) /
             ((industry_wacc - df['3Y Exp Growth']) * (1 + df['WACC'])**3)
         )
-        
+
+        # Calculate enterprise value multiples
         df['EV/EBIT'] = (1 - df['Tax Rate']) * df['DCF']
         df['EV/EBITDA'] = (1 - df['Tax Rate']) * (1 - df['DA']) * df['DCF']
         df['EV/After Tax EBIT'] = 1 * df['DCF']
         df['EV/Sales'] = df['After Tax Operating Margin'] * df['DCF']
-        df['EV/Capital Invested'] = df['Return On Invested Capital'] * df['DCF'] 
+        df['EV/Capital Invested'] = df['Return On Invested Capital'] * df['DCF']
+
+        # Create a separate DataFrame for regression metrics if more than 8 companies
+        regression_metrics = {
+            'EV/EBIT': ['Return On Invested Capital', '3Y Rev Growth'],
+            'EV/After Tax EBIT': ['Return On Invested Capital', 'After Tax Operating Margin'],
+            'EV/EBITDA': ['Return On Invested Capital', 'DA'],
+            'EV/Sales': ['After Tax Operating Margin', '3Y Rev Growth'],
+            'EV/Capital Invested': ['Return On Invested Capital', '3Y Exp Growth']
+        }
+
+        # Store regression-relevant metrics
+        regression_data = {}
+        for multiple, (x1, x2) in regression_metrics.items():
+            regression_data[multiple] = df[[multiple, x1, x2, 'company_id', 'period_id', 'fiscal_date_ending']].copy()
 
         # Fill NaNs with 0 for final return
         df.fillna(0, inplace=True)
-        return df
+        return df, regression_data
 
     except Exception as e:
         logger.error(f"Error calculating financial metrics: {str(e)}", exc_info=True)
-        return None
+        return None, None
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Main function to save all calculated metrics to the database
+def save_calculated_metrics(df, company_id, period_id):
+    conn = None
+    cur = None
+    try:
+        # Convert NumPy integers to Python integers
+        if isinstance(company_id, (np.int64, np.int32)):
+            company_id = int(company_id)
+        if isinstance(period_id, (np.int64, np.int32)):
+            period_id = int(period_id)
+            
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                for col in df.columns:
+                    # Skip non-numeric columns
+                    if col in ['symbol', 'fiscal_date_ending']:
+                        continue
+
+                    # Insert metric definition first
+                    formula = get_metric_formula(col)
+                    if formula:
+                        cur.execute("""
+                            INSERT INTO CalculatedMetricDefinitions (metric_name, formula, description)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT (metric_name) DO NOTHING
+                        """, (col, formula, f"Formula for {col}"))
+
+                    # Get value and ensure it's a Python native type
+                    value = df[col].iloc[0]
+                    if isinstance(value, (np.int64, np.int32)):
+                        value = int(value)
+                    elif isinstance(value, (np.float64, np.float32)):
+                        value = float(value)
+
+                    # Insert calculated metric values
+                    cur.execute("""
+                        INSERT INTO CalculatedMetrics 
+                        (company_id, period_id, metric_name, metric_value, data_source)
+                        VALUES (%s, %s, %s, %s, 'calculated')
+                        ON CONFLICT (company_id, period_id, metric_name)
+                        DO UPDATE SET 
+                            metric_value = EXCLUDED.metric_value,
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (company_id, period_id, col, value))
+                
+                conn.commit()
+                logger.info(f"Saved calculated metrics for company_id {company_id}, period_id {period_id}")
+        
+    except Exception as e:
+        logger.error(f"Error saving calculated metrics: {str(e)}")
+        if conn and not conn.closed:
+            conn.rollback()
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # Main function to run regression analysis and save results
 def analyze_financial_data(data, selected_industry, confidence=0.90):
-    
     try:
+        # Define regression metrics and their predictors
         regression_format = {
             'EV/EBIT': ['Return On Invested Capital', '3Y Rev Growth'],
             'EV/After Tax EBIT': ['Return On Invested Capital', 'After Tax Operating Margin'],
@@ -289,23 +374,25 @@ def analyze_financial_data(data, selected_industry, confidence=0.90):
             'EV/Sales': ['After Tax Operating Margin', '3Y Rev Growth'],
             'EV/Capital Invested': ['Return On Invested Capital', '3Y Exp Growth']
         }
-        
+
+        # Get required identifiers
         company_id = data['company_id'].iloc[0]
         period_id = data['period_id'].iloc[0]
-        index = data.get('Row_Index', 0).iloc[0]
+        fiscal_date_ending = data['fiscal_date_ending'].iloc[0]
 
         logger.info(f"Processing regression analysis for company {company_id}, period {period_id}")
-        
-        # Create columns for theoretical values
+
+        results = {}
+        # Process each multiple regression separately
         for multiple, (x1_name, x2_name) in regression_format.items():
-            theoretical_col = f"{multiple}_Theoretical"
-            numeric_data = data[[multiple, x1_name, x2_name]].apply(pd.to_numeric, errors='coerce')
+            # Extract only necessary columns for this regression
+            regression_cols = [multiple, x1_name, x2_name]
+            numeric_data = data[regression_cols].apply(pd.to_numeric, errors='coerce')
             
             if numeric_data.isna().any().any():
                 logger.warning(f"Missing data for {multiple} regression, skipping...")
-                data[theoretical_col] = np.nan
                 continue
-                
+
             X = np.column_stack((numeric_data[x1_name].values, numeric_data[x2_name].values))
             y = numeric_data[multiple].values
 
@@ -314,36 +401,43 @@ def analyze_financial_data(data, selected_industry, confidence=0.90):
                 X_with_const = sm.add_constant(X)
                 model = sm.OLS(y, X_with_const).fit()
                 
-                # Calculate and save theoretical values
+                # Calculate theoretical values
                 coefficients = {
                     'y_intercept': float(model.params[0]),
                     'c1_coefficient': float(model.params[1]),
                     'c2_coefficient': float(model.params[2])
                 }
                 theoretical_values = calculate_theoretical_values(X, coefficients)
-                data[theoretical_col] = theoretical_values
                 
-                # Save regression results and plot
+                # Create DataFrame with theoretical values
+                theoretical_df = pd.DataFrame({
+                    f"{multiple}_Theoretical": theoretical_values,
+                    'company_id': company_id,
+                    'period_id': period_id,
+                    'fiscal_date_ending': fiscal_date_ending
+                })
+                
+                # Save theoretical values
+                save_calculated_metrics(theoretical_df, company_id, period_id)
+                
+                # Run regression diagnostics and save results
                 _, _, diagnostics, plot_binary = calculate_predictions_and_confidence(
-                    X, y, multiple, x1_name, x2_name, index, confidence, selected_industry
+                    X, y, multiple, x1_name, x2_name, 0, confidence, selected_industry
                 )
                 save_regression_results(company_id, period_id, multiple, model, diagnostics, plot_binary)
                 
-                # Save theoretical values to database
-                for i, val in enumerate(theoretical_values):
-                    save_calculated_metrics(
-                        pd.DataFrame({theoretical_col: [val]}),
-                        company_id,
-                        period_id
-                    )
+                results[multiple] = {
+                    'theoretical_values': theoretical_values,
+                    'diagnostics': diagnostics
+                }
                 
-                logger.info(f"Completed regression analysis and theoretical calculations for {multiple}")
+                logger.info(f"Completed regression analysis for {multiple}")
+
             except Exception as e:
                 logger.error(f"Failed regression analysis for {multiple}: {str(e)}")
-                data[theoretical_col] = np.nan
                 continue
 
-        return data
+        return results if results else None
 
     except Exception as e:
         logger.error(f"Error in analyze_financial_data: {str(e)}")
@@ -502,7 +596,6 @@ def create_beautiful_3d_plot(X, y, model, x1_name, x2_name, multiple, selected_i
 
 # Function for regression analysis, statistical tests, and plotting
 def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index, confidence=0.90, selected_industry=None):
-    
     try:
         # Fit the model with constant term
         X_with_const = sm.add_constant(X)
@@ -512,11 +605,22 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
         residuals = y - model.predict(X_with_const)
         standardized_residuals = residuals / np.std(residuals)
         
-        # Statistical tests
-        bp_test = het_breuschpagan(residuals, X)
+        # Statistical tests - use X_with_const for Breusch-Pagan test
+        bp_test = het_breuschpagan(residuals, X_with_const)
         vif = [variance_inflation_factor(X_with_const, i) for i in range(X_with_const.shape[1])]
         
-        # Test for linearity
+        # Calculate MSE and create prediction variance array
+        mse = np.sum(model.resid**2) / (len(y) - X_with_const.shape[1])
+        X_inv = np.linalg.inv(X_with_const.T.dot(X_with_const))
+        prediction_var = np.zeros(len(X))
+        
+        # Fix deprecation warning by extracting scalar values properly
+        for i in range(len(X)):
+            x_i = X_with_const[i:i+1]
+            var_i = mse * (1 + x_i.dot(X_inv).dot(x_i.T))
+            prediction_var[i] = var_i.item()  # Properly extract scalar value
+            
+        # Test for linearity using properly extracted scalar values
         reset_pvalue = 1 - stats.f.cdf(
             ((model.rsquared - sm.OLS(y, np.column_stack([X_with_const, model.predict(X_with_const)**2])).fit().rsquared) / 1) / 
             ((1 - model.rsquared) / model.df_resid),
@@ -561,51 +665,6 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------    
 
-# Main function to save all calculated metrics to the database
-def save_calculated_metrics(df, company_id, period_id):
-
-    try:
-        conn, cur = get_db_connection()
-        for col in df.columns:
-            # Skip non-numeric columns
-            if col in ['symbol', 'fiscal_date_ending']:
-                continue
-
-            # Insert metric definition first
-            formula = get_metric_formula(col)
-            if formula:
-                cur.execute("""
-                    INSERT INTO CalculatedMetricDefinitions (metric_name, formula, description)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (metric_name) DO NOTHING
-                """, (col, formula, f"Formula for {col}"))
-
-            # Insert calculated metric values
-            cur.execute("""
-                INSERT INTO CalculatedMetrics 
-                (company_id, period_id, metric_name, metric_value, data_source)
-                VALUES (%s, %s, %s, %s, 'calculated')
-                ON CONFLICT (company_id, period_id, metric_name)
-                DO UPDATE SET 
-                    metric_value = EXCLUDED.metric_value,
-                    updated_at = CURRENT_TIMESTAMP
-            """, (company_id, period_id, col, float(df[col].iloc[0])))
-        
-        conn.commit()
-        logger.info(f"Saved calculated metrics for company_id {company_id}, period_id {period_id}")
-        
-    except Exception as e:
-        logger.error(f"Error saving calculated metrics: {str(e)}")
-        if conn:
-            conn.rollback()
-    finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
-
-#------------------------------------------------------------------------------------------------------------------------------------------------------
-
 # Function that defines the formulas for calculated metrics
 def get_metric_formula(metric_name):
     
@@ -638,163 +697,160 @@ def get_metric_formula(metric_name):
 
 # Function to save regression and statistical results to the database
 def save_regression_results(company_id, period_id, multiple, model, diagnostics, plot_binary):
-
+    conn = None
+    cur = None
     try:
-        conn, cur = get_db_connection()
-        
-        # Prepare statistical data
-        stats_data = {
-            'r_squared': float(model.rsquared),
-            'adj_r_squared': float(model.rsquared_adj),
-            'f_statistic': float(model.fvalue),
-            'f_pvalue': float(model.f_pvalue),
-            'aic': float(model.aic),
-            'bic': float(model.bic)
-        }
-        
-        # Prepare model parameters
-        model_params = {
-            'coefficients': model.params.tolist(),
-            'standard_errors': model.bse.tolist(),
-            't_values': model.tvalues.tolist(),
-            'p_values': model.pvalues.tolist(),
-            'confidence_intervals': model.conf_int().tolist()
-        }
-        
-        # Convert diagnostics to proper JSON format
-        diagnostic_data = {
-            'heteroscedasticity_test': {
-                'test_value': float(diagnostics['Value'][0]),
-                'passes': diagnostics['Pass'][0]
-            },
-            'multicollinearity_test': {
-                'test_value': float(diagnostics['Value'][1]),
-                'passes': diagnostics['Pass'][1]
-            },
-            'normality_test': {
-                'test_value': float(diagnostics['Value'][2]),
-                'passes': diagnostics['Pass'][2]
-            },
-            'linearity_test': {
-                'test_value': float(diagnostics['Value'][3]),
-                'passes': diagnostics['Pass'][3]
-            }
-        }
-        
-        # Insert main regression analysis results
-        cur.execute("""
-            INSERT INTO regression_analysis (
-                company_id, period_id, multiple_type,
-                r_squared, adj_r_squared, f_statistic, f_pvalue, aic, bic,
-                coefficients, standard_errors, t_values, p_values, confidence_intervals,
-                heteroscedasticity_test, multicollinearity_test, normality_test, linearity_test,
-                regression_plot
-            )
-            VALUES (
-                %s, %s, %s,
-                %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s,
-                %s, %s, %s, %s,
-                %s
-            )
-            ON CONFLICT (company_id, period_id, multiple_type)
-            DO UPDATE SET
-                r_squared = EXCLUDED.r_squared,
-                adj_r_squared = EXCLUDED.adj_r_squared,
-                f_statistic = EXCLUDED.f_statistic,
-                f_pvalue = EXCLUDED.f_pvalue,
-                aic = EXCLUDED.aic,
-                bic = EXCLUDED.bic,
-                coefficients = EXCLUDED.coefficients,
-                standard_errors = EXCLUDED.standard_errors,
-                t_values = EXCLUDED.t_values,
-                p_values = EXCLUDED.p_values,
-                confidence_intervals = EXCLUDED.confidence_intervals,
-                heteroscedasticity_test = EXCLUDED.heteroscedasticity_test,
-                multicollinearity_test = EXCLUDED.multicollinearity_test,
-                normality_test = EXCLUDED.normality_test,
-                linearity_test = EXCLUDED.linearity_test,
-                regression_plot = EXCLUDED.regression_plot,
-                analysis_date = CURRENT_TIMESTAMP
-            RETURNING analysis_id
-        """, (
-            company_id, period_id, multiple,
-            stats_data['r_squared'], stats_data['adj_r_squared'],
-            stats_data['f_statistic'], stats_data['f_pvalue'],
-            stats_data['aic'], stats_data['bic'],
-            json.dumps(model_params['coefficients']),
-            json.dumps(model_params['standard_errors']),
-            json.dumps(model_params['t_values']),
-            json.dumps(model_params['p_values']),
-            json.dumps(model_params['confidence_intervals']),
-            json.dumps(diagnostic_data['heteroscedasticity_test']),
-            json.dumps(diagnostic_data['multicollinearity_test']),
-            json.dumps(diagnostic_data['normality_test']),
-            json.dumps(diagnostic_data['linearity_test']),
-            plot_binary
-        ))
-        
-        # Get the analysis_id for storing coefficients
-        analysis_id = cur.fetchone()[0]
-        
-        # Store coefficients for theoretical calculations
-        regression_format = {
-            'EV/EBIT': ['Return On Invested Capital', '3Y Rev Growth'],
-            'EV/After Tax EBIT': ['Return On Invested Capital', 'After Tax Operating Margin'],
-            'EV/EBITDA': ['Return On Invested Capital', 'DA'],
-            'EV/Sales': ['After Tax Operating Margin', '3Y Rev Growth'],
-            'EV/Capital Invested': ['Return On Invested Capital', '3Y Exp Growth']
-        }
-        
-        x1_name, x2_name = regression_format[multiple]
-        
-        # Store coefficients in RegressionCoefficients table
-        cur.execute("""
-            INSERT INTO RegressionCoefficients (
-                analysis_id, multiple_type, x1_name, x2_name,
-                c1_coefficient, c2_coefficient, y_intercept
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (analysis_id, multiple_type)
-            DO UPDATE SET
-                x1_name = EXCLUDED.x1_name,
-                x2_name = EXCLUDED.x2_name,
-                c1_coefficient = EXCLUDED.c1_coefficient,
-                c2_coefficient = EXCLUDED.c2_coefficient,
-                y_intercept = EXCLUDED.y_intercept
-        """, (
-            analysis_id, multiple, x1_name, x2_name,
-            float(model.params[1]), float(model.params[2]), float(model.params[0])
-        ))
-        
-        # Insert detailed diagnostic results
-        for test_type, (metric, value, passes) in zip(
-            ['Heteroscedasticity', 'Multicollinearity', 'Normality', 'Linearity'],
-            zip(diagnostics['Metric'], diagnostics['Value'], diagnostics['Pass'])
-        ):
-            cur.execute("""
-                INSERT INTO regression_diagnostics (
-                    analysis_id, diagnostic_type, test_value,
-                    passes_threshold, threshold_value
-                )
-                VALUES (%s, %s, %s, %s, %s)
-            """, (
-                analysis_id, test_type, float(value),
-                passes, 0.05 if test_type in ['Heteroscedasticity', 'Linearity'] else (5.0 if test_type == 'Multicollinearity' else 2.0)
-            ))
-        
-        conn.commit()
-        logger.info(f"Successfully saved regression results for {multiple}")
-        
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Prepare statistical data
+                stats_data = {
+                    'r_squared': float(model.rsquared),
+                    'adj_r_squared': float(model.rsquared_adj),
+                    'f_statistic': float(model.fvalue),
+                    'f_pvalue': float(model.f_pvalue),
+                    'aic': float(model.aic),
+                    'bic': float(model.bic)
+                }
+                
+                # Prepare model parameters
+                model_params = {
+                    'coefficients': model.params.tolist(),
+                    'standard_errors': model.bse.tolist(),
+                    't_values': model.tvalues.tolist(),
+                    'p_values': model.pvalues.tolist(),
+                    'confidence_intervals': model.conf_int().tolist()
+                }
+                
+                # Convert diagnostics to proper JSON format
+                diagnostic_data = {
+                    'heteroscedasticity_test': {
+                        'test_value': float(diagnostics['Value'][0]),
+                        'passes': diagnostics['Pass'][0]
+                    },
+                    'multicollinearity_test': {
+                        'test_value': float(diagnostics['Value'][1]),
+                        'passes': diagnostics['Pass'][1]
+                    },
+                    'normality_test': {
+                        'test_value': float(diagnostics['Value'][2]),
+                        'passes': diagnostics['Pass'][2]
+                    },
+                    'linearity_test': {
+                        'test_value': float(diagnostics['Value'][3]),
+                        'passes': diagnostics['Pass'][3]
+                    }
+                }
+                
+                # Insert main regression analysis results
+                cur.execute("""
+                    INSERT INTO regression_analysis (
+                        company_id, period_id, multiple_type,
+                        r_squared, adj_r_squared, f_statistic, f_pvalue, aic, bic,
+                        coefficients, standard_errors, t_values, p_values, confidence_intervals,
+                        heteroscedasticity_test, multicollinearity_test, normality_test, linearity_test,
+                        regression_plot
+                    )
+                    VALUES (
+                        %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s
+                    )
+                    ON CONFLICT (company_id, period_id, multiple_type)
+                    DO UPDATE SET
+                        r_squared = EXCLUDED.r_squared,
+                        adj_r_squared = EXCLUDED.adj_r_squared,
+                        f_statistic = EXCLUDED.f_statistic,
+                        f_pvalue = EXCLUDED.f_pvalue,
+                        aic = EXCLUDED.aic,
+                        bic = EXCLUDED.bic,
+                        coefficients = EXCLUDED.coefficients,
+                        standard_errors = EXCLUDED.standard_errors,
+                        t_values = EXCLUDED.t_values,
+                        p_values = EXCLUDED.p_values,
+                        confidence_intervals = EXCLUDED.confidence_intervals,
+                        heteroscedasticity_test = EXCLUDED.heteroscedasticity_test,
+                        multicollinearity_test = EXCLUDED.multicollinearity_test,
+                        normality_test = EXCLUDED.normality_test,
+                        linearity_test = EXCLUDED.linearity_test,
+                        regression_plot = EXCLUDED.regression_plot,
+                        analysis_date = CURRENT_TIMESTAMP
+                    RETURNING analysis_id
+                """, (
+                    company_id, period_id, multiple,
+                    stats_data['r_squared'], stats_data['adj_r_squared'],
+                    stats_data['f_statistic'], stats_data['f_pvalue'],
+                    stats_data['aic'], stats_data['bic'],
+                    json.dumps(model_params['coefficients']),
+                    json.dumps(model_params['standard_errors']),
+                    json.dumps(model_params['t_values']),
+                    json.dumps(model_params['p_values']),
+                    json.dumps(model_params['confidence_intervals']),
+                    json.dumps(diagnostic_data['heteroscedasticity_test']),
+                    json.dumps(diagnostic_data['multicollinearity_test']),
+                    json.dumps(diagnostic_data['normality_test']),
+                    json.dumps(diagnostic_data['linearity_test']),
+                    plot_binary
+                ))
+                
+                # Get the analysis_id for storing coefficients
+                analysis_id = cur.fetchone()[0]
+                
+                # Store coefficients for theoretical calculations
+                regression_format = {
+                    'EV/EBIT': ['Return On Invested Capital', '3Y Rev Growth'],
+                    'EV/After Tax EBIT': ['Return On Invested Capital', 'After Tax Operating Margin'],
+                    'EV/EBITDA': ['Return On Invested Capital', 'DA'],
+                    'EV/Sales': ['After Tax Operating Margin', '3Y Rev Growth'],
+                    'EV/Capital Invested': ['Return On Invested Capital', '3Y Exp Growth']
+                }
+                
+                x1_name, x2_name = regression_format[multiple]
+                
+                # Store coefficients in RegressionCoefficients table
+                cur.execute("""
+                    INSERT INTO RegressionCoefficients (
+                        analysis_id, multiple_type, x1_name, x2_name,
+                        c1_coefficient, c2_coefficient, y_intercept
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (analysis_id, multiple_type)
+                    DO UPDATE SET
+                        x1_name = EXCLUDED.x1_name,
+                        x2_name = EXCLUDED.x2_name,
+                        c1_coefficient = EXCLUDED.c1_coefficient,
+                        c2_coefficient = EXCLUDED.c2_coefficient,
+                        y_intercept = EXCLUDED.y_intercept
+                """, (
+                    analysis_id, multiple, x1_name, x2_name,
+                    float(model.params[1]), float(model.params[2]), float(model.params[0])
+                ))
+                
+                # Insert detailed diagnostic results
+                for test_type, (metric, value, passes) in zip(
+                    ['Heteroscedasticity', 'Multicollinearity', 'Normality', 'Linearity'],
+                    zip(diagnostics['Metric'], diagnostics['Value'], diagnostics['Pass'])
+                ):
+                    cur.execute("""
+                        INSERT INTO regression_diagnostics (
+                            analysis_id, diagnostic_type, test_value,
+                            passes_threshold, threshold_value
+                        )
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (
+                        analysis_id, test_type, float(value),
+                        passes, 0.05 if test_type in ['Heteroscedasticity', 'Linearity'] else (5.0 if test_type == 'Multicollinearity' else 2.0)
+                    ))
+                
+                conn.commit()
+                logger.info(f"Successfully saved regression results for {multiple}")
+                
     except Exception as e:
         logger.error(f"Error saving regression results: {str(e)}")
-        if conn:
+        if conn and not conn.closed:
             conn.rollback()
-    finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        raise
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------    
 
@@ -809,52 +865,93 @@ def main():
         if sp500_df is None:
             return None
 
-        # Get industry metrics and perform calculations
-        industry_metrics = {}
-        for industry in sp500_df['Sector'].unique():
-            metrics = fetch_industry_metrics(industry)
-            if metrics:
-                industry_metrics[industry] = metrics
-        
-        # Process companies by industry
-        results = {}
-        for industry, metrics in industry_metrics.items():
-            logger.info(f"\nProcessing {industry}")
+        # Get industry company counts and sort from smallest to largest
+        industry_counts = sp500_df['Sector'].value_counts().sort_values()
+        logger.info("Industry counts (sorted from smallest to largest):")
+        for industry, count in industry_counts.items():
+            logger.info(f"{industry}: {count} companies")
+
+        # Process each industry
+        for industry, count in industry_counts.items():
+            logger.info(f"\nProcessing {industry} with {count} companies")
             
             # Get companies in this industry
             industry_companies = sp500_df[sp500_df['Sector'] == industry]['Symbol'].tolist()
             
-            industry_data = []
+            # Get industry metrics
+            industry_metrics = fetch_industry_metrics(industry)
+            if not industry_metrics:
+                logger.warning(f"No industry metrics available for {industry}")
+                continue
+
+            # Store for regression analysis if industry has enough companies
+            regression_ready = count >= 8
+            if regression_ready:
+                industry_regression_data = {
+                    'metrics': [],  # Store regression metrics for all companies
+                    'company_data': {}  # Map of company_id to their data
+                }
+
+            # Process each company in the industry
             for symbol in industry_companies:
-                # Fetch financial data
-                financial_data = fetch_financial_metrics(symbol)
-                if financial_data is not None:
-                    # Calculate metrics
-                    calculated_data = calculate_financial_metrics(financial_data, metrics)
-                    if calculated_data is not None:
-                        # Save calculated metrics first
-                        company_id = calculated_data['company_id'].iloc[0]
-                        period_id = calculated_data['period_id'].iloc[0]
-                        save_calculated_metrics(calculated_data, company_id, period_id)
-                        industry_data.append(calculated_data)
-            
-            if industry_data:
-                results[industry] = pd.concat(industry_data, ignore_index=True)
+                # Fetch financial data for the company
+                financial_data = fetch_financial_data(symbol)
+                if financial_data is None:
+                    continue
+
+                # Calculate metrics for the company
+                calculated_metrics, regression_metrics = calculate_financial_metrics(financial_data, industry_metrics)
+                if calculated_metrics is None:
+                    continue
+
+                # Save calculated metrics for all companies
+                for _, row in calculated_metrics.iterrows():
+                    save_calculated_metrics(pd.DataFrame([row]), row['company_id'], row['period_id'])
+
+                # If industry qualifies for regression, store the regression metrics
+                if regression_ready:
+                    company_id = calculated_metrics['company_id'].iloc[0]
+                    industry_regression_data['company_data'][company_id] = regression_metrics
+                    
+            # Perform regression analysis if industry qualifies
+            if regression_ready:
+                logger.info(f"Performing regression analysis for {industry}")
                 
-                # Only perform regression if enough companies (8 or more)
-                if len(industry_companies) >= 8:
-                    logger.info(f"Performing regression analysis for {industry} with {len(industry_companies)} companies")
-                    results[industry] = analyze_financial_data(results[industry], industry)
-                else:
-                    logger.info(f"Skipping regression analysis for {industry} - insufficient companies ({len(industry_companies)})")
-        
-        return results
-    
+                # Get the maximum number of years available across all companies
+                max_years = min(5, max(
+                    len(metrics[next(iter(metrics))]) 
+                    for metrics in industry_regression_data['company_data'].values()
+                ))
+
+                # Process each year, starting from the most recent
+                for year_index in range(max_years):
+                    year_data = []
+                    
+                    # Collect data for this year from each company
+                    for company_id, company_metrics in industry_regression_data['company_data'].items():
+                        for multiple, metrics_df in company_metrics.items():
+                            if len(metrics_df) > year_index:
+                                year_data.append(metrics_df.iloc[year_index])
+                    
+                    if len(year_data) >= 8:  # Ensure enough companies have data for this year
+                        year_df = pd.DataFrame(year_data)
+                        analyzed_data = analyze_financial_data(year_df, industry)
+                        if analyzed_data is not None:
+                            logger.info(f"Completed regression analysis for {industry} - Year {year_index + 1}")
+                    else:
+                        logger.warning(f"Insufficient data for regression analysis in {industry} - Year {year_index + 1}")
+
+            logger.info(f"Completed processing {industry}")
+
+        logger.info("Completed processing all industries")
+        return True
+
     except Exception as e:
-        logging.error(f"An error occurred in main: {str(e)}", exc_info=True)
+        logger.error(f"An error occurred in main: {str(e)}", exc_info=True)
         return None
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
+
