@@ -93,7 +93,6 @@ def load_sp500_data(file_path='data/SP500.csv'):
 
 # Function to retrieve industry data for a specific industry in the database
 def fetch_industry_metrics(selected_industry):
-    
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -103,9 +102,7 @@ def fetch_industry_metrics(selected_industry):
                     i.sector_name AS industry_name, 
                     i.reinvestment_rate AS industry_rir, 
                     i.cost_of_capital AS industry_wacc,
-                    (SELECT unlevered_data FROM companies 
-                     WHERE sector = i.sector_name 
-                     LIMIT 1) AS unlevered_data
+                    i.unlevered_data AS unlevered_data
                 FROM 
                     industries i
                 WHERE 
@@ -148,7 +145,7 @@ def fetch_financial_data(symbol):
                         c.company_id,
                         fr.period_id,
                         c.symbol,
-                        c.sector,
+                        i.sector_name as sector,
                         rp.fiscal_date_ending,
                         MAX(CASE WHEN m.metric_name = 'totalRevenue' THEN fd.value END) AS "totalRevenue",
                         MAX(CASE WHEN m.metric_name = 'ebit' THEN fd.value END) AS "ebit",
@@ -166,15 +163,16 @@ def fetch_financial_data(symbol):
                         MAX(CASE WHEN m.metric_name = 'currentLongTermDebt' THEN fd.value END) AS "currentLongTermDebt",
                         MAX(CASE WHEN m.metric_name = 'propertyPlantEquipment' THEN fd.value END) AS "propertyPlantEquipment",
                         ROW_NUMBER() OVER (PARTITION BY c.symbol ORDER BY rp.fiscal_date_ending DESC) as row_num
-                    FROM FinancialData fd
-                    JOIN FinancialMetrics m ON fd.metric_id = m.metric_id
-                    JOIN FinancialReports fr ON fd.report_id = fr.report_id
-                    JOIN ReportingPeriods rp ON fr.period_id = rp.period_id
-                    JOIN Companies c ON fr.company_id = c.company_id
+                    FROM financial_data fd
+                    JOIN financial_metrics m ON fd.metric_id = m.metric_id
+                    JOIN financial_reports fr ON fd.report_id = fr.report_id
+                    JOIN reporting_periods rp ON fr.period_id = rp.period_id
+                    JOIN companies c ON fr.company_id = c.company_id
+                    JOIN industries i ON c.industry_id = i.industry_id
                     WHERE 
                         c.symbol = %s AND 
                         rp.period_type = 'Annual'
-                    GROUP BY c.company_id, fr.period_id, c.symbol, c.sector, rp.fiscal_date_ending
+                    GROUP BY c.company_id, fr.period_id, c.symbol, i.sector_name, rp.fiscal_date_ending
                 )
                 SELECT *
                 FROM RankedMetrics
@@ -343,13 +341,13 @@ def save_calculated_metrics(df, company_id, period_id):
                             logger.warning(f"Skipping non-numeric value for metric {col}")
                             continue
 
-                        # Get or create the metric definition
+                        # Get formula for the metric if it exists
                         formula = get_metric_formula(col)
                         metric_id = None
                         
                         # First try to get existing metric
                         cur.execute("""
-                            SELECT metric_id FROM FinancialMetrics 
+                            SELECT metric_id FROM financial_metrics 
                             WHERE metric_name = %s
                         """, (col,))
                         result = cur.fetchone()
@@ -357,12 +355,21 @@ def save_calculated_metrics(df, company_id, period_id):
                         if result:
                             metric_id = result[0]
                         else:
-                            # Create new metric if it doesn't exist
+                            # Store formula in calculated_metric_definitions if it exists
+                            if formula:
+                                cur.execute("""
+                                    INSERT INTO calculated_metric_definitions (metric_name, formula)
+                                    VALUES (%s, %s)
+                                    ON CONFLICT (metric_name) 
+                                    DO UPDATE SET formula = EXCLUDED.formula
+                                """, (col, formula))
+
+                            # Create new metric in financial_metrics
                             cur.execute("""
-                                INSERT INTO FinancialMetrics (metric_name, formula)
-                                VALUES (%s, %s)
+                                INSERT INTO financial_metrics (metric_name)
+                                VALUES (%s)
                                 RETURNING metric_id
-                            """, (col, formula))
+                            """, (col,))
                             metric_id = cur.fetchone()[0]
 
                         # Add to batch data with metric_id
@@ -380,7 +387,7 @@ def save_calculated_metrics(df, company_id, period_id):
                         while retry_count < 3:  # Retry up to 3 times
                             try:
                                 cur.executemany("""
-                                    INSERT INTO CalculatedMetrics 
+                                    INSERT INTO calculated_metrics 
                                     (company_id, period_id, metric_id, metric_value, data_source)
                                     VALUES (%s, %s, %s, %s, %s)
                                     ON CONFLICT (company_id, period_id, metric_id)
@@ -638,7 +645,16 @@ def create_beautiful_3d_plot(X, y, model, x1_name, x2_name, multiple, selected_i
         frameon=False
     )
 
-    return fig, ax
+    # Update references to tables in plot saving
+    try:
+        # Convert plot to binary for RegressionAnalysis table storage
+        img_data = io.BytesIO()
+        fig.savefig(img_data, format='png', bbox_inches='tight', dpi=300)
+        return fig, ax
+    except Exception as e:
+        logger.error(f"Error saving regression plot: {str(e)}")
+        plt.close(fig)
+        raise
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -653,61 +669,59 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
         residuals = y - model.predict(X_with_const)
         standardized_residuals = residuals / np.std(residuals)
         
-        # Statistical tests - use X_with_const for Breusch-Pagan test
+        # Statistical tests
         bp_test = het_breuschpagan(residuals, X_with_const)
         vif = [variance_inflation_factor(X_with_const, i) for i in range(X_with_const.shape[1])]
         
-        # Calculate MSE and create prediction variance array
+        # Calculate prediction intervals
         mse = np.sum(model.resid**2) / (len(y) - X_with_const.shape[1])
-        X_inv = np.linalg.inv(X_with_const.T.dot(X_with_const))
         prediction_var = np.zeros(len(X))
-        
-        # Calculate prediction variance for each point properly extracting scalar values
         for i in range(len(X)):
             x_i = X_with_const[i:i+1]
-            var_i = x_i.dot(X_inv).dot(x_i.T)
-            # Properly extract scalar value using item() or float()
-            prediction_var[i] = float(mse * (1 + var_i[0,0]))
-            
-        # Test for linearity using properly extracted scalar values
-        reset_pvalue = 1 - stats.f.cdf(
-            ((model.rsquared - sm.OLS(y, np.column_stack([X_with_const, model.predict(X_with_const)**2])).fit().rsquared) / 1) / 
-            ((1 - model.rsquared) / model.df_resid),
-            1, model.df_resid
-        )
+            prediction_var[i] = mse * (1 + x_i.dot(np.linalg.inv(X_with_const.T.dot(X_with_const))).dot(x_i.T))
+
+        # Calculate t-value for confidence intervals
+        t_value = t.ppf((1 + confidence) / 2, df=model.df_resid)
+        ci_margin = t_value * np.sqrt(prediction_var)
         
-        # Create beautiful 3D plot
-        fig, ax = create_beautiful_3d_plot(
-            X, y, model, x1_name, x2_name, 
-            multiple, selected_industry, confidence
-        )
-        
-        # Save plot to binary PDF with high quality
-        buf = io.BytesIO()
-        plt.savefig(buf, format='pdf', dpi=300, bbox_inches='tight')
-        plot_binary = buf.getvalue()
-        buf.close()
-        plt.close()
-        
-        # Package diagnostic results
+        # Store diagnostic information
         diagnostics = {
-            'Metric': ['Heteroscedasticity', 'Multicollinearity', 'Normality', 'Linearity'],
-            'Value': [
-                bp_test[1], 
-                max(vif[1:]), 
-                np.mean(np.abs(standardized_residuals)),
-                reset_pvalue
-            ],
-            'Pass': [
-                bp_test[1] > 0.05,
-                all(v < 5 for v in vif[1:]),
-                np.mean(np.abs(standardized_residuals)) < 2,
-                reset_pvalue > 0.05
-            ]
+            'r_squared': model.rsquared,
+            'adj_r_squared': model.rsquared_adj,
+            'f_statistic': model.fvalue,
+            'f_pvalue': model.f_pvalue,
+            'aic': model.aic,
+            'bic': model.bic,
+            'coefficients': model.params.to_dict(),
+            'standard_errors': model.bse.to_dict(),
+            't_values': model.tvalues.to_dict(),
+            'p_values': model.pvalues.to_dict(),
+            'confidence_intervals': {
+                'lower': list(model.predict(X_with_const) - ci_margin),
+                'upper': list(model.predict(X_with_const) + ci_margin)
+            },
+            'heteroscedasticity_test': {
+                'statistic': float(bp_test[0]),
+                'p_value': float(bp_test[1])
+            },
+            'multicollinearity_test': {
+                'vif_const': float(vif[0]),
+                'vif_x1': float(vif[1]),
+                'vif_x2': float(vif[2])
+            }
         }
+
+        # Create and save plot
+        fig, ax = create_beautiful_3d_plot(X, y, model, x1_name, x2_name, multiple, selected_industry, confidence)
         
-        return model.conf_int(1 - confidence), model, diagnostics, plot_binary
-        
+        # Convert plot to binary for storage
+        img_data = io.BytesIO()
+        fig.savefig(img_data, format='png', bbox_inches='tight')
+        plot_binary = img_data.getvalue()
+        plt.close(fig)
+
+        return model, diagnostics, plot_binary
+
     except Exception as e:
         logger.error(f"Error in calculate_predictions_and_confidence: {str(e)}")
         raise
@@ -857,9 +871,9 @@ def save_regression_results(company_id, period_id, multiple, model, diagnostics,
                 
                 x1_name, x2_name = regression_format[multiple]
                 
-                # Store coefficients in RegressionCoefficients table
+                # Store coefficients in regression_coefficients table
                 cur.execute("""
-                    INSERT INTO RegressionCoefficients (
+                    INSERT INTO regression_coefficients (
                         analysis_id, multiple_type, x1_name, x2_name,
                         c1_coefficient, c2_coefficient, y_intercept
                     )
@@ -876,7 +890,7 @@ def save_regression_results(company_id, period_id, multiple, model, diagnostics,
                     float(model.params[1]), float(model.params[2]), float(model.params[0])
                 ))
                 
-                # Insert detailed diagnostic results
+                # Insert detailed diagnostic results in regression_diagnostics table
                 for test_type, (metric, value, passes) in zip(
                     ['Heteroscedasticity', 'Multicollinearity', 'Normality', 'Linearity'],
                     zip(diagnostics['Metric'], diagnostics['Value'], diagnostics['Pass'])
@@ -1004,3 +1018,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

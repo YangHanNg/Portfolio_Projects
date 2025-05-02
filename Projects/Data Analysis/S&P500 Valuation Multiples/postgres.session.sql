@@ -1,5 +1,5 @@
 -- Useful query for pivoting financial metrics data
-WITH FinancialMetricsPivot AS (
+WITH financial_metrics_pivot AS (
     SELECT 
         c.symbol,
         rp.fiscal_date_ending,
@@ -20,11 +20,11 @@ WITH FinancialMetricsPivot AS (
         MAX(CASE WHEN m.metric_name = 'currentLongTermDebt' THEN fd.value END) AS "currentLongTermDebt",
         MAX(CASE WHEN m.metric_name = 'propertyPlantEquipment' THEN fd.value END) AS "propertyPlantEquipment",
         ROW_NUMBER() OVER (PARTITION BY c.symbol ORDER BY rp.fiscal_date_ending DESC) AS row_num
-    FROM FinancialData fd
-    JOIN FinancialMetrics m ON fd.metric_id = m.metric_id
-    JOIN FinancialReports fr ON fd.report_id = fr.report_id
-    JOIN ReportingPeriods rp ON fr.period_id = rp.period_id
-    JOIN Companies c ON fr.company_id = c.company_id
+    FROM financial_data fd
+    JOIN financial_metrics m ON fd.metric_id = m.metric_id
+    JOIN financial_reports fr ON fd.report_id = fr.report_id
+    JOIN reporting_periods rp ON fr.period_id = rp.period_id
+    JOIN companies c ON fr.company_id = c.company_id
     WHERE 
         c.symbol = 'AAPL' AND 
         rp.period_type = 'Annual'
@@ -39,7 +39,7 @@ SELECT
     "interestExpense",
     "incomeBeforeTax",
     "incomeTaxExpense",
-    "cashAndShortTermInvestments",
+    "cashAndShortTermInvestments", 
     "totalCurrentAssets",
     "totalCurrentLiabilities",
     "totalAssets",
@@ -49,5 +49,5 @@ SELECT
     "longTermDebt",
     "currentLongTermDebt",
     "propertyPlantEquipment"
-FROM FinancialMetricsPivot
+FROM financial_metrics_pivot
 ORDER BY fiscal_date_ending DESC;

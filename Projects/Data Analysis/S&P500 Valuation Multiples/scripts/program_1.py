@@ -197,7 +197,7 @@ def create_tables():
                     company_id SERIAL PRIMARY KEY,
                     symbol VARCHAR(10) UNIQUE NOT NULL,
                     name VARCHAR(255),
-                    industry_id INTEGER REFERENCES Industries(industry_id),
+                    industry_id INTEGER REFERENCES industries(industry_id),
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -230,8 +230,8 @@ def create_tables():
             "financial_reports": """
                 CREATE TABLE IF NOT EXISTS financial_reports (
                     report_id SERIAL PRIMARY KEY,
-                    company_id INTEGER REFERENCES Companies(company_id),
-                    period_id INTEGER REFERENCES ReportingPeriods(period_id),
+                    company_id INTEGER REFERENCES companies(company_id),
+                    period_id INTEGER REFERENCES reporting_periods(period_id),
                     report_type VARCHAR(50) NOT NULL,
                     reported_currency VARCHAR(10),
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -252,8 +252,8 @@ def create_tables():
             "financial_data": """
                 CREATE TABLE IF NOT EXISTS financial_data (
                     data_id SERIAL PRIMARY KEY,
-                    report_id INTEGER REFERENCES FinancialReports(report_id),
-                    metric_id INTEGER REFERENCES FinancialMetrics(metric_id),
+                    report_id INTEGER REFERENCES financial_reports(report_id),
+                    metric_id INTEGER REFERENCES financial_metrics(metric_id),
                     value NUMERIC,
                     is_null BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -263,9 +263,9 @@ def create_tables():
             "calculated_metrics": """
                 CREATE TABLE IF NOT EXISTS calculated_metrics (
                     calc_metric_id SERIAL PRIMARY KEY,
-                    company_id INTEGER REFERENCES Companies(company_id),
-                    period_id INTEGER REFERENCES ReportingPeriods(period_id),
-                    metric_id INTEGER REFERENCES FinancialMetrics(metric_id),
+                    company_id INTEGER REFERENCES companies(company_id),
+                    period_id INTEGER REFERENCES reporting_periods(period_id),
+                    metric_id INTEGER REFERENCES financial_metrics(metric_id),
                     metric_value DECIMAL(19,4) NOT NULL,
                     calculation_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     data_source VARCHAR(50),
@@ -289,8 +289,8 @@ def create_tables():
             "regression_analysis": """
                 CREATE TABLE IF NOT EXISTS regression_analysis (
                     analysis_id SERIAL PRIMARY KEY,
-                    company_id INTEGER REFERENCES Companies(company_id),
-                    period_id INTEGER REFERENCES ReportingPeriods(period_id),
+                    company_id INTEGER REFERENCES companies(company_id),
+                    period_id INTEGER REFERENCES reporting_periods(period_id),
                     multiple_type VARCHAR(50),
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     r_squared FLOAT,
@@ -346,23 +346,23 @@ def create_tables():
             execute_query(query)
             logger.debug(f"Created table: {name}")
         
-        # Create indexes
+        # Create indexes using consistent lowercase naming
         indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_financial_data_report_id ON FinancialData(report_id)",
-            "CREATE INDEX IF NOT EXISTS idx_financial_reports_company_id ON FinancialReports(company_id)",
-            "CREATE INDEX IF NOT EXISTS idx_financial_reports_period_id ON FinancialReports(period_id)",
-            "CREATE INDEX IF NOT EXISTS idx_companies_sector ON Companies(sector)",
-            "CREATE INDEX IF NOT EXISTS idx_companies_industry ON Companies(industry_id)",
-            "CREATE INDEX IF NOT EXISTS idx_industries_sector ON Industries(sector_name)",
-            "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_company ON CalculatedMetrics(company_id)",
-            "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_period ON CalculatedMetrics(period_id)",
-            "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_metric ON CalculatedMetrics(metric_id)",
+            "CREATE INDEX IF NOT EXISTS idx_financial_data_report_id ON financial_data(report_id)",
+            "CREATE INDEX IF NOT EXISTS idx_financial_reports_company_id ON financial_reports(company_id)",
+            "CREATE INDEX IF NOT EXISTS idx_financial_reports_period_id ON financial_reports(period_id)",
+            "CREATE INDEX IF NOT EXISTS idx_companies_sector ON companies(sector)",
+            "CREATE INDEX IF NOT EXISTS idx_companies_industry ON companies(industry_id)",
+            "CREATE INDEX IF NOT EXISTS idx_industries_sector ON industries(sector_name)",
+            "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_company ON calculated_metrics(company_id)",
+            "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_period ON calculated_metrics(period_id)",
+            "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_metric ON calculated_metrics(metric_id)",
             "CREATE INDEX IF NOT EXISTS idx_regression_company ON regression_analysis(company_id)",
             "CREATE INDEX IF NOT EXISTS idx_regression_period ON regression_analysis(period_id)",
             "CREATE INDEX IF NOT EXISTS idx_regression_multiple ON regression_analysis(multiple_type)",
             "CREATE INDEX IF NOT EXISTS idx_diagnostics_analysis ON regression_diagnostics(analysis_id)",
-            "CREATE INDEX IF NOT EXISTS idx_coefficients_analysis ON RegressionCoefficients(analysis_id)",
-            "CREATE INDEX IF NOT EXISTS idx_coefficients_multiple ON RegressionCoefficients(multiple_type)"
+            "CREATE INDEX IF NOT EXISTS idx_coefficients_analysis ON regression_coefficients(analysis_id)",
+            "CREATE INDEX IF NOT EXISTS idx_coefficients_multiple ON regression_coefficients(multiple_type)"
         ]
         
         # Create all indexes
@@ -415,7 +415,7 @@ class FinancialDataAccess:
         industry_id = None
         if sector_name:
             query = """
-            SELECT industry_id FROM Industries 
+            SELECT industry_id FROM industries 
             WHERE sector_name = %s AND industry_name = COALESCE(%s, 'N/A')
             """
             result = execute_query(query, (sector_name, industry_name), fetch=True)
@@ -424,12 +424,12 @@ class FinancialDataAccess:
         
         # Then insert the company
         query = """
-        INSERT INTO Companies (symbol, name, industry_id)
+        INSERT INTO companies (symbol, name, industry_id)
         VALUES (%s, %s, %s)
         ON CONFLICT (symbol) 
         DO UPDATE SET 
-            name = COALESCE(%s, Companies.name),
-            industry_id = COALESCE(%s, Companies.industry_id),
+            name = COALESCE(%s, companies.name),
+            industry_id = COALESCE(%s, companies.industry_id),
             updated_at = CURRENT_TIMESTAMP
         RETURNING company_id
         """
@@ -452,7 +452,7 @@ class FinancialDataAccess:
             quarter = (month - 1) // 3 + 1
         # SQL query to insert or update reporting period data
         query = """
-        INSERT INTO ReportingPeriods (period_type, fiscal_date_ending, year, quarter)
+        INSERT INTO reporting_periods (period_type, fiscal_date_ending, year, quarter)
         VALUES (%s, %s, %s, %s)
         ON CONFLICT (period_type, fiscal_date_ending) 
         DO UPDATE SET 
@@ -473,11 +473,11 @@ class FinancialDataAccess:
         
         # SQL query to insert or update financial report data
         query = """
-        INSERT INTO FinancialReports (company_id, period_id, report_type, reported_currency)
+        INSERT INTO financial_reports (company_id, period_id, report_type, reported_currency)
         VALUES (%s, %s, %s, %s)
         ON CONFLICT (company_id, period_id, report_type) 
         DO UPDATE SET 
-            reported_currency = COALESCE(%s, FinancialReports.reported_currency),
+            reported_currency = COALESCE(%s, financial_reports.reported_currency),
             updated_at = CURRENT_TIMESTAMP
         RETURNING report_id
         """
@@ -498,13 +498,13 @@ class FinancialDataAccess:
         
         #SQL query to insert or update financial metric data
         query = """
-        INSERT INTO FinancialMetrics (metric_name, display_name, category, data_type)
+        INSERT INTO financial_metrics (metric_name, display_name, category, data_type)
         VALUES (%s, %s, %s, %s)
         ON CONFLICT (metric_name) 
         DO UPDATE SET 
-            display_name = COALESCE(%s, FinancialMetrics.display_name),
-            category = COALESCE(%s, FinancialMetrics.category),
-            data_type = COALESCE(%s, FinancialMetrics.data_type)
+            display_name = COALESCE(%s, financial_metrics.display_name),
+            category = COALESCE(%s, financial_metrics.category),
+            data_type = COALESCE(%s, financial_metrics.data_type)
         RETURNING metric_id
         """
         params = (metric_name, display_name, category, data_type, display_name, category, data_type)
@@ -523,7 +523,7 @@ class FinancialDataAccess:
         
         # SQL query to insert or update financial data
         query = """
-        INSERT INTO FinancialData (report_id, metric_id, value, is_null)
+        INSERT INTO financial_data (report_id, metric_id, value, is_null)
         VALUES (%s, %s, %s, %s)
         ON CONFLICT (report_id, metric_id) 
         DO UPDATE SET 
@@ -543,14 +543,14 @@ class FinancialDataAccess:
         
         # SQL query to insert or update industry data
         query = """
-        INSERT INTO Industries (sector_name, industry_name, cost_of_capital, growth_rate, reinvestment_rate, unlevered_data)
+        INSERT INTO industries (sector_name, industry_name, cost_of_capital, growth_rate, reinvestment_rate, unlevered_data)
         VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (sector_name, industry_name) 
         DO UPDATE SET 
-            cost_of_capital = COALESCE(%s, Industries.cost_of_capital),
-            growth_rate = COALESCE(%s, Industries.growth_rate),
-            reinvestment_rate = COALESCE(%s, Industries.reinvestment_rate),
-            unlevered_data = COALESCE(%s, Industries.unlevered_data),
+            cost_of_capital = COALESCE(%s, industries.cost_of_capital),
+            growth_rate = COALESCE(%s, industries.growth_rate),
+            reinvestment_rate = COALESCE(%s, industries.reinvestment_rate),
+            unlevered_data = COALESCE(%s, industries.unlevered_data),
             last_updated = CURRENT_TIMESTAMP
         RETURNING industry_id
         """
