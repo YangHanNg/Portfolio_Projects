@@ -321,9 +321,8 @@ def save_calculated_metrics(df, company_id, period_id):
         if isinstance(period_id, (np.int64, np.int32)):
             period_id = int(period_id)
             
-        # Prepare batch data
+        # Prepare batch data and get metric definitions
         batch_data = []
-        metric_definitions = []
         failed_metrics = []
             
         with get_db_connection() as conn:
@@ -334,29 +333,40 @@ def save_calculated_metrics(df, company_id, period_id):
                         if col in ['symbol', 'fiscal_date_ending', 'sector', 'industry']:
                             continue
 
-                        # Get value
+                        # Get value and convert to Python native type
                         value = df[col].iloc[0]
-                        # Convert numpy types to Python native types
                         if isinstance(value, (np.int64, np.int32)):
                             value = int(value)
                         elif isinstance(value, (np.float64, np.float32)):
                             value = float(value)
-                        
-                        # Special handling for interest expense - replace non-numeric with 0
-                        if col == 'interestExpense' and not isinstance(value, (int, float)):
-                            value = 0
-                        # For other metrics, skip if not numeric
                         elif not isinstance(value, (int, float)):
                             logger.warning(f"Skipping non-numeric value for metric {col}")
                             continue
 
-                        # Add to batch data
-                        batch_data.append((company_id, period_id, col, value, 'calculated'))
-
-                        # Prepare metric definition if exists
+                        # Get or create the metric definition
                         formula = get_metric_formula(col)
-                        if formula:
-                            metric_definitions.append((col, formula, f"Formula for {col}"))
+                        metric_id = None
+                        
+                        # First try to get existing metric
+                        cur.execute("""
+                            SELECT metric_id FROM FinancialMetrics 
+                            WHERE metric_name = %s
+                        """, (col,))
+                        result = cur.fetchone()
+                        
+                        if result:
+                            metric_id = result[0]
+                        else:
+                            # Create new metric if it doesn't exist
+                            cur.execute("""
+                                INSERT INTO FinancialMetrics (metric_name, formula)
+                                VALUES (%s, %s)
+                                RETURNING metric_id
+                            """, (col, formula))
+                            metric_id = cur.fetchone()[0]
+
+                        # Add to batch data with metric_id
+                        batch_data.append((company_id, period_id, metric_id, value, 'calculated'))
                     
                     except Exception as e:
                         failed_metrics.append((col, str(e)))
@@ -364,14 +374,6 @@ def save_calculated_metrics(df, company_id, period_id):
                         continue
 
                 try:
-                    # Start transaction for metric definitions
-                    if metric_definitions:
-                        cur.executemany("""
-                            INSERT INTO CalculatedMetricDefinitions (metric_name, formula, description)
-                            VALUES (%s, %s, %s)
-                            ON CONFLICT (metric_name) DO NOTHING
-                        """, metric_definitions)
-
                     # Batch insert calculated metrics with retry logic
                     if batch_data:
                         retry_count = 0
@@ -379,9 +381,9 @@ def save_calculated_metrics(df, company_id, period_id):
                             try:
                                 cur.executemany("""
                                     INSERT INTO CalculatedMetrics 
-                                    (company_id, period_id, metric_name, metric_value, data_source)
+                                    (company_id, period_id, metric_id, metric_value, data_source)
                                     VALUES (%s, %s, %s, %s, %s)
-                                    ON CONFLICT (company_id, period_id, metric_name)
+                                    ON CONFLICT (company_id, period_id, metric_id)
                                     DO UPDATE SET 
                                         metric_value = EXCLUDED.metric_value,
                                         updated_at = CURRENT_TIMESTAMP

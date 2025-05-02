@@ -192,34 +192,32 @@ def create_tables():
     try:
         # SQL statements for table creation
         tables = {
-            "Companies": """
-                CREATE TABLE IF NOT EXISTS Companies (
+            "companies": """
+                CREATE TABLE IF NOT EXISTS companies (
                     company_id SERIAL PRIMARY KEY,
                     symbol VARCHAR(10) UNIQUE NOT NULL,
                     name VARCHAR(255),
-                    sector VARCHAR(100),
-                    industry VARCHAR(100),
-                    unlevered_data FLOAT,
-                    description TEXT,
+                    industry_id INTEGER REFERENCES Industries(industry_id),
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """,
-            "Industries": """
-                CREATE TABLE IF NOT EXISTS Industries (
+            "industries": """
+                CREATE TABLE IF NOT EXISTS industries (
                     industry_id SERIAL PRIMARY KEY,
                     sector_name VARCHAR(100) NOT NULL,
                     industry_name VARCHAR(100) NOT NULL,
                     cost_of_capital DECIMAL(7,4),
                     growth_rate DECIMAL(7,4),
                     reinvestment_rate DECIMAL(7,4),
+                    unlevered_data DECIMAL(7,4),
                     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     CONSTRAINT unique_industry_sector UNIQUE (sector_name, industry_name)
                 )
             """,
-            "ReportingPeriods": """
-                CREATE TABLE IF NOT EXISTS ReportingPeriods (
+            "reporting_periods": """
+                CREATE TABLE IF NOT EXISTS reporting_periods (
                     period_id SERIAL PRIMARY KEY,
                     period_type VARCHAR(20) NOT NULL,
                     fiscal_date_ending DATE NOT NULL,
@@ -229,8 +227,8 @@ def create_tables():
                     UNIQUE (period_type, fiscal_date_ending)
                 )
             """,
-            "FinancialReports": """
-                CREATE TABLE IF NOT EXISTS FinancialReports (
+            "financial_reports": """
+                CREATE TABLE IF NOT EXISTS financial_reports (
                     report_id SERIAL PRIMARY KEY,
                     company_id INTEGER REFERENCES Companies(company_id),
                     period_id INTEGER REFERENCES ReportingPeriods(period_id),
@@ -241,8 +239,8 @@ def create_tables():
                     UNIQUE (company_id, period_id, report_type)
                 )
             """,
-            "FinancialMetrics": """
-                CREATE TABLE IF NOT EXISTS FinancialMetrics (
+            "financial_metrics": """
+                CREATE TABLE IF NOT EXISTS financial_metrics (
                     metric_id SERIAL PRIMARY KEY,
                     metric_name VARCHAR(100) UNIQUE NOT NULL,
                     display_name VARCHAR(100),
@@ -251,8 +249,8 @@ def create_tables():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """,
-            "FinancialData": """
-                CREATE TABLE IF NOT EXISTS FinancialData (
+            "financial_data": """
+                CREATE TABLE IF NOT EXISTS financial_data (
                     data_id SERIAL PRIMARY KEY,
                     report_id INTEGER REFERENCES FinancialReports(report_id),
                     metric_id INTEGER REFERENCES FinancialMetrics(metric_id),
@@ -262,23 +260,23 @@ def create_tables():
                     UNIQUE (report_id, metric_id)
                 )
             """,
-            "CalculatedMetrics": """
-                CREATE TABLE IF NOT EXISTS CalculatedMetrics (
+            "calculated_metrics": """
+                CREATE TABLE IF NOT EXISTS calculated_metrics (
                     calc_metric_id SERIAL PRIMARY KEY,
                     company_id INTEGER REFERENCES Companies(company_id),
                     period_id INTEGER REFERENCES ReportingPeriods(period_id),
-                    metric_name VARCHAR(100) NOT NULL,
+                    metric_id INTEGER REFERENCES FinancialMetrics(metric_id),
                     metric_value DECIMAL(19,4) NOT NULL,
                     calculation_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     data_source VARCHAR(50),
                     notes TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    CONSTRAINT unique_calc_metric UNIQUE (company_id, period_id, metric_name)
+                    CONSTRAINT unique_calc_metric UNIQUE (company_id, period_id, metric_id)
                 )
             """,
-            "CalculatedMetricDefinitions": """
-                CREATE TABLE IF NOT EXISTS CalculatedMetricDefinitions (
+            "calculated_metric_definitions": """
+                CREATE TABLE IF NOT EXISTS calculated_metric_definitions (
                     definition_id SERIAL PRIMARY KEY,
                     metric_name VARCHAR(100) UNIQUE NOT NULL,
                     formula TEXT NOT NULL,
@@ -327,8 +325,8 @@ def create_tables():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """,
-            "RegressionCoefficients": """
-                CREATE TABLE IF NOT EXISTS RegressionCoefficients (
+            "regression_coefficients": """
+                CREATE TABLE IF NOT EXISTS regression_coefficients (
                     coefficient_id SERIAL PRIMARY KEY,
                     analysis_id INTEGER REFERENCES regression_analysis(analysis_id),
                     multiple_type VARCHAR(50),
@@ -354,11 +352,11 @@ def create_tables():
             "CREATE INDEX IF NOT EXISTS idx_financial_reports_company_id ON FinancialReports(company_id)",
             "CREATE INDEX IF NOT EXISTS idx_financial_reports_period_id ON FinancialReports(period_id)",
             "CREATE INDEX IF NOT EXISTS idx_companies_sector ON Companies(sector)",
-            "CREATE INDEX IF NOT EXISTS idx_companies_industry ON Companies(industry)",
+            "CREATE INDEX IF NOT EXISTS idx_companies_industry ON Companies(industry_id)",
             "CREATE INDEX IF NOT EXISTS idx_industries_sector ON Industries(sector_name)",
             "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_company ON CalculatedMetrics(company_id)",
             "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_period ON CalculatedMetrics(period_id)",
-            "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_name ON CalculatedMetrics(metric_name)",
+            "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_metric ON CalculatedMetrics(metric_id)",
             "CREATE INDEX IF NOT EXISTS idx_regression_company ON regression_analysis(company_id)",
             "CREATE INDEX IF NOT EXISTS idx_regression_period ON regression_analysis(period_id)",
             "CREATE INDEX IF NOT EXISTS idx_regression_multiple ON regression_analysis(multiple_type)",
@@ -412,24 +410,30 @@ class FinancialDataAccess:
     
     # Function to insert new company data or update existing one
     @staticmethod
-    def insert_company(symbol, name=None, sector=None, industry=None, description=None, unlevered_data=0.0):
+    def insert_company(symbol, name=None, sector_name=None, industry_name=None):
+        # First get the industry_id if sector is provided
+        industry_id = None
+        if sector_name:
+            query = """
+            SELECT industry_id FROM Industries 
+            WHERE sector_name = %s AND industry_name = COALESCE(%s, 'N/A')
+            """
+            result = execute_query(query, (sector_name, industry_name), fetch=True)
+            if result:
+                industry_id = result[0][0]
         
-        # SQL query to insert or update company data
+        # Then insert the company
         query = """
-        INSERT INTO Companies (symbol, name, sector, industry, description, unlevered_data)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO Companies (symbol, name, industry_id)
+        VALUES (%s, %s, %s)
         ON CONFLICT (symbol) 
         DO UPDATE SET 
             name = COALESCE(%s, Companies.name),
-            sector = COALESCE(%s, Companies.sector),
-            industry = COALESCE(%s, Companies.industry),
-            description = COALESCE(%s, Companies.description),
-            unlevered_data = COALESCE(%s, Companies.unlevered_data),
+            industry_id = COALESCE(%s, Companies.industry_id),
             updated_at = CURRENT_TIMESTAMP
         RETURNING company_id
         """
-        params = (symbol, name, sector, industry, description, unlevered_data, 
-                  name, sector, industry, description, unlevered_data)
+        params = (symbol, name, industry_id, name, industry_id)
         
         result = execute_query(query, params)
         return result[0] if result else None
@@ -535,22 +539,23 @@ class FinancialDataAccess:
     
     # Function to insert new industry or update existing one
     @staticmethod
-    def insert_industry(sector_name, industry_name, cost_of_capital=None, growth_rate=None, reinvestment_rate=None):
+    def insert_industry(sector_name, industry_name, cost_of_capital=None, growth_rate=None, reinvestment_rate=None, unlevered_data=None):
         
         # SQL query to insert or update industry data
         query = """
-        INSERT INTO Industries (sector_name, industry_name, cost_of_capital, growth_rate, reinvestment_rate)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO Industries (sector_name, industry_name, cost_of_capital, growth_rate, reinvestment_rate, unlevered_data)
+        VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (sector_name, industry_name) 
         DO UPDATE SET 
             cost_of_capital = COALESCE(%s, Industries.cost_of_capital),
             growth_rate = COALESCE(%s, Industries.growth_rate),
             reinvestment_rate = COALESCE(%s, Industries.reinvestment_rate),
+            unlevered_data = COALESCE(%s, Industries.unlevered_data),
             last_updated = CURRENT_TIMESTAMP
         RETURNING industry_id
         """
-        params = (sector_name, industry_name, cost_of_capital, growth_rate, reinvestment_rate,
-                  cost_of_capital, growth_rate, reinvestment_rate)
+        params = (sector_name, industry_name, cost_of_capital, growth_rate, reinvestment_rate, unlevered_data,
+                  cost_of_capital, growth_rate, reinvestment_rate, unlevered_data)
         
         result = execute_query(query, params)
         return result[0] if result else None
@@ -594,7 +599,6 @@ class SP500DataImporter:
     
     # Function to import all industry data from the CSV file
     def import_industry_data(self, sector_name):
-        
         self.connect_db()
         
         if self.sp500_df is None:
@@ -613,13 +617,21 @@ class SP500DataImporter:
         # Get industry details from first company
         first_company = industry_data[0]
         
+        try:
+            # More robust float conversion for unlevered_data
+            unlevered_data = float(str(first_company.get('Unlevered Data', 0)).replace(',', '.'))
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid unlevered data for industry {sector_name}: {first_company.get('Unlevered Data')}")
+            unlevered_data = 0.0
+        
         # Insert/update the industry into the database
         self.db.insert_industry(
             sector_name=first_company['Sector'],
             industry_name=first_company.get('Industry', 'N/A'),
             cost_of_capital=first_company.get('Industry Cost of Capital'),
             growth_rate=first_company.get('Industry Growth'),
-            reinvestment_rate=first_company.get('Industry Reinvestment rate')
+            reinvestment_rate=first_company.get('Industry Reinvestment rate'),
+            unlevered_data=unlevered_data
         )
         
         # Insert all companies in this industry
