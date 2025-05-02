@@ -153,7 +153,6 @@ def fetch_financial_data(symbol):
                         MAX(CASE WHEN m.metric_name = 'totalRevenue' THEN fd.value END) AS "totalRevenue",
                         MAX(CASE WHEN m.metric_name = 'ebit' THEN fd.value END) AS "ebit",
                         MAX(CASE WHEN m.metric_name = 'researchAndDevelopment' THEN fd.value END) AS "researchAndDevelopment",
-                        MAX(CASE WHEN m.metric_name = 'interestExpense' THEN fd.value END) AS "interestExpense",
                         MAX(CASE WHEN m.metric_name = 'incomeBeforeTax' THEN fd.value END) AS "incomeBeforeTax",
                         MAX(CASE WHEN m.metric_name = 'incomeTaxExpense' THEN fd.value END) AS "incomeTaxExpense",
                         MAX(CASE WHEN m.metric_name = 'cashAndShortTermInvestments' THEN fd.value END) AS "cashAndShortTermInvestments",
@@ -192,11 +191,11 @@ def fetch_financial_data(symbol):
                 # Create DataFrame with explicit column names
                 columns = [
                     'company_id', 'period_id', 'symbol', 'sector', 'fiscal_date_ending', 
-                    'totalRevenue', 'ebit', 'researchAndDevelopment', 'interestExpense',
-                    'incomeBeforeTax', 'incomeTaxExpense', 'cashAndShortTermInvestments',
-                    'totalCurrentAssets', 'totalCurrentLiabilities', 'totalAssets',
-                    'totalLiabilities', 'depreciationAndAmortization', 'capitalLeaseObligations',
-                    'longTermDebt', 'currentLongTermDebt', 'propertyPlantEquipment', 'row_num'
+                    'totalRevenue', 'ebit', 'researchAndDevelopment', 'incomeBeforeTax',
+                    'incomeTaxExpense', 'cashAndShortTermInvestments', 'totalCurrentAssets',
+                    'totalCurrentLiabilities', 'totalAssets', 'totalLiabilities',
+                    'depreciationAndAmortization', 'capitalLeaseObligations', 'longTermDebt',
+                    'currentLongTermDebt', 'propertyPlantEquipment', 'row_num'
                 ]
                 df = pd.DataFrame(results, columns=columns)
                 logger.info(f"Successfully fetched {len(df)} years of financial data for {symbol}")
@@ -214,16 +213,16 @@ def calculate_financial_metrics(df, industry_metrics):
         return None
 
     try:
-        # Get industry metrics
-        industry_rir = industry_metrics['industry_rir']
-        industry_wacc = industry_metrics['industry_wacc']
-        unlevered_data = industry_metrics['unlevered_data']
+        # Get industry metrics - replace None with 0
+        industry_rir = industry_metrics.get('industry_rir', 0) or 0
+        industry_wacc = industry_metrics.get('industry_wacc', 0) or 0
+        unlevered_data = industry_metrics.get('unlevered_data', 0) or 0
 
-        # Helper functions for safe calculations
-        safe_division = lambda a, b: np.divide(a, b, out=np.full_like(a, np.nan, dtype=float), where=b != 0)
-        safe_subtract = lambda a, b: a - b if (isinstance(a, (int, float)) and isinstance(b, (int, float))) else np.subtract(a, b)
+        # Helper functions for safe calculations that return 0 instead of nan/null
+        safe_division = lambda a, b: np.where(b != 0, a / b, 0)
+        safe_subtract = lambda a, b: a.sub(b, fill_value=0)
 
-        # Convert all relevant columns to numeric
+        # Convert all relevant columns to numeric and replace nulls with 0 immediately
         numeric_columns = [
             'totalAssets', 'totalLiabilities', 'capitalLeaseObligations', 'longTermDebt',
             'currentLongTermDebt', 'cashAndShortTermInvestments', 'totalCurrentAssets',
@@ -232,57 +231,60 @@ def calculate_financial_metrics(df, industry_metrics):
         ]
         df[numeric_columns] = df[numeric_columns].apply(pd.to_numeric, errors='coerce').fillna(0)
 
-        # Calculate basic metrics first
+        # Calculate basic metrics and ensure no nulls
         df['Total Equity'] = safe_subtract(df['totalAssets'], df['totalLiabilities'])
-        df['Total Debt'] = df['capitalLeaseObligations'] + df['longTermDebt'] + df['currentLongTermDebt']
-        df['Capital Invested'] = df['totalAssets'] + df['Total Debt'] + df['cashAndShortTermInvestments']
+        df['Total Debt'] = df['capitalLeaseObligations'].fillna(0) + df['longTermDebt'].fillna(0) + df['currentLongTermDebt'].fillna(0)
+        df['Capital Invested'] = df['totalAssets'].fillna(0) + df['Total Debt'].fillna(0) + df['cashAndShortTermInvestments'].fillna(0)
         df['Debt to Equity'] = safe_division(df['Total Debt'], df['Total Debt'] + df['Total Equity'])
         df['Working Capital'] = safe_subtract(df['totalCurrentAssets'], df['totalCurrentLiabilities'])
-        df['Net Working Capital'] = safe_subtract(df['Working Capital'], df['Working Capital'].shift(-1))
-        df['Revenue Growth'] = safe_division(df['totalRevenue'], df['totalRevenue'].shift(-1)) - 1
+        df['Net Working Capital'] = safe_subtract(df['Working Capital'], df['Working Capital'].shift(-1).fillna(0))
+        df['Revenue Growth'] = safe_division(df['totalRevenue'], df['totalRevenue'].shift(-1).fillna(df['totalRevenue'])) - 1
         df['Operating Margin'] = safe_division(df['ebit'], df['totalRevenue'])
-        df['EBITDA'] = df['ebit'] + df['depreciationAndAmortization']
+        df['EBITDA'] = df['ebit'].fillna(0) + df['depreciationAndAmortization'].fillna(0)
         df['EBITDA Margin'] = safe_division(df['EBITDA'], df['totalRevenue'])
         df['DA'] = safe_division(df['depreciationAndAmortization'], df['EBITDA'])
         df['Effective Tax'] = safe_division(df['incomeTaxExpense'], df['incomeBeforeTax'])
-        df['Tax Rate'] = df['Effective Tax'].rolling(window=3, min_periods=1).mean()
+        df['Tax Rate'] = df['Effective Tax'].rolling(window=3, min_periods=1).mean().fillna(0)
 
-        # Calculate metrics needed for regression analysis
-        df['After Tax EBIT'] = df['ebit'] * (1 - df['Tax Rate'])
-        df['After Tax Operating Margin'] = df['Operating Margin'] * (1 - df['Tax Rate'])
-        df['Net CapEx'] = safe_subtract(df['propertyPlantEquipment'], df['propertyPlantEquipment'].shift(-1)) + df['depreciationAndAmortization']
-        df['Free Cash Flow'] = df['Net CapEx'] + df['Net Working Capital']
+        # Calculate metrics needed for regression analysis with null handling
+        df['After Tax EBIT'] = df['ebit'].fillna(0) * (1 - df['Tax Rate'])
+        df['After Tax Operating Margin'] = df['Operating Margin'].fillna(0) * (1 - df['Tax Rate'])
+        df['Net CapEx'] = safe_subtract(df['propertyPlantEquipment'], df['propertyPlantEquipment'].shift(-1).fillna(0)) + df['depreciationAndAmortization'].fillna(0)
+        df['Free Cash Flow'] = df['Net CapEx'].fillna(0) + df['Net Working Capital'].fillna(0)
         df['Reinvestment Rate'] = safe_division(df['Free Cash Flow'], df['After Tax EBIT'])
         df['Sales to Capital'] = safe_division(df['totalRevenue'], df['Capital Invested'])
-        df['Return On Invested Capital'] = df['After Tax Operating Margin'] * df['Sales to Capital']
-        df['Expected Growth'] = df['Reinvestment Rate'] * df['Return On Invested Capital']
-        df['3Y Exp Growth'] = df['Expected Growth'].rolling(window=3, min_periods=1).mean()
-        df['3Y Rev Growth'] = df['Revenue Growth'].rolling(window=3, min_periods=1).mean()
-        df['3Y RIR'] = df['Reinvestment Rate'].rolling(window=3, min_periods=1).mean()
+        df['Return On Invested Capital'] = df['After Tax Operating Margin'].fillna(0) * df['Sales to Capital'].fillna(0)
 
-        # Calculate beta and cost metrics
-        df['Levered Beta'] = unlevered_data * (1 + df['Debt to Equity'] * (1 - df['Tax Rate']))
+        # Calculate remaining metrics with null handling
+        df['Expected Growth'] = df['Reinvestment Rate'].fillna(0) * df['Return On Invested Capital'].fillna(0)
+        df['3Y Exp Growth'] = df['Expected Growth'].rolling(window=3, min_periods=1).mean().fillna(0)
+        df['3Y Rev Growth'] = df['Revenue Growth'].rolling(window=3, min_periods=1).mean().fillna(0)
+        df['3Y RIR'] = df['Reinvestment Rate'].rolling(window=3, min_periods=1).mean().fillna(0)
+
+        # Calculate beta and cost metrics with null handling
+        df['Levered Beta'] = unlevered_data * (1 + df['Debt to Equity'].fillna(0) * (1 - df['Tax Rate'].fillna(0)))
         df['Cost of Debt'] = 0.045 + 0.044
-        df['Cost of Equity'] = 0.045 + df['Levered Beta'] * 0.055
+        df['Cost of Equity'] = 0.045 + df['Levered Beta'].fillna(0) * 0.055
         df['WACC'] = (
-            df['Cost of Debt'] * (1 - df['Tax Rate']) * df['Debt to Equity'] +
-            df['Cost of Equity'] * (1 - df['Debt to Equity'])
+            df['Cost of Debt'].fillna(0) * (1 - df['Tax Rate'].fillna(0)) * df['Debt to Equity'].fillna(0) +
+            df['Cost of Equity'].fillna(0) * (1 - df['Debt to Equity'].fillna(0))
         )
 
-        # Calculate DCF and multiples
+        # Calculate DCF with null handling
         df['DCF'] = (
-            ((1 - df['3Y RIR']) * (1- df['3Y Rev Growth']) * (1 - ((1 + df['3Y Rev Growth'])**3 / (1 + df['WACC'])**3))) / 
-            (df['WACC'] - df['3Y Rev Growth']) +
-            ((1 - industry_rir) * (1 + df['3Y Rev Growth'])**3 * (1 + df['3Y Exp Growth'])) /
-            ((industry_wacc - df['3Y Exp Growth']) * (1 + df['WACC'])**3)
+            ((1 - df['3Y RIR'].fillna(0)) * (1 - df['3Y Rev Growth'].fillna(0)) * 
+             (1 - ((1 + df['3Y Rev Growth'].fillna(0))**3 / (1 + df['WACC'].fillna(0))**3))) / 
+            (df['WACC'].fillna(0) - df['3Y Rev Growth'].fillna(0)) +
+            ((1 - industry_rir) * (1 + df['3Y Rev Growth'].fillna(0))**3 * (1 + df['3Y Exp Growth'].fillna(0))) /
+            ((industry_wacc - df['3Y Exp Growth'].fillna(0)) * (1 + df['WACC'].fillna(0))**3)
         )
 
-        # Calculate enterprise value multiples
-        df['EV/EBIT'] = (1 - df['Tax Rate']) * df['DCF']
-        df['EV/EBITDA'] = (1 - df['Tax Rate']) * (1 - df['DA']) * df['DCF']
-        df['EV/After Tax EBIT'] = 1 * df['DCF']
-        df['EV/Sales'] = df['After Tax Operating Margin'] * df['DCF']
-        df['EV/Capital Invested'] = df['Return On Invested Capital'] * df['DCF']
+        # Calculate enterprise value multiples with null handling
+        df['EV/EBIT'] = (1 - df['Tax Rate'].fillna(0)) * df['DCF'].fillna(0)
+        df['EV/EBITDA'] = (1 - df['Tax Rate'].fillna(0)) * (1 - df['DA'].fillna(0)) * df['DCF'].fillna(0)
+        df['EV/After Tax EBIT'] = 1 * df['DCF'].fillna(0)
+        df['EV/Sales'] = df['After Tax Operating Margin'].fillna(0) * df['DCF'].fillna(0)
+        df['EV/Capital Invested'] = df['Return On Invested Capital'].fillna(0) * df['DCF'].fillna(0)
 
         # Create a separate DataFrame for regression metrics if more than 8 companies
         regression_metrics = {
@@ -319,47 +321,95 @@ def save_calculated_metrics(df, company_id, period_id):
         if isinstance(period_id, (np.int64, np.int32)):
             period_id = int(period_id)
             
+        # Prepare batch data
+        batch_data = []
+        metric_definitions = []
+        failed_metrics = []
+            
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 for col in df.columns:
-                    # Skip non-numeric columns
-                    if col in ['symbol', 'fiscal_date_ending']:
+                    try:
+                        # Skip non-numeric columns and metadata
+                        if col in ['symbol', 'fiscal_date_ending', 'sector', 'industry']:
+                            continue
+
+                        # Get value
+                        value = df[col].iloc[0]
+                        # Convert numpy types to Python native types
+                        if isinstance(value, (np.int64, np.int32)):
+                            value = int(value)
+                        elif isinstance(value, (np.float64, np.float32)):
+                            value = float(value)
+                        
+                        # Special handling for interest expense - replace non-numeric with 0
+                        if col == 'interestExpense' and not isinstance(value, (int, float)):
+                            value = 0
+                        # For other metrics, skip if not numeric
+                        elif not isinstance(value, (int, float)):
+                            logger.warning(f"Skipping non-numeric value for metric {col}")
+                            continue
+
+                        # Add to batch data
+                        batch_data.append((company_id, period_id, col, value, 'calculated'))
+
+                        # Prepare metric definition if exists
+                        formula = get_metric_formula(col)
+                        if formula:
+                            metric_definitions.append((col, formula, f"Formula for {col}"))
+                    
+                    except Exception as e:
+                        failed_metrics.append((col, str(e)))
+                        logger.error(f"Error processing metric {col}: {str(e)}")
                         continue
 
-                    # Insert metric definition first
-                    formula = get_metric_formula(col)
-                    if formula:
-                        cur.execute("""
+                try:
+                    # Start transaction for metric definitions
+                    if metric_definitions:
+                        cur.executemany("""
                             INSERT INTO CalculatedMetricDefinitions (metric_name, formula, description)
                             VALUES (%s, %s, %s)
                             ON CONFLICT (metric_name) DO NOTHING
-                        """, (col, formula, f"Formula for {col}"))
+                        """, metric_definitions)
 
-                    # Get value and ensure it's a Python native type
-                    value = df[col].iloc[0]
-                    if isinstance(value, (np.int64, np.int32)):
-                        value = int(value)
-                    elif isinstance(value, (np.float64, np.float32)):
-                        value = float(value)
-
-                    # Insert calculated metric values
-                    cur.execute("""
-                        INSERT INTO CalculatedMetrics 
-                        (company_id, period_id, metric_name, metric_value, data_source)
-                        VALUES (%s, %s, %s, %s, 'calculated')
-                        ON CONFLICT (company_id, period_id, metric_name)
-                        DO UPDATE SET 
-                            metric_value = EXCLUDED.metric_value,
-                            updated_at = CURRENT_TIMESTAMP
-                    """, (company_id, period_id, col, value))
+                    # Batch insert calculated metrics with retry logic
+                    if batch_data:
+                        retry_count = 0
+                        while retry_count < 3:  # Retry up to 3 times
+                            try:
+                                cur.executemany("""
+                                    INSERT INTO CalculatedMetrics 
+                                    (company_id, period_id, metric_name, metric_value, data_source)
+                                    VALUES (%s, %s, %s, %s, %s)
+                                    ON CONFLICT (company_id, period_id, metric_name)
+                                    DO UPDATE SET 
+                                        metric_value = EXCLUDED.metric_value,
+                                        updated_at = CURRENT_TIMESTAMP
+                                """, batch_data)
+                                break
+                            except psycopg2.OperationalError as e:
+                                retry_count += 1
+                                if retry_count == 3:
+                                    raise
+                                logger.warning(f"Retrying batch insert after error: {str(e)}")
+                                time.sleep(1)  # Wait before retrying
+                    
+                    conn.commit()
+                    logger.info(f"Saved {len(batch_data)} calculated metrics for company_id {company_id}, period_id {period_id}")
+                    
+                    if failed_metrics:
+                        logger.warning(f"Failed to process {len(failed_metrics)} metrics: {failed_metrics}")
                 
-                conn.commit()
-                logger.info(f"Saved calculated metrics for company_id {company_id}, period_id {period_id}")
+                except Exception as e:
+                    conn.rollback()
+                    logger.error(f"Database error in save_calculated_metrics: {str(e)}")
+                    raise
         
     except Exception as e:
         logger.error(f"Error saving calculated metrics: {str(e)}")
         if conn and not conn.closed:
             conn.rollback()
+        raise
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -385,13 +435,9 @@ def analyze_financial_data(data, selected_industry, confidence=0.90):
         results = {}
         # Process each multiple regression separately
         for multiple, (x1_name, x2_name) in regression_format.items():
-            # Extract only necessary columns for this regression
+            # Extract only necessary columns for this regression and replace nulls with 0
             regression_cols = [multiple, x1_name, x2_name]
-            numeric_data = data[regression_cols].apply(pd.to_numeric, errors='coerce')
-            
-            if numeric_data.isna().any().any():
-                logger.warning(f"Missing data for {multiple} regression, skipping...")
-                continue
+            numeric_data = data[regression_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
 
             X = np.column_stack((numeric_data[x1_name].values, numeric_data[x2_name].values))
             y = numeric_data[multiple].values
@@ -614,11 +660,12 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
         X_inv = np.linalg.inv(X_with_const.T.dot(X_with_const))
         prediction_var = np.zeros(len(X))
         
-        # Fix deprecation warning by extracting scalar values properly
+        # Calculate prediction variance for each point properly extracting scalar values
         for i in range(len(X)):
             x_i = X_with_const[i:i+1]
-            var_i = mse * (1 + x_i.dot(X_inv).dot(x_i.T))
-            prediction_var[i] = var_i.item()  # Properly extract scalar value
+            var_i = x_i.dot(X_inv).dot(x_i.T)
+            # Properly extract scalar value using item() or float()
+            prediction_var[i] = float(mse * (1 + var_i[0,0]))
             
         # Test for linearity using properly extracted scalar values
         reset_pvalue = 1 - stats.f.cdf(
@@ -714,30 +761,30 @@ def save_regression_results(company_id, period_id, multiple, model, diagnostics,
                 
                 # Prepare model parameters
                 model_params = {
-                    'coefficients': model.params.tolist(),
-                    'standard_errors': model.bse.tolist(),
-                    't_values': model.tvalues.tolist(),
-                    'p_values': model.pvalues.tolist(),
-                    'confidence_intervals': model.conf_int().tolist()
+                    'coefficients': [float(x) for x in model.params],
+                    'standard_errors': [float(x) for x in model.bse],
+                    't_values': [float(x) for x in model.tvalues],
+                    'p_values': [float(x) for x in model.pvalues],
+                    'confidence_intervals': [[float(x) for x in row] for row in model.conf_int()]
                 }
                 
-                # Convert diagnostics to proper JSON format
+                # Convert diagnostics to proper JSON format with explicit Python native type conversion
                 diagnostic_data = {
                     'heteroscedasticity_test': {
                         'test_value': float(diagnostics['Value'][0]),
-                        'passes': diagnostics['Pass'][0]
+                        'passes': bool(diagnostics['Pass'][0])
                     },
                     'multicollinearity_test': {
                         'test_value': float(diagnostics['Value'][1]),
-                        'passes': diagnostics['Pass'][1]
+                        'passes': bool(diagnostics['Pass'][1])
                     },
                     'normality_test': {
                         'test_value': float(diagnostics['Value'][2]),
-                        'passes': diagnostics['Pass'][2]
+                        'passes': bool(diagnostics['Pass'][2])
                     },
                     'linearity_test': {
                         'test_value': float(diagnostics['Value'][3]),
-                        'passes': diagnostics['Pass'][3]
+                        'passes': bool(diagnostics['Pass'][3])
                     }
                 }
                 
@@ -896,6 +943,7 @@ def main():
             for symbol in industry_companies:
                 # Fetch financial data for the company
                 financial_data = fetch_financial_data(symbol)
+                # Include all financial data points without skipping interest or null values
                 if financial_data is None:
                     continue
 
@@ -954,4 +1002,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
