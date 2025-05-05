@@ -35,7 +35,19 @@ class ProcessingCache:
         self.current_industry: str = None
         self.last_company: str = None
         self.start_time: float = None
+        self.program_start_time: float = time.time()  # Add program start time
+        self.last_company_time: float = None
         self.industry_times: Dict[str, float] = {}
+        self.company_times: Dict[str, Dict[str, float]] = {}  # {industry: {company: time}}
+        self.inter_company_times: Dict[str, List[float]] = {}  # {industry: [times between companies]}
+
+    @staticmethod
+    def format_time(seconds: float) -> str:
+        """Format seconds into HH:MM:SS"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        seconds = int(seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     @classmethod
     def load(cls) -> 'ProcessingCache':
@@ -57,18 +69,77 @@ class ProcessingCache:
     def mark_industry_complete(self, industry: str, processing_time: float):
         self.processed_industries.append(industry)
         self.industry_times[industry] = processing_time
+        elapsed_time = time.time() - self.program_start_time
+        formatted_time = self.format_time(processing_time)
+        formatted_elapsed = self.format_time(elapsed_time)
+        logger.info(f"Industry {industry} completed in {formatted_time}")
+        logger.info(f"Total elapsed time since start: {formatted_elapsed}")
+        
+        # Log average time between companies
+        if industry in self.inter_company_times and self.inter_company_times[industry]:
+            avg_time = sum(self.inter_company_times[industry]) / len(self.inter_company_times[industry])
+            formatted_avg = self.format_time(avg_time)
+            logger.info(f"Average time between companies for {industry}: {formatted_avg}")
+        
         self.current_industry = None
         self.last_company = None
+        self.last_company_time = None
         self.save()
 
     def start_industry(self, industry: str):
         self.current_industry = industry
         self.start_time = time.time()
+        self.last_company_time = time.time()  # Initialize last company time
+        self.company_times[industry] = {}
+        self.inter_company_times[industry] = []
         self.save()
 
     def update_progress(self, company: str):
+        current_time = time.time()
+        
+        # Calculate time since last company
+        if self.last_company_time is not None and self.current_industry:
+            time_diff = current_time - self.last_company_time
+            self.inter_company_times[self.current_industry].append(time_diff)
+            formatted_time = self.format_time(time_diff)
+            logger.info(f"Time since last company: {formatted_time}")
+        
+        # Store company processing time
+        if self.current_industry:
+            self.company_times[self.current_industry][company] = current_time
+        
         self.last_company = company
+        self.last_company_time = current_time
         self.save()
+
+    def get_industry_statistics(self, industry: str) -> Dict[str, float]:
+        """Get statistical information about industry processing"""
+        if industry not in self.inter_company_times:
+            return {}
+            
+        times = self.inter_company_times[industry]
+        if not times:
+            return {}
+            
+        return {
+            'total_time': self.industry_times.get(industry, 0),
+            'avg_between_companies': sum(times) / len(times),
+            'max_between_companies': max(times),
+            'min_between_companies': min(times),
+            'company_count': len(self.company_times.get(industry, {}))
+        }
+    
+    @staticmethod
+    def clear_cache():
+        """Clear the processing cache file"""
+        try:
+            if CACHE_FILE.exists():
+                CACHE_FILE.unlink()  # Delete the cache file
+                logger.info("Cache file cleared successfully")
+            else:
+                logger.info("No cache file found to clear")
+        except Exception as e:
+            logger.error(f"Error clearing cache file: {str(e)}")
 
 # ------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -192,16 +263,6 @@ def create_tables():
     try:
         # SQL statements for table creation
         tables = {
-            "companies": """
-                CREATE TABLE IF NOT EXISTS companies (
-                    company_id SERIAL PRIMARY KEY,
-                    symbol VARCHAR(10) UNIQUE NOT NULL,
-                    name VARCHAR(255),
-                    industry_id INTEGER REFERENCES industries(industry_id),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """,
             "industries": """
                 CREATE TABLE IF NOT EXISTS industries (
                     industry_id SERIAL PRIMARY KEY,
@@ -214,6 +275,16 @@ def create_tables():
                     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     CONSTRAINT unique_industry_sector UNIQUE (sector_name, industry_name)
+                )
+            """,
+            "companies": """
+                CREATE TABLE IF NOT EXISTS companies (
+                    company_id SERIAL PRIMARY KEY,
+                    symbol VARCHAR(10) UNIQUE NOT NULL,
+                    name VARCHAR(255),
+                    industry_id INTEGER REFERENCES industries(industry_id),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """,
             "reporting_periods": """
@@ -351,9 +422,9 @@ def create_tables():
             "CREATE INDEX IF NOT EXISTS idx_financial_data_report_id ON financial_data(report_id)",
             "CREATE INDEX IF NOT EXISTS idx_financial_reports_company_id ON financial_reports(company_id)",
             "CREATE INDEX IF NOT EXISTS idx_financial_reports_period_id ON financial_reports(period_id)",
-            "CREATE INDEX IF NOT EXISTS idx_companies_sector ON companies(sector)",
-            "CREATE INDEX IF NOT EXISTS idx_companies_industry ON companies(industry_id)",
-            "CREATE INDEX IF NOT EXISTS idx_industries_sector ON industries(sector_name)",
+            "CREATE INDEX IF NOT EXISTS idx_companies_industry_id ON companies(industry_id)",
+            "CREATE INDEX IF NOT EXISTS idx_industries_sector_name ON industries(sector_name)",
+            "CREATE INDEX IF NOT EXISTS idx_industries_industry_name ON industries(industry_name)",
             "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_company ON calculated_metrics(company_id)",
             "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_period ON calculated_metrics(period_id)",
             "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_metric ON calculated_metrics(metric_id)",
@@ -888,9 +959,9 @@ def process_industry(sp500_importer, industry, processor, sp500_df, max_quarterl
 
 # This function processes all industries in the S&P 500, either automatically or through user selection.
 def process_industries(sp500_importer, industry_groups, processor, sp500_df, automated=False):
-    
     cache = ProcessingCache.load()
     total_start_time = time.time()
+    last_process_time = total_start_time
 
     #----------------------------------------------------------------------------------------------------------------------------------
     if automated:
@@ -911,6 +982,13 @@ def process_industries(sp500_importer, industry_groups, processor, sp500_df, aut
                     logger.info(f"Skipping {industry} - already processed")
                     continue
 
+                # Calculate and log time since last industry
+                current_time = time.time()
+                time_since_last = current_time - last_process_time
+                formatted_delta = cache.format_time(time_since_last)
+                logger.info(f"Time since last industry: {formatted_delta}")
+                last_process_time = current_time
+
                 cache.start_industry(industry)
                 industry_start_time = time.time()
 
@@ -919,8 +997,9 @@ def process_industries(sp500_importer, industry_groups, processor, sp500_df, aut
                     process_industry(sp500_importer, industry, processor, sp500_df)
                     
                     industry_time = time.time() - industry_start_time
+                    formatted_time = cache.format_time(industry_time)
                     cache.mark_industry_complete(industry, industry_time)
-                    logger.info(f"Completed {industry} in {industry_time:.2f} seconds")
+                    logger.info(f"Completed {industry} in {formatted_time}")
 
                 except Exception as e:
                     logger.error(f"Error processing {industry}: {str(e)}")
@@ -931,7 +1010,6 @@ def process_industries(sp500_importer, industry_groups, processor, sp500_df, aut
                     logger.info("Waiting 60 seconds before next industry...")
                     time.sleep(60)
 
-    #----------------------------------------------------------------------------------------------------------------------------------
     else:
         while True:
             print("\nSelect an industry group to process:")
@@ -1008,10 +1086,12 @@ def process_industries(sp500_importer, industry_groups, processor, sp500_df, aut
                 logger.error("Invalid choice. Please try again.")
 
     total_time = time.time() - total_start_time
-    logger.info(f"\nAll industries processed in {total_time:.2f} seconds")
+    formatted_total = cache.format_time(total_time)
+    logger.info(f"\nAll industries processed in {formatted_total}")
     logger.info("\nIndustry processing times:")
     for ind, proc_time in cache.industry_times.items():
-        logger.info(f"{ind}: {proc_time:.2f} seconds")
+        formatted_time = cache.format_time(proc_time)
+        logger.info(f"{ind}: {formatted_time}")
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -1030,8 +1110,11 @@ def get_metric_formula(metric_name):
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # Main function to run the program
-def main(run_automated=False):
+def main(run_automated=False, clear_cache=False):
     try:
+        if clear_cache:
+            ProcessingCache.clear_cache()
+
         # Set working directory using absolute path
         script_dir = os.path.dirname(os.path.abspath(__file__))
         os.chdir(os.path.dirname(script_dir))
@@ -1074,5 +1157,6 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Process S&P 500 financial data')
     parser.add_argument('--automated', action='store_true', help='Run in automated mode')
+    parser.add_argument('--clear-cache', action='store_true', help='Clear the processing cache before starting')
     args = parser.parse_args()
-    main(run_automated=args.automated)
+    main(run_automated=args.automated, clear_cache=args.clear_cache)
