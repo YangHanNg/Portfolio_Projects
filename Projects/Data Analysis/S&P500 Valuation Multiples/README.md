@@ -80,7 +80,7 @@ Program 2 focuses on retrieving the stored financial data and performing complex
    - Preserves analysis history for trending and comparison
 
 <p align="center">
-  <img src="figures/example_table_schema.png" width="400"/>
+  <img src="figures/example_table_scheme.png" width="400"/>
 </p>
 
 <p align="center">
