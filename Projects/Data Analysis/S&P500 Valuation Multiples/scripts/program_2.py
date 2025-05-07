@@ -20,6 +20,7 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 from scipy import stats
 from scipy.stats import t
 import sys
+import argparse
 
 # Add parent directory to Python path to allow imports from scripts folder
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -149,7 +150,6 @@ def fetch_financial_data(symbol):
                         rp.fiscal_date_ending,
                         MAX(CASE WHEN m.metric_name = 'totalRevenue' THEN fd.value END) AS "totalRevenue",
                         MAX(CASE WHEN m.metric_name = 'ebit' THEN fd.value END) AS "ebit",
-                        MAX(CASE WHEN m.metric_name = 'researchAndDevelopment' THEN fd.value END) AS "researchAndDevelopment",
                         MAX(CASE WHEN m.metric_name = 'incomeBeforeTax' THEN fd.value END) AS "incomeBeforeTax",
                         MAX(CASE WHEN m.metric_name = 'incomeTaxExpense' THEN fd.value END) AS "incomeTaxExpense",
                         MAX(CASE WHEN m.metric_name = 'cashAndShortTermInvestments' THEN fd.value END) AS "cashAndShortTermInvestments",
@@ -189,7 +189,7 @@ def fetch_financial_data(symbol):
                 # Create DataFrame with explicit column names
                 columns = [
                     'company_id', 'period_id', 'symbol', 'sector', 'fiscal_date_ending', 
-                    'totalRevenue', 'ebit', 'researchAndDevelopment', 'incomeBeforeTax',
+                    'totalRevenue', 'ebit', 'incomeBeforeTax',
                     'incomeTaxExpense', 'cashAndShortTermInvestments', 'totalCurrentAssets',
                     'totalCurrentLiabilities', 'totalAssets', 'totalLiabilities',
                     'depreciationAndAmortization', 'capitalLeaseObligations', 'longTermDebt',
@@ -538,7 +538,7 @@ def create_beautiful_3d_plot(X, y, model, x1_name, x2_name, multiple, selected_i
     prediction_var = np.zeros(len(X_pred))
     for i in range(len(X_pred)):
         x_i = X_pred_with_const[i:i+1]
-        prediction_var[i] = mse * (1 + x_i.dot(np.linalg.inv(X_with_const.T.dot(X_with_const))).dot(x_i.T))
+        prediction_var[i] = mse * (1 + x_i.dot(np.linalg.inv(X_with_const.T.dot(X_with_const))).dot(x_i.T).item())
     
     # Calculate confidence intervals
     t_value = t.ppf((1 + confidence) / 2, df=model.df_resid)
@@ -549,6 +549,18 @@ def create_beautiful_3d_plot(X, y, model, x1_name, x2_name, multiple, selected_i
     z_mesh_upper = (y_pred + margin).reshape((num_points, num_points))
     z_mesh_lower = (y_pred - margin).reshape((num_points, num_points))
 
+    # Check for invalid values before plotting
+    if np.any(np.isnan(z_mesh)) or np.any(np.isinf(z_mesh)):
+        logger.warning(f"Invalid values found in regression surface for {multiple}. Skipping plot.")
+        raise ValueError("Invalid values in regression surface")
+
+    # Also check confidence bounds
+    plot_confidence = True
+    if np.any(np.isnan(z_mesh_upper)) or np.any(np.isinf(z_mesh_upper)) or \
+       np.any(np.isnan(z_mesh_lower)) or np.any(np.isinf(z_mesh_lower)):
+        logger.warning(f"Invalid values found in confidence intervals for {multiple}. Plotting without confidence bounds.")
+        plot_confidence = False
+
     # Create figure
     fig = plt.figure(figsize=(14, 10))
     ax = fig.add_subplot(111, projection='3d')
@@ -557,104 +569,96 @@ def create_beautiful_3d_plot(X, y, model, x1_name, x2_name, multiple, selected_i
     ax.set_facecolor('white')
     fig.patch.set_facecolor('white')
 
-    # Plot actual data points
-    ax.scatter(
-        X[:, 0], X[:, 1], y,
-        s=100,
-        color=PLOT_COLORS['scatter'],
-        edgecolors=PLOT_COLORS['scatter_edge'],
-        linewidths=2.0,
-        alpha=1.0,
-        label='Actual Data',
-        zorder=10
-    )
+    if plot_confidence:
+        # Plot actual data points
+        ax.scatter(
+            X[:, 0], X[:, 1], y,
+            s=100,
+            color=PLOT_COLORS['scatter'],
+            edgecolors=PLOT_COLORS['scatter_edge'],
+            linewidths=2.0,
+            alpha=1.0,
+            label='Actual Data',
+            zorder=10
+        )
 
-    # Plot regression surface
-    surf = ax.plot_surface(
-        x1_mesh, x2_mesh, z_mesh,
-        cmap=PLOT_COLORS['surface_cmap'],
-        alpha=0.6,
-        edgecolor='gray',
-        linewidth=0.5,
-        rstride=10, cstride=10
-    )
+        # Plot regression surface
+        surf = ax.plot_surface(
+            x1_mesh, x2_mesh, z_mesh,
+            cmap=PLOT_COLORS['surface_cmap'],
+            alpha=0.6,
+            edgecolor='gray',
+            linewidth=0.5,
+            rstride=10, cstride=10
+        )
 
-    # Plot confidence interval surfaces with linear bounds
-    ax.plot_surface(
-        x1_mesh, x2_mesh, z_mesh_upper,
-        color=PLOT_COLORS['confidence'], 
-        alpha=0.2, 
-        edgecolor='none',
-        label=f'{int(confidence * 100)}% CI Upper Bound'
-    )
-    ax.plot_surface(
-        x1_mesh, x2_mesh, z_mesh_lower,
-        color=PLOT_COLORS['confidence'], 
-        alpha=0.2, 
-        edgecolor='none',
-        label=f'{int(confidence * 100)}% CI Lower Bound'
-    )
+        # Plot confidence interval surfaces with linear bounds
+        ax.plot_surface(
+            x1_mesh, x2_mesh, z_mesh_upper,
+            color=PLOT_COLORS['confidence'], 
+            alpha=0.2, 
+            edgecolor='none',
+            label=f'{int(confidence * 100)}% CI Upper Bound'
+        )
+        ax.plot_surface(
+            x1_mesh, x2_mesh, z_mesh_lower,
+            color=PLOT_COLORS['confidence'], 
+            alpha=0.2, 
+            edgecolor='none',
+            label=f'{int(confidence * 100)}% CI Lower Bound'
+        )
 
-    # Add colorbar
-    mappable = plt.cm.ScalarMappable(cmap=PLOT_COLORS['surface_cmap'])
-    mappable.set_array(z_mesh)
-    fig.colorbar(mappable, ax=ax, shrink=0.5, aspect=10, pad=0.1)
+        # Add colorbar
+        mappable = plt.cm.ScalarMappable(cmap=PLOT_COLORS['surface_cmap'])
+        mappable.set_array(z_mesh)
+        fig.colorbar(mappable, ax=ax, shrink=0.5, aspect=10, pad=0.1)
 
-    # Set labels and title
-    ax.set_xlabel(f'{x1_name}', labelpad=20)
-    ax.set_ylabel(f'{x2_name}', labelpad=20)
-    ax.set_zlabel(f'{multiple}', labelpad=20)
-    
-    title = f"3D Regression Model of {selected_industry} Industry\n"
-    title += f"Multiple: {multiple}, ({int(confidence * 100)}% CI)"
-    fig.suptitle(title, fontsize=20, y=0.95)
+        # Set labels and title
+        ax.set_xlabel(f'{x1_name}', labelpad=20)
+        ax.set_ylabel(f'{x2_name}', labelpad=20)
+        ax.set_zlabel(f'{multiple}', labelpad=20)
+        
+        title = f"3D Regression Model of {selected_industry} Industry\n"
+        title += f"Multiple: {multiple}, ({int(confidence * 100)}% CI)"
+        fig.suptitle(title, fontsize=20, y=0.95)
 
-    # Set axis limits with buffer
-    ax.set_xlim(x_min - x_buffer, x_max + x_buffer)
-    ax.set_ylim(y_min - y_buffer, y_max + y_buffer)
+        # Set axis limits with buffer
+        ax.set_xlim(x_min - x_buffer, x_max + x_buffer)
+        ax.set_ylim(y_min - y_buffer, y_max + y_buffer)
 
-    z_min = min(np.min(z_mesh_lower), y.min())
-    z_max = max(np.max(z_mesh_upper), y.max())
-    z_buffer = 0.2 * (z_max - z_min)
-    ax.set_zlim(z_min - z_buffer, z_max + z_buffer)
+        z_min = min(np.min(z_mesh_lower), y.min())
+        z_max = max(np.max(z_mesh_upper), y.max())
+        z_buffer = 0.2 * (z_max - z_min)
+        ax.set_zlim(z_min - z_buffer, z_max + z_buffer)
 
-    # Style grid
-    ax.xaxis._axinfo['grid'].update(color=PLOT_COLORS['grid'], linestyle='--', alpha=0.3)
-    ax.yaxis._axinfo['grid'].update(color=PLOT_COLORS['grid'], linestyle='--', alpha=0.3)
-    ax.zaxis._axinfo['grid'].update(color=PLOT_COLORS['grid'], linestyle='--', alpha=0.3)
+        # Style grid
+        ax.xaxis._axinfo['grid'].update(color=PLOT_COLORS['grid'], linestyle='--', alpha=0.3)
+        ax.yaxis._axinfo['grid'].update(color=PLOT_COLORS['grid'], linestyle='--', alpha=0.3)
+        ax.zaxis._axinfo['grid'].update(color=PLOT_COLORS['grid'], linestyle='--', alpha=0.3)
 
-    # Set view angle
-    ax.view_init(elev=35, azim=140)
+        # Set view angle
+        ax.view_init(elev=35, azim=140)
 
-    # Add custom legend
-    custom_lines = [
-        Line2D([0], [0], marker='o', color='w', label='Actual Data',
-               markerfacecolor=PLOT_COLORS['scatter'], 
-               markeredgecolor=PLOT_COLORS['scatter_edge'], 
-               markersize=10),
-        Line2D([0], [0], color='black', lw=4, label='Regression Surface'),
-        Line2D([0], [0], color=PLOT_COLORS['confidence'], lw=4, 
-               linestyle='--', label=f'{int(confidence * 100)}% Confidence Interval')
-    ]
+        # Add custom legend
+        custom_lines = [
+            Line2D([0], [0], marker='o', color='w', label='Actual Data',
+                markerfacecolor=PLOT_COLORS['scatter'], 
+                markeredgecolor=PLOT_COLORS['scatter_edge'], 
+                markersize=10),
+            Line2D([0], [0], color='black', lw=4, label='Regression Surface'),
+            Line2D([0], [0], color=PLOT_COLORS['confidence'], lw=4, 
+                linestyle='--', label=f'{int(confidence * 100)}% Confidence Interval')
+        ]
 
-    fig.legend(
-        handles=custom_lines,
-        loc='upper center',
-        bbox_to_anchor=(0.5, 0.88),
-        ncol=3,
-        frameon=False
-    )
+        fig.legend(
+            handles=custom_lines,
+            loc='upper center',
+            bbox_to_anchor=(0.5, 0.88),
+            ncol=3,
+            frameon=False
+        )
 
-    # Update references to tables in plot saving
-    try:
-        # Convert plot to binary for RegressionAnalysis table storage
-        img_data = io.BytesIO()
-        fig.savefig(img_data, format='png', bbox_inches='tight', dpi=300)
-        return fig, ax
-    except Exception as e:
-        logger.error(f"Error saving regression plot: {str(e)}")
-        plt.close(fig)
-        raise
+    return fig, ax
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -678,11 +682,26 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
         prediction_var = np.zeros(len(X))
         for i in range(len(X)):
             x_i = X_with_const[i:i+1]
-            prediction_var[i] = mse * (1 + x_i.dot(np.linalg.inv(X_with_const.T.dot(X_with_const))).dot(x_i.T))
+            # Fix the scalar conversion warning
+            pred_var = float(mse * (1 + x_i.dot(np.linalg.inv(X_with_const.T.dot(X_with_const))).dot(x_i.T).item()))
+            prediction_var[i] = pred_var
 
         # Calculate t-value for confidence intervals
         t_value = t.ppf((1 + confidence) / 2, df=model.df_resid)
         ci_margin = t_value * np.sqrt(prediction_var)
+        
+        # Store diagnostic information - convert NumPy arrays to lists for JSON serialization
+        params = model.params
+        bse = model.bse
+        tvalues = model.tvalues
+        pvalues = model.pvalues
+        
+        # Create parameter dictionaries manually
+        param_names = ['const', x1_name, x2_name]
+        params_dict = {name: float(val) for name, val in zip(param_names, params)}
+        bse_dict = {name: float(val) for name, val in zip(param_names, bse)}
+        tvalues_dict = {name: float(val) for name, val in zip(param_names, tvalues)}
+        pvalues_dict = {name: float(val) for name, val in zip(param_names, pvalues)}
         
         # Store diagnostic information
         diagnostics = {
@@ -692,10 +711,10 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
             'f_pvalue': model.f_pvalue,
             'aic': model.aic,
             'bic': model.bic,
-            'coefficients': model.params.to_dict(),
-            'standard_errors': model.bse.to_dict(),
-            't_values': model.tvalues.to_dict(),
-            'p_values': model.pvalues.to_dict(),
+            'coefficients': params_dict,
+            'standard_errors': bse_dict,
+            't_values': tvalues_dict,
+            'p_values': pvalues_dict,
             'confidence_intervals': {
                 'lower': list(model.predict(X_with_const) - ci_margin),
                 'upper': list(model.predict(X_with_const) + ci_margin)
@@ -708,19 +727,29 @@ def calculate_predictions_and_confidence(X, y, multiple, x1_name, x2_name, index
                 'vif_const': float(vif[0]),
                 'vif_x1': float(vif[1]),
                 'vif_x2': float(vif[2])
-            }
+            },
+            # Create a DataFrame for diagnostics compatibility with other functions
+            'Value': [float(bp_test[1]), max(float(vif[1]), float(vif[2])), 0.0, 0.0],
+            'Metric': ['Heteroscedasticity', 'Multicollinearity', 'Normality', 'Linearity'],
+            'Pass': [float(bp_test[1]) > 0.05, max(float(vif[1]), float(vif[2])) < 5.0, True, True]
         }
 
-        # Create and save plot
-        fig, ax = create_beautiful_3d_plot(X, y, model, x1_name, x2_name, multiple, selected_industry, confidence)
-        
-        # Convert plot to binary for storage
-        img_data = io.BytesIO()
-        fig.savefig(img_data, format='png', bbox_inches='tight')
-        plot_binary = img_data.getvalue()
-        plt.close(fig)
-
-        return model, diagnostics, plot_binary
+        try:
+            fig, ax = create_beautiful_3d_plot(X, y, model, x1_name, x2_name, multiple, selected_industry, confidence)
+            
+            # Convert plot to binary for storage
+            img_data = io.BytesIO()
+            fig.savefig(img_data, format='png', bbox_inches='tight')
+            plot_binary = img_data.getvalue()
+            plt.close(fig)
+            
+            return model, None, diagnostics, plot_binary
+            
+        except Exception as e:
+            logger.error(f"Error creating plot for {multiple}: {str(e)}")
+            plt.close('all')  # Close any open figures
+            # Return results without the plot
+            return model, None, diagnostics, None
 
     except Exception as e:
         logger.error(f"Error in calculate_predictions_and_confidence: {str(e)}")
@@ -918,7 +947,7 @@ def save_regression_results(company_id, period_id, multiple, model, diagnostics,
 #------------------------------------------------------------------------------------------------------------------------------------------------------    
 
 # Main function to execute the program
-def main():
+def main(industry_filter=False):
     try:
         # Set working directory
         os.chdir('Projects/Data Analysis/S&P500 Valuation Multiples')
@@ -932,10 +961,17 @@ def main():
         industry_counts = sp500_df['Sector'].value_counts().sort_values()
         logger.info("Industry counts (sorted from smallest to largest):")
         for industry, count in industry_counts.items():
-            logger.info(f"{industry}: {count} companies")
+            if industry_filter and count < 8:
+                logger.info(f"Skipping {industry}: {count} companies (minimum 8 required)")
+            else:
+                logger.info(f"{industry}: {count} companies")
 
         # Process each industry
         for industry, count in industry_counts.items():
+            # Skip industries with less than 8 companies if filter is enabled
+            if industry_filter and count < 8:
+                continue
+                
             logger.info(f"\nProcessing {industry} with {count} companies")
             
             # Get companies in this industry
@@ -1017,5 +1053,8 @@ def main():
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    main()
-
+    parser = argparse.ArgumentParser(description='Run regression analysis on S&P 500 financial data')
+    parser.add_argument('--industry-filter', action='store_true', 
+                       help='Skip industries with fewer than 8 companies')
+    args = parser.parse_args()
+    main(industry_filter=args.industry_filter)

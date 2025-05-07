@@ -955,7 +955,10 @@ def get_categorized_industries(sp500_df, medium_min=6, medium_max=12, automated=
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # Main function to process all companies in a given industry
-def process_industry(sp500_importer, industry, processor, sp500_df, max_quarterly_reports=12, delay=12):
+def process_industry(sp500_importer, industry, processor, sp500_df, cache=None, max_quarterly_reports=12, delay=12):
+    # Use provided cache or load the global one if not provided
+    if cache is None:
+        cache = ProcessingCache.load()
     
     # Get tickers for the selected industry
     industry_tickers = sp500_df[sp500_df['Sector'] == industry]['Symbol'].tolist()
@@ -984,6 +987,7 @@ def process_industry(sp500_importer, industry, processor, sp500_df, max_quarterl
 
 # This function processes all industries in the S&P 500, either automatically or through user selection.
 def process_industries(sp500_importer, industry_groups, processor, sp500_df, automated=False):
+    # Access the global cache
     cache = ProcessingCache.load()
     total_start_time = time.time()
     last_process_time = total_start_time
@@ -1019,7 +1023,7 @@ def process_industries(sp500_importer, industry_groups, processor, sp500_df, aut
 
                 try:
                     logger.info(f"\nProcessing {industry} ({industry_counts[industry]} companies)")
-                    process_industry(sp500_importer, industry, processor, sp500_df)
+                    process_industry(sp500_importer, industry, processor, sp500_df, cache=cache)
                     
                     industry_time = time.time() - industry_start_time
                     formatted_time = cache.format_time(industry_time)
@@ -1063,7 +1067,7 @@ def process_industries(sp500_importer, industry_groups, processor, sp500_df, aut
                     industry_start_time = time.time()
                     
                     try:
-                        process_industry(sp500_importer, industry, processor, sp500_df)
+                        process_industry(sp500_importer, industry, processor, sp500_df, cache=cache)
                         
                         industry_time = time.time() - industry_start_time
                         cache.mark_industry_complete(industry, industry_time)
@@ -1094,7 +1098,7 @@ def process_industries(sp500_importer, industry_groups, processor, sp500_df, aut
                         cache.start_industry(industry)
                         industry_start_time = time.time()
                         
-                        process_industry(sp500_importer, industry, processor, sp500_df)
+                        process_industry(sp500_importer, industry, processor, sp500_df, cache=cache)
                         
                         industry_time = time.time() - industry_start_time
                         cache.mark_industry_complete(industry, industry_time)
@@ -1153,6 +1157,10 @@ def main(run_automated=False, clear_cache=False, industry_only=False):
         sp500_importer = SP500DataImporter()
         sp500_df = sp500_importer.load_data()
         
+        # Create and load the processing cache - make it global so other functions can access it
+        global cache
+        cache = ProcessingCache.load()
+
         # Display some basic information
         logger.info(f"Loaded {len(sp500_df)} companies from S&P 500 data")
         
