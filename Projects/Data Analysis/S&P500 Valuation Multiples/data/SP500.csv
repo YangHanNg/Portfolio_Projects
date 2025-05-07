@@ -29,7 +29,7 @@ AME,Ametek,Electrical Equipment,Electrical Components & Equipment,1.145843472,0.
 AMGN,Amgen,Drugs (Biotechnology),Biotechnology,1.08909647,0.083386527,0.189508512,0.442198086
 AMP,Ameriprise Financial,Investments & Asset Management,Asset Management & Custody Banks,0.39129393,0.052337685,0.046036863,0.524206097
 AMT,American Tower,R.E.I.T.,Telecom Tower REITs,0.660063542,0.06308888,0.083597195,-0.15371841
-AMTM,Amentum,Business & Consumer Services,#N/A,0.929642657,0.078564957,0.06692427,0.304162192
+AMTM,Amentum,Business & Consumer Services,NA,0.929642657,0.078564957,0.06692427,0.304162192
 AMZN,Amazon,Retail (General),Broadline Retail,1.171062909,0.089282001,0.180630526,0.725882717
 ANET,Arista Networks,Telecom. Equipment,Communications Equipment,1.045647985,0.083343683,0.09616449,0.536242435
 ANSS,Ansys,Software (System & Application),Application Software,1.272458994,0.094923923,0.159033378,0.476301017
@@ -67,7 +67,7 @@ BR,Broadridge Financial Solutions,Information Services,Data Processing & Outsour
 BRK.B,Berkshire Hathaway,Investments & Asset Management,Multi-Sector Holdings,0.39129393,0.052337685,0.046036863,0.524206097
 BRO,Brown & Brown,Insurance (General),Insurance Brokers,0.894617816,0.076402666,0.077637273,0.020168608
 BSX,Boston Scientific,Heathcare Information and Technology,Health Care Equipment,1.187533948,0.089506087,0.196667069,0.715904778
-BWA,BorgWarner,Auto Parts,#N/A,1.12110387,0.083289044,0.062846957,1.161358931
+BWA,BorgWarner,Auto Parts,NA,1.12110387,0.083289044,0.062846957,1.161358931
 BX,Blackstone Inc.,Investments & Asset Management,Asset Management & Custody Banks,0.39129393,0.052337685,0.046036863,0.524206097
 BXP,"BXP, Inc.",R.E.I.T.,Office REITs,0.660063542,0.06308888,0.083597195,-0.15371841
 C,Citigroup,Bank (Money Center),Diversified Banks,0.644005118,0.05081182,0.072753846,19.57501942
@@ -82,7 +82,7 @@ CCI,Crown Castle,R.E.I.T.,Telecom Tower REITs,0.660063542,0.06308888,0.083597195
 CCL,Carnival,Hotel/Gaming,"Hotels, Resorts & Cruise Lines",1.048189773,0.080151501,0.1024465,0.160164781
 CDNS,Cadence Design Systems,Software (System & Application),Application Software,1.272458994,0.094923923,0.159033378,0.476301017
 CDW,CDW,Electronics (Consumer & Office),Technology Distributors,1.302963609,0.089049334,-0.06321,0.871216099
-CE,Celanese,Chemical (Specialty),#N/A,0.938135743,0.078101735,0.07331875,0.788618721
+CE,Celanese,Chemical (Specialty),NA,0.938135743,0.078101735,0.07331875,0.788618721
 CEG,Constellation Energy,Utility (General),Electric Utilities,0.356795193,0.05094222,0.043405,0.784216274
 CF,CF Industries,Chemical (Diversified),Fertilizers & Agricultural Chemicals,0.813460858,0.069280335,-0.00755,0.490168696
 CFG,Citizens Financial Group,Banks (Regional),Regional Banks,0.333366607,0.046771373,0.092156242,1.957501942
@@ -116,7 +116,7 @@ CSCO,Cisco,Telecom. Equipment,Communications Equipment,1.045647985,0.083343683,0
 CSGP,CoStar Group,Real Estate (Operations & Services),Real Estate Services,0.882846385,0.072965782,0.054392667,0.135576238
 CSX,CSX Corporation,Transportation (Railroads),Rail Transportation,0.855997806,0.074640136,0.0249,0.599980747
 CTAS,Cintas,Business & Consumer Services,Diversified Support Services,0.929642657,0.078564957,0.06692427,0.304162192
-CTLT,Catalent,Drugs (Pharmaceutical),#N/A,0.943997687,0.080456031,0.415376667,0.442198086
+CTLT,Catalent,Drugs (Pharmaceutical),NA,0.943997687,0.080456031,0.415376667,0.442198086
 CTRA,Coterra,Oil/Gas (Production and Exploration),Oil & Gas Exploration & Production,0.821420497,0.073373141,0.232800588,0.536803676
 CTSH,Cognizant,Computer Services,IT Consulting & Other Services,0.858697507,0.074175635,0.109264737,0.276635201
 CTVA,Corteva,Chemical (Diversified),Fertilizers & Agricultural Chemicals,0.813460858,0.069280335,-0.00755,0.490168696
@@ -188,7 +188,7 @@ FI,Fiserv,Financial Svcs. (Non-bank & Insurance),Transaction & Payment Processin
 FICO,Fair Isaac,Software (System & Application),Application Software,1.272458994,0.094923923,0.159033378,0.476301017
 FIS,Fidelity National Information Services,Financial Svcs. (Non-bank & Insurance),Transaction & Payment Processing Services,0.321978751,0.049871016,0.205013107,-0.773954395
 FITB,Fifth Third Bancorp,Banks (Regional),Regional Banks,0.333366607,0.046771373,0.092156242,1.957501942
-FMC,FMC Corporation,Chemical (Diversified),#N/A,0.813460858,0.069280335,-0.00755,0.490168696
+FMC,FMC Corporation,Chemical (Diversified),NA,0.813460858,0.069280335,-0.00755,0.490168696
 FOX,Fox Corporation (Class B),Broadcasting,Broadcasting,0.499756675,0.056035943,0.054847059,1.536797306
 FOXA,Fox Corporation (Class A),Broadcasting,Broadcasting,0.499756675,0.056035943,0.054847059,1.536797306
 FRT,Federal Realty Investment Trust,Retail (REITs),Retail REITs,0.786674702,0.069402205,0.041101852,-0.085253457
@@ -319,7 +319,7 @@ MPC,Marathon Petroleum,Oil/Gas (Production and Exploration),Oil & Gas Refining &
 MPWR,Monolithic Power Systems,Semiconductor,Semiconductors,1.460244594,0.103622461,0.064411628,0.934351556
 MRK,Merck & Co.,Drugs (Pharmaceutical),Pharmaceuticals,0.943997687,0.080456031,0.415376667,0.442198086
 MRNA,Moderna,Drugs (Biotechnology),Biotechnology,1.08909647,0.083386527,0.189508512,0.442198086
-MRO,Marathon Oil,Oil/Gas (Production and Exploration),#N/A,0.821420497,0.073373141,0.232800588,0.536803676
+MRO,Marathon Oil,Oil/Gas (Production and Exploration),NA,0.821420497,0.073373141,0.232800588,0.536803676
 MS,Morgan Stanley,Brokerage & Investment Banking,Investment Banking & Brokerage,0.550778221,0.054148675,0.127874737,8.460207121
 MSCI,MSCI,Financial Svcs. (Non-bank & Insurance),Financial Exchanges & Data,0.321978751,0.049871016,0.205013107,-0.773954395
 MSFT,Microsoft,Software (System & Application),Systems Software,1.272458994,0.094923923,0.159033378,0.476301017
@@ -389,7 +389,7 @@ PTC,PTC Inc.,Software (System & Application),Application Software,1.272458994,0.
 PWR,Quanta Services,Engineering/Construction,Construction & Engineering,0.844677065,0.073677464,0.080567097,1.262997294
 PYPL,PayPal,Financial Svcs. (Non-bank & Insurance),Transaction & Payment Processing Services,0.321978751,0.049871016,0.205013107,-0.773954395
 QCOM,Qualcomm,Semiconductor,Semiconductors,1.460244594,0.103622461,0.064411628,0.934351556
-QRVO,Qorvo,Semiconductor,#N/A,1.460244594,0.103622461,0.064411628,0.934351556
+QRVO,Qorvo,Semiconductor,NA,1.460244594,0.103622461,0.064411628,0.934351556
 RCL,Royal Caribbean Group,Hotel/Gaming,"Hotels, Resorts & Cruise Lines",1.048189773,0.080151501,0.1024465,0.160164781
 REG,Regency Centers,Retail (REITs),Retail REITs,0.786674702,0.069402205,0.041101852,-0.085253457
 REGN,Regeneron Pharmaceuticals,Drugs (Biotechnology),Biotechnology,1.08909647,0.083386527,0.189508512,0.442198086
@@ -437,7 +437,7 @@ TECH,Bio-Techne,Heathcare Information and Technology,Life Sciences Tools & Servi
 TEL,TE Connectivity,Electronics (General),Electronic Manufacturing Services,0.877205174,0.075361085,0.158239651,0.9658047
 TER,Teradyne,Semiconductor Equip,Semiconductor Materials & Equipment,1.507765079,0.103967314,0.0992575,0.605672117
 TFC,Truist Financial,Bank (Money Center),Diversified Banks,0.644005118,0.05081182,0.072753846,19.57501942
-TFX,Teleflex,Heathcare Information and Technology,#N/A,1.187533948,0.089506087,0.196667069,0.715904778
+TFX,Teleflex,Heathcare Information and Technology,NA,1.187533948,0.089506087,0.196667069,0.715904778
 TGT,Target Corporation,Retail (Grocery and Food),Consumer Staples Merchandise Retail,0.364761149,0.053133992,0.0659125,0.300084333
 TJX,TJX Companies,Apparel,Apparel Retail,0.92957565,0.075526311,0.057186,0.521472306
 TMO,Thermo Fisher Scientific,Heathcare Information and Technology,Life Sciences Tools & Services,1.187533948,0.089506087,0.196667069,0.715904778

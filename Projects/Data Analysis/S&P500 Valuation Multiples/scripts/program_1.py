@@ -266,15 +266,13 @@ def create_tables():
             "industries": """
                 CREATE TABLE IF NOT EXISTS industries (
                     industry_id SERIAL PRIMARY KEY,
-                    sector_name VARCHAR(100) NOT NULL,
-                    industry_name VARCHAR(100) NOT NULL,
+                    sector_name VARCHAR(100) NOT NULL UNIQUE,
                     cost_of_capital DECIMAL(7,4),
                     growth_rate DECIMAL(7,4),
                     reinvestment_rate DECIMAL(7,4),
                     unlevered_data DECIMAL(7,4),
                     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    CONSTRAINT unique_industry_sector UNIQUE (sector_name, industry_name)
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """,
             "companies": """
@@ -282,6 +280,7 @@ def create_tables():
                     company_id SERIAL PRIMARY KEY,
                     symbol VARCHAR(10) UNIQUE NOT NULL,
                     name VARCHAR(255),
+                    industry_name VARCHAR(100),
                     industry_id INTEGER REFERENCES industries(industry_id),
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -423,8 +422,8 @@ def create_tables():
             "CREATE INDEX IF NOT EXISTS idx_financial_reports_company_id ON financial_reports(company_id)",
             "CREATE INDEX IF NOT EXISTS idx_financial_reports_period_id ON financial_reports(period_id)",
             "CREATE INDEX IF NOT EXISTS idx_companies_industry_id ON companies(industry_id)",
+            "CREATE INDEX IF NOT EXISTS idx_industries_industry_name ON companies(industry_name)",
             "CREATE INDEX IF NOT EXISTS idx_industries_sector_name ON industries(sector_name)",
-            "CREATE INDEX IF NOT EXISTS idx_industries_industry_name ON industries(industry_name)",
             "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_company ON calculated_metrics(company_id)",
             "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_period ON calculated_metrics(period_id)",
             "CREATE INDEX IF NOT EXISTS idx_calculated_metrics_metric ON calculated_metrics(metric_id)",
@@ -482,30 +481,40 @@ class FinancialDataAccess:
     # Function to insert new company data or update existing one
     @staticmethod
     def insert_company(symbol, name=None, sector_name=None, industry_name=None):
+        # Handle NaN values
+        if pd.isna(industry_name):
+            industry_name = 'N/A'
+        
+        if pd.isna(name):
+            name = symbol
+            
         # First get the industry_id if sector is provided
         industry_id = None
         if sector_name:
+            # Only look up by sector_name
             query = """
             SELECT industry_id FROM industries 
-            WHERE sector_name = %s AND industry_name = COALESCE(%s, 'N/A')
+            WHERE sector_name = %s
+            LIMIT 1
             """
-            result = execute_query(query, (sector_name, industry_name), fetch=True)
+            result = execute_query(query, (sector_name,), fetch=True)
             if result:
                 industry_id = result[0][0]
-        
-        # Then insert the company
+
+        # Then insert the company with industry_name as a field
         query = """
-        INSERT INTO companies (symbol, name, industry_id)
-        VALUES (%s, %s, %s)
+        INSERT INTO companies (symbol, name, industry_name, industry_id)
+        VALUES (%s, %s, %s, %s)
         ON CONFLICT (symbol) 
         DO UPDATE SET 
             name = COALESCE(%s, companies.name),
+            industry_name = COALESCE(%s, companies.industry_name),
             industry_id = COALESCE(%s, companies.industry_id),
             updated_at = CURRENT_TIMESTAMP
         RETURNING company_id
         """
-        params = (symbol, name, industry_id, name, industry_id)
-        
+        params = (symbol, name, industry_name, industry_id, name, industry_name, industry_id)
+
         result = execute_query(query, params)
         return result[0] if result else None
     
@@ -610,27 +619,44 @@ class FinancialDataAccess:
     
     # Function to insert new industry or update existing one
     @staticmethod
-    def insert_industry(sector_name, industry_name, cost_of_capital=None, growth_rate=None, reinvestment_rate=None, unlevered_data=None):
-        
-        # SQL query to insert or update industry data
-        query = """
-        INSERT INTO industries (sector_name, industry_name, cost_of_capital, growth_rate, reinvestment_rate, unlevered_data)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT (sector_name, industry_name) 
-        DO UPDATE SET 
-            cost_of_capital = COALESCE(%s, industries.cost_of_capital),
-            growth_rate = COALESCE(%s, industries.growth_rate),
-            reinvestment_rate = COALESCE(%s, industries.reinvestment_rate),
-            unlevered_data = COALESCE(%s, industries.unlevered_data),
-            last_updated = CURRENT_TIMESTAMP
-        RETURNING industry_id
+    def insert_industry(sector_name, cost_of_capital=None, growth_rate=None, reinvestment_rate=None, unlevered_data=None):
+        # First check if industry exists with this sector name
+        check_query = """
+        SELECT industry_id FROM industries 
+        WHERE sector_name = %s
+        LIMIT 1
         """
-        params = (sector_name, industry_name, cost_of_capital, growth_rate, reinvestment_rate, unlevered_data,
-                  cost_of_capital, growth_rate, reinvestment_rate, unlevered_data)
-        
-        result = execute_query(query, params)
-        return result[0] if result else None
+        result = execute_query(check_query, (sector_name,), fetch=True)
 
+        if result:
+            # Update existing record
+            update_query = """
+            UPDATE industries 
+            SET
+                cost_of_capital = COALESCE(%s, cost_of_capital),
+                growth_rate = COALESCE(%s, growth_rate),
+                reinvestment_rate = COALESCE(%s, reinvestment_rate),
+                unlevered_data = COALESCE(%s, unlevered_data),
+                last_updated = CURRENT_TIMESTAMP
+            WHERE industry_id = %s
+            RETURNING industry_id
+            """
+            params = (cost_of_capital, growth_rate, 
+                    reinvestment_rate, unlevered_data, result[0][0])
+    
+            result = execute_query(update_query, params)
+            return result[0] if result else None
+        else:
+            # Insert new record
+            insert_query = """
+            INSERT INTO industries (sector_name, cost_of_capital, growth_rate, reinvestment_rate, unlevered_data)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING industry_id
+            """
+            params = (sector_name, cost_of_capital, growth_rate, reinvestment_rate, unlevered_data)
+    
+            result = execute_query(insert_query, params)
+            return result[0] if result else None
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # Class module to handle S&P 500 data import and processing
@@ -671,41 +697,40 @@ class SP500DataImporter:
     # Function to import all industry data from the CSV file
     def import_industry_data(self, sector_name):
         self.connect_db()
-        
+
         if self.sp500_df is None:
             self.load_data()
-            
+        
         # Filter companies by industry
         industry_df = self.sp500_df[self.sp500_df['Sector'] == sector_name]
         
-        if industry_df.empty:
-            logger.warning(f"No companies found for industry: {sector_name}")
-            return 0
-            
         # Convert DataFrame to list of dictionaries
         industry_data = industry_df.to_dict('records')
-        
+
+        if not industry_data:
+            logger.warning(f"No companies found for sector: {sector_name}")
+            return 0
+            
         # Get industry details from first company
         first_company = industry_data[0]
-        
+
         try:
             # More robust float conversion for unlevered_data
             unlevered_data = float(str(first_company.get('Unlevered Data', 0)).replace(',', '.'))
         except (ValueError, TypeError):
             logger.warning(f"Invalid unlevered data for industry {sector_name}: {first_company.get('Unlevered Data')}")
             unlevered_data = 0.0
-        
-        # Insert/update the industry into the database
+
+        # Insert/update the industry into the database (without industry_name)
         self.db.insert_industry(
             sector_name=first_company['Sector'],
-            industry_name=first_company.get('Industry', 'N/A'),
             cost_of_capital=first_company.get('Industry Cost of Capital'),
             growth_rate=first_company.get('Industry Growth'),
             reinvestment_rate=first_company.get('Industry Reinvestment rate'),
             unlevered_data=unlevered_data
         )
-        
-        # Insert all companies in this industry
+
+        # Insert all companies in this industry (with their individual industry_name)
         for company in industry_data:
             try:
                 # More robust float conversion
@@ -713,16 +738,15 @@ class SP500DataImporter:
             except (ValueError, TypeError):
                 logger.warning(f"Invalid unlevered data for {company['Symbol']}: {company.get('Unlevered Data')}")
                 unlevered_data = 0.0
-        
+
             self.db.insert_company(
                 symbol=company['Symbol'],
                 name=company['Name'],
-                sector=company['Sector'],
-                industry=company.get('Industry', 'N/A'),
-                unlevered_data=unlevered_data
-                )
-    
-        logger.info(f"Imported {len(industry_data)} companies for industry: {sector_name}")
+                sector_name=company['Sector'],
+                industry_name=company.get('Industry', 'N/A')  # Industry name stored at company level
+            )
+
+        logger.info(f"Imported {len(industry_data)} companies for sector: {sector_name}")
         return len(industry_data)
     
     #----------------------------------------------------------------------------------------------------------------------------------
@@ -937,15 +961,16 @@ def process_industry(sp500_importer, industry, processor, sp500_df, max_quarterl
     industry_tickers = sp500_df[sp500_df['Sector'] == industry]['Symbol'].tolist()
     logger.info(f"Selected {industry} with {len(industry_tickers)} companies")
     
-    # Check if industry data needs updating
-    if sp500_importer.is_industry_data_current(industry):
-        logger.info(f"Industry data for {industry} is current. Skipping data import.")
-        return False
+    # First, ensure industry data is properly imported to the database
+    logger.info(f"Importing industry data for {industry}")
+    company_count = sp500_importer.import_industry_data(industry)
+    logger.info(f"Imported {company_count} companies for {industry}")
 
     # Fetch and process data for each ticker
     reports = ['BALANCE_SHEET', 'INCOME_STATEMENT']
     
     for ticker in industry_tickers:
+        cache.update_progress(ticker)  # Update progress to track which company we're processing
         for report in reports:
             data = processor.fetch_financial_data(ticker, report)
             if data:
@@ -1110,7 +1135,7 @@ def get_metric_formula(metric_name):
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # Main function to run the program
-def main(run_automated=False, clear_cache=False):
+def main(run_automated=False, clear_cache=False, industry_only=False):
     try:
         if clear_cache:
             ProcessingCache.clear_cache()
@@ -1131,6 +1156,18 @@ def main(run_automated=False, clear_cache=False):
         # Display some basic information
         logger.info(f"Loaded {len(sp500_df)} companies from S&P 500 data")
         
+        # If industry_only flag is set, just import industry data
+        if industry_only:
+            logger.info("Processing industries only - skipping financial data collection")
+            all_industries = sp500_df['Sector'].unique().tolist()
+            for industry in all_industries:
+                logger.info(f"Importing industry data for {industry}")
+                company_count = sp500_importer.import_industry_data(industry)
+                logger.info(f"Imported {company_count} companies for {industry}")
+            logger.info("Industry data processing complete")
+            return
+            
+        # Regular processing continues below
         # Get categorised groups of industries
         industry_groups = get_categorized_industries(sp500_df, automated=run_automated)
         
@@ -1151,12 +1188,13 @@ def main(run_automated=False, clear_cache=False):
     except Exception as e:
         logger.error(f"An error occurred in main: {str(e)}", exc_info=True)
 
-# ------------------------------------------------------------------------------------------------------------------------------------------------------
-
+# Update your argument parser to include the new option
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Process S&P 500 financial data')
     parser.add_argument('--automated', action='store_true', help='Run in automated mode')
     parser.add_argument('--clear-cache', action='store_true', help='Clear the processing cache before starting')
+    parser.add_argument('--industry-only', action='store_true', 
+                        help='Only import industry data without processing financial information')
     args = parser.parse_args()
-    main(run_automated=args.automated, clear_cache=args.clear_cache)
+    main(run_automated=args.automated, clear_cache=args.clear_cache, industry_only=args.industry_only)
