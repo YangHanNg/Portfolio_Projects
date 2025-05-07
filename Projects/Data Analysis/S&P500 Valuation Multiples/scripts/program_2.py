@@ -787,51 +787,72 @@ def get_metric_formula(metric_name):
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------
 
+def convert_numpy_types(obj):
+    """Convert NumPy types to standard Python types for database compatibility."""
+    if isinstance(obj, (np.int_, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64)):
+        return int(obj)
+    elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return [convert_numpy_types(x) for x in obj]
+    elif isinstance(obj, list):
+        return [convert_numpy_types(x) for x in obj]
+    elif isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    else:
+        return obj
+    
+#------------------------------------------------------------------------------------------------------------------------------------------------------
+
 # Function to save regression and statistical results to the database
 def save_regression_results(company_id, period_id, multiple, model, diagnostics, plot_binary):
     conn = None
     cur = None
     try:
+        # Convert NumPy types to native Python types
+        company_id = convert_numpy_types(company_id)
+        period_id = convert_numpy_types(period_id)
+        
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # Prepare statistical data
-                stats_data = {
-                    'r_squared': float(model.rsquared),
-                    'adj_r_squared': float(model.rsquared_adj),
-                    'f_statistic': float(model.fvalue),
-                    'f_pvalue': float(model.f_pvalue),
-                    'aic': float(model.aic),
-                    'bic': float(model.bic)
-                }
+                # Prepare statistical data with explicit conversion
+                stats_data = convert_numpy_types({
+                    'r_squared': model.rsquared,
+                    'adj_r_squared': model.rsquared_adj,
+                    'f_statistic': model.fvalue,
+                    'f_pvalue': model.f_pvalue,
+                    'aic': model.aic,
+                    'bic': model.bic
+                })
                 
-                # Prepare model parameters
-                model_params = {
-                    'coefficients': [float(x) for x in model.params],
-                    'standard_errors': [float(x) for x in model.bse],
-                    't_values': [float(x) for x in model.tvalues],
-                    'p_values': [float(x) for x in model.pvalues],
-                    'confidence_intervals': [[float(x) for x in row] for row in model.conf_int()]
-                }
+                # Prepare model parameters with explicit conversion
+                model_params = convert_numpy_types({
+                    'coefficients': list(model.params),
+                    'standard_errors': list(model.bse),
+                    't_values': list(model.tvalues),
+                    'p_values': list(model.pvalues),
+                    'confidence_intervals': model.conf_int().tolist()
+                })
                 
-                # Convert diagnostics to proper JSON format with explicit Python native type conversion
-                diagnostic_data = {
+                # Convert diagnostics to proper JSON format with explicit conversion
+                diagnostic_data = convert_numpy_types({
                     'heteroscedasticity_test': {
-                        'test_value': float(diagnostics['Value'][0]),
-                        'passes': bool(diagnostics['Pass'][0])
+                        'test_value': diagnostics['Value'][0],
+                        'passes': diagnostics['Pass'][0]
                     },
                     'multicollinearity_test': {
-                        'test_value': float(diagnostics['Value'][1]),
-                        'passes': bool(diagnostics['Pass'][1])
+                        'test_value': diagnostics['Value'][1],
+                        'passes': diagnostics['Pass'][1]
                     },
                     'normality_test': {
-                        'test_value': float(diagnostics['Value'][2]),
-                        'passes': bool(diagnostics['Pass'][2])
+                        'test_value': diagnostics['Value'][2],
+                        'passes': diagnostics['Pass'][2]
                     },
                     'linearity_test': {
-                        'test_value': float(diagnostics['Value'][3]),
-                        'passes': bool(diagnostics['Pass'][3])
+                        'test_value': diagnostics['Value'][3],
+                        'passes': diagnostics['Pass'][3]
                     }
-                }
+                })
                 
                 # Insert main regression analysis results
                 cur.execute("""
@@ -900,6 +921,11 @@ def save_regression_results(company_id, period_id, multiple, model, diagnostics,
                 
                 x1_name, x2_name = regression_format[multiple]
                 
+                # Convert model parameters to Python native types
+                c1 = convert_numpy_types(model.params[1])
+                c2 = convert_numpy_types(model.params[2])
+                y_intercept = convert_numpy_types(model.params[0])
+                
                 # Store coefficients in regression_coefficients table
                 cur.execute("""
                     INSERT INTO regression_coefficients (
@@ -916,10 +942,10 @@ def save_regression_results(company_id, period_id, multiple, model, diagnostics,
                         y_intercept = EXCLUDED.y_intercept
                 """, (
                     analysis_id, multiple, x1_name, x2_name,
-                    float(model.params[1]), float(model.params[2]), float(model.params[0])
+                    c1, c2, y_intercept
                 ))
                 
-                # Insert detailed diagnostic results in regression_diagnostics table
+                # Insert detailed diagnostic results in regression_diagnostics table with explicit conversion
                 for test_type, (metric, value, passes) in zip(
                     ['Heteroscedasticity', 'Multicollinearity', 'Normality', 'Linearity'],
                     zip(diagnostics['Metric'], diagnostics['Value'], diagnostics['Pass'])
@@ -931,8 +957,8 @@ def save_regression_results(company_id, period_id, multiple, model, diagnostics,
                         )
                         VALUES (%s, %s, %s, %s, %s)
                     """, (
-                        analysis_id, test_type, float(value),
-                        passes, 0.05 if test_type in ['Heteroscedasticity', 'Linearity'] else (5.0 if test_type == 'Multicollinearity' else 2.0)
+                        analysis_id, test_type, convert_numpy_types(value),
+                        convert_numpy_types(passes), 0.05 if test_type in ['Heteroscedasticity', 'Linearity'] else (5.0 if test_type == 'Multicollinearity' else 2.0)
                     ))
                 
                 conn.commit()
