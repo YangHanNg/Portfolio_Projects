@@ -80,12 +80,10 @@ Program 2 focuses on retrieving the stored financial data and performing complex
    - Preserves analysis history for trending and comparison
 
 <p align="center">
-  <img src="figures/example_table_scheme.png" width="400"/>
+  <img src="figures/example_table_scheme.png" width="1000"/>
 </p>
 
-<p align="center">
-  <b>Figure 3:</b> Example Table Schema Relationships in PowerBI
-</p>
+<p align="center"><em>Figure 3: Example of Complete Table Schema Relationship in PowerBI..</em></p>
 
 ---
 
