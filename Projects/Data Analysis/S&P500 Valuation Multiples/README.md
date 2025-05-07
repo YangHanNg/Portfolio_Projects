@@ -79,6 +79,12 @@ Program 2 focuses on retrieving the stored financial data and performing complex
    - Maintains regression results including coefficients, diagnostics, and visualizations
    - Preserves analysis history for trending and comparison
 
+<p align="center">
+  <img src="figures/example_table_scheme.png" width="1000"/>
+</p>
+
+<p align="center"><em>Figure 3: Example of Complete Table Schema Relationship in PowerBI..</em></p>
+
 ---
 
 ### Stage 3: SQL Queries, Data Visualisation, and Statistical Validation
