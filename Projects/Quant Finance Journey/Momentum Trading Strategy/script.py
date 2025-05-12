@@ -1,5 +1,11 @@
 import pandas as pd
 import numpy as np
+try:
+    import cupy as cp
+    HAS_GPU = True
+except ImportError:
+    HAS_GPU = False
+    print("GPU acceleration not available. Using CPU only.")
 import yfinance as yf
 from tabulate import tabulate  
 import pandas_ta as ta 
@@ -8,9 +14,41 @@ import multiprocessing as mp
 import itertools
 import matplotlib as plt
 import seaborn as sns
-import gc
+from collections import deque
+from numba import jit
+from tqdm import tqdm
 
 # --------------------------------------------------------------------------------------------------------------------------
+
+# Trade Management
+ADX_THRESHOLD_DEFAULT = 25
+MIN_BUY_SCORE_DEFAULT = 3.0
+MIN_SELL_SCORE_DEFAULT = 3.0
+REQUIRE_CLOUD_DEFAULT = True
+USE_TRAILING_STOPS_DEFAULT = True
+
+# Risk & Reward
+DEFAULT_LONG_RISK = 0.03  
+DEFAULT_LONG_REWARD = 0.09  
+DEFAULT_SHORT_RISK = 0.02  
+DEFAULT_SHORT_REWARD = 0.04  
+DEFAULT_POSITION_SIZE = 1 
+MAX_OPEN_POSITIONS = 10 
+
+TREND_WEIGHTS = {
+    'primary_trend': 4.0,
+    'trend_strength': 3.5,
+    'cloud_confirmation': 2.0,
+    'kumo_confirmation': 1.0,
+    'ma_alignment': 2.0  
+}
+
+CONFIRMATION_WEIGHTS = {
+    'rsi': 1.2,
+    'mfi': 1.0,
+    'volume': 1.5,
+    'bollinger': 0.8
+}
 
 # Base parameters
 TICKER = ['SPY']
@@ -41,40 +79,10 @@ MFI_OVERSOLD = 30
 BB_LEN = 20
 DEVS = 2
 
-# Risk & Reward
-DEFAULT_LONG_RISK = 0.03  
-DEFAULT_LONG_REWARD = 0.06  
-DEFAULT_SHORT_RISK = 0.02  
-DEFAULT_SHORT_REWARD = 0.04  
-DEFAULT_POSITION_SIZE = 0.10  
-MAX_OPEN_POSITIONS = 5 
-
-# Trade Management
-ADX_THRESHOLD_DEFAULT = 25
-MIN_BUY_SCORE_DEFAULT = 5.0
-MIN_SELL_SCORE_DEFAULT = 5.0
-REQUIRE_CLOUD_DEFAULT = True
-USE_TRAILING_STOPS_DEFAULT = True
-
 # Script Execution Defaults 
-OPTIMIZE_DEFAULT = False
+OPTIMIZE_DEFAULT = True
 VISUALIZE_BEST_DEFAULT = False
 OPTIMIZATION_TYPE_DEFAULT = 'basic'
-
-TREND_WEIGHTS = {
-    'primary_trend': 3.0,
-    'trend_strength': 2.5,
-    'cloud_confirmation': 2.0,
-    'kumo_confirmation': 1.0,
-    'ma_alignment': 1.5  
-}
-
-CONFIRMATION_WEIGHTS = {
-    'rsi': 1.0,
-    'mfi': 1.0,
-    'volume': 0.8,
-    'bollinger': 0.5
-}
 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -284,17 +292,17 @@ def momentum(
     fast_ma_col_name: str, 
     slow_ma_col_name: str, 
     weekly_ma_col_name: str,
-    # Strategy execution parameters
     long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
     short_risk=DEFAULT_SHORT_RISK, short_reward=DEFAULT_SHORT_REWARD,
-    position_size=DEFAULT_POSITION_SIZE, max_positions=MAX_OPEN_POSITIONS,
+    position_size=DEFAULT_POSITION_SIZE, max_positions=MAX_OPEN_POSITIONS, # Modified to accept max_positions
     risk_free_rate=0.04, leverage_ratio=LEVERAGE,
-    use_trailing_stops=USE_TRAILING_STOPS_DEFAULT,
-    # Signal generation parameters (to be passed to vectorized_signals)
+    use_trailing_stops=USE_TRAILING_STOPS_DEFAULT, # Modified to accept use_trailing_stops
     adx_threshold_sig=ADX_THRESHOLD_DEFAULT,
     min_buy_score_sig=MIN_BUY_SCORE_DEFAULT,
     min_sell_score_sig=MIN_SELL_SCORE_DEFAULT,
-    require_cloud_sig=REQUIRE_CLOUD_DEFAULT
+    require_cloud_sig=REQUIRE_CLOUD_DEFAULT,
+    trend_weights_sig=None, 
+    confirmation_weights_sig=None
 ):
     
     """
@@ -306,16 +314,21 @@ def momentum(
         print("Warning: Empty dataframe (df_with_indicators) provided to momentum.")
         return [], create_empty_stats(), pd.Series(dtype='float64'), pd.Series(dtype='float64')
 
+    final_trend_weights = trend_weights_sig if trend_weights_sig is not None else TREND_WEIGHTS
+    final_confirmation_weights = confirmation_weights_sig if confirmation_weights_sig is not None else CONFIRMATION_WEIGHTS
+
     # 1. Generate signals using the indicator-laden DataFrame
     signals_df = signals(
-        df_with_indicators, # Pass the DataFrame that already has indicators
+        df_with_indicators, 
         adx_threshold_val=adx_threshold_sig,
         min_buy_score_val=min_buy_score_sig,
         min_sell_score_val=min_sell_score_sig,
         require_cloud_val=require_cloud_sig,
         fast_ma_col=fast_ma_col_name,
         slow_ma_col=slow_ma_col_name,
-        weekly_ma_col_name=weekly_ma_col_name # Pass the actual column name
+        weekly_ma_col_name=weekly_ma_col_name,
+        trend_weights_dict_param=final_trend_weights, 
+        confirmation_weights_dict_param=final_confirmation_weights
     )
 
     # 2. Initialize Trade Managers and Tracking
@@ -336,6 +349,7 @@ def momentum(
 
     # 3. Main Processing Loop
     # Iterate using df_with_indicators for data and signals_df for signals
+    loop_start_time = datetime.now()
     for i in range(1, len(df_with_indicators)):
         current_trade_date = df_with_indicators.index[i]
         transaction_price = df_with_indicators['Open'].iloc[i]
@@ -345,50 +359,46 @@ def momentum(
         previous_day_data_row = df_with_indicators.iloc[i-1]
         previous_day_atr = previous_day_data_row['ATR']
         previous_day_adx = previous_day_data_row['ADX']
-        if pd.isna(transaction_price) or pd.isna(previous_day_atr) or pd.isna(previous_day_adx):
-            equity_curve.iloc[i] = equity_curve.iloc[i-1]
-            returns_series.iloc[i] = 0.0
-            continue
 
-        # Get signals from the pre-calculated signals_df
         buy_signal_for_today = signals_df['buy_signal'].iloc[i-1]
         sell_signal_for_today = signals_df['sell_signal'].iloc[i-1]
         
-        # Get other confirmations from the main data row
         previous_day_volume_confirmed = previous_day_data_row.get('volume_confirmed', False)
         previous_day_weekly_uptrend = previous_day_data_row.get('weekly_uptrend', True) 
 
+        # Use the 'use_trailing_stops' parameter passed to the function
         if use_trailing_stops:
             long_manager.update_trailing_stops(transaction_price, previous_day_atr, previous_day_adx)
             short_manager.update_trailing_stops(transaction_price, previous_day_atr, previous_day_adx)
 
         long_manager.process_exits(current_trade_date, transaction_price,
                                    signal_exit=sell_signal_for_today, 
-                                   trend_valid=(previous_day_adx > adx_threshold_sig)) # Use the same ADX threshold
+                                   trend_valid=(previous_day_adx > adx_threshold_sig)) 
         short_manager.process_exits(current_trade_date, transaction_price,
                                      signal_exit=buy_signal_for_today,
                                      trend_valid=(previous_day_adx > adx_threshold_sig))
 
         entry_params_base = {
-            'price': transaction_price, # Trade at Open of current day
-            'atr': previous_day_atr,    # ATR from previous day
-            'adx': previous_day_adx,    # ADX from previous day
+            'price': transaction_price, 
+            'atr': previous_day_atr,    
+            'adx': previous_day_adx,    
             'position_size': position_size, 
-            'leverage': leverage_ratio
+            'leverage': leverage_ratio,
+            'sar': previous_day_data_row.get('SAR', transaction_price * 0.97) 
         }
 
-        if buy_signal_for_today and previous_day_volume_confirmed:
+        if buy_signal_for_today and previous_day_volume_confirmed: 
             long_entry_params = {**entry_params_base,
                                  'portfolio_value': long_manager.portfolio_value,
                                  'risk': long_risk, 'reward': long_reward}
             long_manager.process_entry(current_trade_date, long_entry_params)
 
-        if sell_signal_for_today and not previous_day_weekly_uptrend:
+        if sell_signal_for_today and not previous_day_weekly_uptrend: 
             short_entry_params = {**entry_params_base,
                                   'portfolio_value': short_manager.portfolio_value,
                                   'risk': short_risk, 'reward': short_reward}
             short_manager.process_entry(current_trade_date, short_entry_params)
-
+        
         total_value = (long_manager.portfolio_value + short_manager.portfolio_value +
                        long_manager.calculate_unrealized_pnl(transaction_price) +
                        short_manager.calculate_unrealized_pnl(transaction_price))
@@ -399,11 +409,13 @@ def momentum(
         else:
             returns_series.iloc[i] = 0.0 if total_value == 0 else np.nan
 
+    loop_end_time = datetime.now() # Overall loop end time
+    total_loop_duration = (loop_end_time - loop_start_time).total_seconds()
 
     # 4. Combine trade logs and calculate statistics
-    combined_trade_log = long_manager.trade_log + short_manager.trade_log
-    combined_wins = long_manager.wins + short_manager.wins
-    combined_losses = long_manager.losses + short_manager.losses
+    combined_trade_log = deque(list(long_manager.trade_log) + list(short_manager.trade_log))
+    combined_wins = deque(list(long_manager.wins) + list(short_manager.wins))
+    combined_losses = deque(list(long_manager.losses) + list(short_manager.losses))
 
     # Ensure trade_statistics function is defined and accessible
     stats = trade_statistics(equity_curve, combined_trade_log, combined_wins, combined_losses, risk_free_rate)
@@ -423,69 +435,113 @@ def _dynamic_thresholds(atr_ratio_np, base_buy, base_sell):
 
 # --------------------------------------------------------------------------------------------------------------------------
 
-def _calculate_trend_score(conditions, weights, direction='long'):
-    # Determine the shape from a base condition array
-    base_condition_for_shape = conditions.get('primary_trend_long', conditions.get('primary_trend_short'))
-    if base_condition_for_shape is False or not hasattr(base_condition_for_shape, 'shape'): # Fallback if no primary trend keys
-        # Attempt to get shape from another common condition or default to a small array to avoid errors
-        # This part might need adjustment based on how 'conditions' can be structured
-        fallback_condition = conditions.get('trend_strength_ok', np.array([False])) # Example fallback
-        score_shape = fallback_condition.shape if hasattr(fallback_condition, 'shape') else (0,)
+def _calculate_dynamic_scores(conditions, rsi_np_arr, mfi_np_arr, trend_weights_dict, 
+                            confirmation_weights_dict, direction='long', 
+                            weekly_trend=None, atr_ratio_np=None):
+    """Enhanced scoring system with volatility-adjusted indicators"""
+    # Initialize base score
+    if rsi_np_arr is not None and hasattr(rsi_np_arr, 'shape'):
+        base_score = np.zeros_like(rsi_np_arr, dtype=float)
+    elif mfi_np_arr is not None and hasattr(mfi_np_arr, 'shape'):
+        base_score = np.zeros_like(mfi_np_arr, dtype=float)
     else:
-        score_shape = base_condition_for_shape.shape
+        base_score = np.zeros_like(conditions.get('primary_trend_long', np.array([])), dtype=float)
+
+    # Trend components with weekly trend confirmation
+    if direction == 'long':
+        base_score += conditions.get('primary_trend_long', False).astype(float) * trend_weights_dict.get('primary_trend', 0)
+        if weekly_trend is not None:
+            base_score += weekly_trend.astype(float) * 1.5  # Additional weight for higher timeframe
+    else:
+        base_score += conditions.get('primary_trend_short', False).astype(float) * trend_weights_dict.get('primary_trend', 0)
+        if weekly_trend is not None:
+            base_score += (~weekly_trend).astype(float) * 1.5  # Inverse for shorts
+
+    # Volatility-adjusted momentum scoring
+    if atr_ratio_np is not None:
+        high_vol_mask = atr_ratio_np > 0.015
+        if direction == 'long':
+            rsi_strength = np.where(
+                high_vol_mask,
+                np.clip((rsi_np_arr - 40) / 15, 0, 1),  # More sensitive in high vol
+                np.clip((rsi_np_arr - 45) / 10, 0, 1)   # Less sensitive in low vol
+            )
+        else:
+            rsi_strength = np.where(
+                high_vol_mask,
+                np.clip((60 - rsi_np_arr) / 15, 0, 1),  # More sensitive in high vol
+                np.clip((55 - rsi_np_arr) / 10, 0, 1)   # Less sensitive in low vol
+            )
+    else:
+        # Fall back to original RSI calculation if atr_ratio not provided
+        if direction == 'long':
+            rsi_strength = np.clip((rsi_np_arr - 50) / 20, 0, 1)
+        else:
+            rsi_strength = np.clip((50 - rsi_np_arr) / 20, 0, 1)
+
+    # Add remaining components
+    base_score += rsi_strength * confirmation_weights_dict.get('rsi', 0)
+    base_score += conditions.get('volume_ok', False).astype(float) * confirmation_weights_dict.get('volume', 0)
     
-    score = np.zeros(score_shape, dtype=float) # Initialize score as a float array
-
-    if direction == 'long':
-        score += conditions.get('primary_trend_long', False).astype(float) * weights.get('primary_trend', 0)
-        score += conditions.get('strong_cloud_support', False).astype(float) * weights.get('cloud_confirmation', 0)
-        score += conditions.get('ma_buy', False).astype(float) * weights.get('ma_alignment', 0)
-    else: # short
-        score += conditions.get('primary_trend_short', False).astype(float) * weights.get('primary_trend', 0)
-        score += conditions.get('below_cloud', False).astype(float) * weights.get('cloud_confirmation', 0)
-        score += conditions.get('ma_sell', False).astype(float) * weights.get('ma_alignment', 0)
-    score += conditions.get('trend_strength_ok', False).astype(float) * weights.get('trend_strength', 0) # Common for both
-    return score
+    # Additional trend strength confirmatioxns
+    base_score += conditions.get('trend_strength_ok', False).astype(float) * trend_weights_dict.get('trend_strength', 0)
+    
+    return base_score
 
 # --------------------------------------------------------------------------------------------------------------------------
 
-def _calculate_confirmation_score(conditions, weights, rsi_np_arr, mfi_np_arr, direction='long'):
-    # Determine the shape from a base condition array
-    base_condition_for_shape = conditions.get('volume_ok', False)
-    if base_condition_for_shape is False or not hasattr(base_condition_for_shape, 'shape'):
-         # Attempt to get shape from another common condition or default
-        fallback_condition = rsi_np_arr if rsi_np_arr is not None and hasattr(rsi_np_arr, 'shape') else np.array([False])
-        score_shape = fallback_condition.shape
-    else:
-        score_shape = base_condition_for_shape.shape
-
-    score = np.zeros(score_shape, dtype=float) # Initialize score as a float array
-
-    if direction == 'long':
-        score += conditions.get('rsi_confirmation_long', False).astype(float) * weights.get('rsi', 0)
-        score += conditions.get('mfi_confirmation_long', False).astype(float) * weights.get('mfi', 0)
-        score += conditions.get('bb_buy', False).astype(float) * weights.get('bollinger', 0)
-    else: # short
-        score += conditions.get('rsi_confirmation_short', False).astype(float) * weights.get('rsi', 0)
-        score += conditions.get('mfi_confirmation_short', False).astype(float) * weights.get('mfi', 0)
-        score += conditions.get('bb_sell', False).astype(float) * weights.get('bollinger', 0)
-    score += conditions.get('volume_ok', False).astype(float) * weights.get('volume', 0) # Common for both
-    return score
+def _generate_final_signals(conditions, scores_dict, min_scores_dict, rsi_np_arr):
+    """Improved signal generation with additional filters"""
+    # Long Signals
+    long_checks = (
+        conditions.get('primary_trend_long', False) &
+        conditions.get('trend_strength_ok', False) &
+        (conditions.get('kumo_breakout', False) | conditions.get('strong_cloud_support', False)) &
+        (scores_dict.get('buy', np.array([-np.inf])) >= min_scores_dict.get('buy', np.array([np.inf]))) & # Ensure proper default for comparison
+        conditions.get('volume_ok', False)
+    )
+    
+    # Short Signals
+    short_checks = (
+        conditions.get('primary_trend_short', False) &
+        conditions.get('trend_strength_ok', False) &
+        (conditions.get('kumo_breakdown', False) | conditions.get('below_cloud', False)) &
+        (scores_dict.get('sell', np.array([-np.inf])) >= min_scores_dict.get('sell', np.array([np.inf]))) & # Ensure proper default for comparison
+        conditions.get('volume_ok', False)
+    )
+    
+    # Additional filter: Don't trade in extreme RSI zones
+    overbought = rsi_np_arr > 70
+    oversold = rsi_np_arr < 30
+    
+    
+    final_buy = long_checks & ~overbought
+    final_sell = short_checks & ~oversold
+    
+    return {
+        'buy': final_buy,
+        'sell': final_sell
+    }
 
 # --------------------------------------------------------------------------------------------------------------------------
 
-def signals(df, adx_threshold_val, min_buy_score_val, min_sell_score_val, require_cloud_val, # require_cloud_val might become redundant
-                       fast_ma_col, slow_ma_col, weekly_ma_col_name):
+def signals(df, adx_threshold_val, min_buy_score_val, min_sell_score_val, require_cloud_val,
+                       fast_ma_col, slow_ma_col, weekly_ma_col_name, 
+                       trend_weights_dict_param=None, confirmation_weights_dict_param=None):
     """
     Generates trading signals for the entire DataFrame using vectorized operations, NumPy,
     primary trend filters, secondary confirmations, and a weighted scoring approach.
     """
     signals_df = pd.DataFrame(index=df.index)
 
+    # Use passed weights if available, otherwise default to global
+    current_trend_weights = trend_weights_dict_param if trend_weights_dict_param is not None else TREND_WEIGHTS
+    current_confirmation_weights = confirmation_weights_dict_param if confirmation_weights_dict_param is not None else CONFIRMATION_WEIGHTS
+
     required_indicator_cols = [
         fast_ma_col, slow_ma_col, weekly_ma_col_name, 'RSI', 'MFI', 'Close', 'Lower_Band', 'Upper_Band',
-        'ATR', 'ADX', 'SAR', 'ROC', 'Tenkan_sen', 'Kijun_sen', 'Senkou_span_A',
-        'Senkou_span_B', 'Volume', 'Volume_MA20', 'Open', 'High', 'Low' # Added OHLC for completeness
+        'ATR', 'ADX', 'Tenkan_sen', 'Kijun_sen', 'Senkou_span_A',
+        'Senkou_span_B', 'Volume', 'Volume_MA20', 'Open', 'High', 'Low'
     ]
     missing_cols = [col for col in required_indicator_cols if col not in df.columns]
     if missing_cols:
@@ -506,23 +562,22 @@ def signals(df, adx_threshold_val, min_buy_score_val, min_sell_score_val, requir
     lower_band_np = df['Lower_Band'].values
     upper_band_np = df['Upper_Band'].values
     tenkan_np = df['Tenkan_sen'].values
-    kijun_np = df['Kijun_sen'].values 
+    kijun_np = df['Kijun_sen'].values
     spanA_np = df['Senkou_span_A'].values
     spanB_np = df['Senkou_span_B'].values
     volume_np = df['Volume'].values
     volume_ma20_np = df['Volume_MA20'].values
     
-
-    atr_ratio_np = np.full_like(close_np, 0.02)
+    atr_ratio_np = np.full_like(close_np, 0.02, dtype=float) # Ensure float
     valid_close_mask = close_np != 0
-    atr_ratio_np[valid_close_mask] = atr_np[valid_close_mask] / close_np[valid_close_mask]
+    # Ensure division by zero is handled if close_np can be zero
+    safe_close_np = np.where(valid_close_mask, close_np, 1e-9) # Avoid division by zero
+    atr_ratio_np[valid_close_mask] = atr_np[valid_close_mask] / safe_close_np[valid_close_mask]
     atr_ratio_np = np.nan_to_num(atr_ratio_np, nan=0.02, posinf=0.02, neginf=0.02)
 
     actual_min_buy_np, actual_min_sell_np = _dynamic_thresholds(
         atr_ratio_np, min_buy_score_val, min_sell_score_val
     )
-    adx_strength_np = np.clip((adx_np - 20.0) / 30.0, 0.0, 1.0)
-    trend_multiplier_np = 1.0 + adx_strength_np
 
     # Calculate Ichimoku components for conditions
     span_max_np = np.maximum(spanA_np, spanB_np)
@@ -534,25 +589,20 @@ def signals(df, adx_threshold_val, min_buy_score_val, min_sell_score_val, requir
     # 2. Calculate Primary and Secondary Conditions
     conditions = {}
     # Primary Trend Filters
-    conditions['primary_trend_long'] = (close_np > fast_ma_np) & (close_np > slow_ma_np) & (close_np > weekly_ma_np)
-    conditions['primary_trend_short'] = (close_np < fast_ma_np) & (close_np < slow_ma_np) & (close_np < weekly_ma_np)
-    conditions['trend_strength_ok'] = adx_np > adx_threshold_val # Using param, example had 25
+    conditions['primary_trend_long'] = (close_np > fast_ma_np) & (close_np > slow_ma_np) 
+    conditions['primary_trend_short'] = (close_np < fast_ma_np) & (close_np < slow_ma_np) 
+    conditions['trend_strength_ok'] = adx_np > adx_threshold_val
 
     # Secondary Confirmation Indicators / Scoring Components
     # Ichimoku
     conditions['strong_cloud_support'] = (close_np > span_max_np) & (cloud_thickness_np > min_cloud_thickness_val_np)
     conditions['below_cloud'] = close_np < span_min_np
-    # Kumo Breakout/Breakdown
     conditions['kumo_breakout'] = ((tenkan_np > kijun_np) & (close_np > span_max_np) & (cloud_thickness_np > min_cloud_thickness_val_np))
     conditions['kumo_breakdown'] = ((tenkan_np < kijun_np) & (close_np < span_min_np) & (cloud_thickness_np > min_cloud_thickness_val_np))
     
-    # Momentum
-    conditions['rsi_confirmation_long'] = (rsi_np > 50) & (rsi_np < 70) 
-    conditions['rsi_confirmation_short'] = rsi_np < 50 
-    conditions['mfi_confirmation_long'] = mfi_np > 50
-    conditions['mfi_confirmation_short'] = mfi_np < 50 
+    # Momentum (used in _calculate_dynamic_scores, not directly as conditions here)
     # Volume
-    conditions['volume_ok'] = volume_np > (volume_ma20_np * 1.25)
+    conditions['volume_ok'] = volume_np > volume_ma20_np
     # MA Alignment for scoring
     conditions['ma_buy'] = fast_ma_np > slow_ma_np
     conditions['ma_sell'] = fast_ma_np < slow_ma_np
@@ -560,59 +610,44 @@ def signals(df, adx_threshold_val, min_buy_score_val, min_sell_score_val, requir
     conditions['bb_buy'] = close_np < lower_band_np
     conditions['bb_sell'] = close_np > upper_band_np
     
-    # Fill NaNs in boolean conditions (should ideally be handled in prepare_data)
-    for key in conditions:
-        if pd.api.types.is_bool_dtype(conditions[key]): # Check if already boolean
-            conditions[key] = np.nan_to_num(conditions[key].astype(float), nan=0.0).astype(bool)
-        elif pd.isna(conditions[key]).any():
+    # Ensure all conditions are boolean arrays of the same shape
+    # Get a reference shape from a reliable condition
+    ref_shape = close_np.shape
+    for key in list(conditions.keys()): # Iterate over a copy of keys if modifying dict
+        cond_val = conditions[key]
+        if not isinstance(cond_val, np.ndarray) or cond_val.shape != ref_shape:
+            # For simplicity, if a condition is scalar False/True, broadcast it
+            if isinstance(cond_val, bool):
+                conditions[key] = np.full(ref_shape, cond_val, dtype=bool)
+            else: # If it's an array of wrong shape or other type, default to all False
+                conditions[key] = np.zeros(ref_shape, dtype=bool)
+        # Fill NaNs in boolean conditions
+        if pd.api.types.is_bool_dtype(conditions[key]):
+             conditions[key] = np.nan_to_num(conditions[key].astype(float), nan=0.0).astype(bool)
+        elif hasattr(conditions[key], 'dtype') and pd.isna(conditions[key]).any(): # Check if it's an array and has nans
              conditions[key] = np.nan_to_num(conditions[key].astype(float), nan=0.0).astype(bool)
 
 
-    # 3. Calculate Weighted Scores
-    buy_trend_score_np = _calculate_trend_score(conditions, TREND_WEIGHTS, direction='long')
-    buy_confirmation_score_np = _calculate_confirmation_score(conditions, CONFIRMATION_WEIGHTS, rsi_np, mfi_np, direction='long')
-    buy_score_np = (buy_trend_score_np * trend_multiplier_np) + buy_confirmation_score_np
-
-    sell_trend_score_np = _calculate_trend_score(conditions, TREND_WEIGHTS, direction='short')
-    sell_confirmation_score_np = _calculate_confirmation_score(conditions, CONFIRMATION_WEIGHTS, rsi_np, mfi_np, direction='short')
-    sell_score_np = (sell_trend_score_np * trend_multiplier_np) + sell_confirmation_score_np
+    # 3. Calculate Dynamic Scores
+    # Ensure TREND_WEIGHTS and CONFIRMATION_WEIGHTS are accessible (e.g., global or passed)
+    buy_score_np = _calculate_dynamic_scores(conditions, rsi_np, mfi_np, current_trend_weights, current_confirmation_weights, direction='long')
+    sell_score_np = _calculate_dynamic_scores(conditions, rsi_np, mfi_np, current_trend_weights, current_confirmation_weights, direction='short')
     
     signals_df['buy_score'] = buy_score_np
     signals_df['sell_score'] = sell_score_np
 
-    # 4. Entry Triggers (Primary Filters + Min Confirmations)
-    # Long entry confirmations
-    long_conf_count = (conditions['strong_cloud_support'].astype(int) + 
-                       conditions['kumo_breakout'].astype(int) +
-                       conditions['rsi_confirmation_long'].astype(int) +
-                       conditions['mfi_confirmation_long'].astype(int) +
-                       conditions['volume_ok'].astype(int) 
-                      )
-    entry_trigger_long = (conditions['primary_trend_long'] &
-                          conditions['trend_strength_ok'] &
-                          (long_conf_count >= 2) 
-                         )
+    # 4. Generate Final Signals
+    final_signals_dict = _generate_final_signals(
+        conditions,
+        {'buy': buy_score_np, 'sell': sell_score_np},
+        {'buy': actual_min_buy_np, 'sell': actual_min_sell_np},
+        rsi_np # Pass rsi_np for overbought/oversold checks
+    )
 
-    # Short entry confirmations
-    short_conf_count = (conditions['below_cloud'].astype(int) + 
-                        conditions['kumo_breakdown'].astype(int) +
-                        conditions['rsi_confirmation_short'].astype(int) +
-                        conditions['mfi_confirmation_short'].astype(int) +
-                        conditions['volume_ok'].astype(int) 
-                       )
-    entry_trigger_short = (conditions['primary_trend_short'] &
-                           conditions['trend_strength_ok'] &
-                           (short_conf_count >= 2) 
-                          )
+    signals_df['buy_signal'] = final_signals_dict['buy']
+    signals_df['sell_signal'] = final_signals_dict['sell']
 
-    # 5. Generate Final Signals (Entry Trigger + Score Threshold)
-    buy_signal_np = entry_trigger_long & (buy_score_np >= actual_min_buy_np)
-    sell_signal_np = entry_trigger_short & (sell_score_np >= actual_min_sell_np)
-    
-    signals_df['buy_signal'] = buy_signal_np
-    signals_df['sell_signal'] = sell_signal_np
-
-    # 6. Signal Validation
+    # 5. Signal Validation (Conflicting signals and changed status)
     conflicting_mask = np.logical_and(signals_df['buy_signal'].values, signals_df['sell_signal'].values)
     signals_df.loc[conflicting_mask, 'buy_signal'] = False
     signals_df.loc[conflicting_mask, 'sell_signal'] = False
@@ -620,10 +655,6 @@ def signals(df, adx_threshold_val, min_buy_score_val, min_sell_score_val, requir
     last_signal_np = signals_df['buy_signal'].astype(int).values - signals_df['sell_signal'].astype(int).values
     signal_changed_np = np.diff(last_signal_np, prepend=0) != 0
     signals_df['signal_changed'] = signal_changed_np
-
-    
-    signals_df['buy_signal'] = (signals_df['buy_signal'] ) # & signals_df['buy_signal'].shift(1))
-    signals_df['sell_signal'] = (signals_df['sell_signal'] ) # & signals_df['sell_signal'].shift(1))
 
     return signals_df
 
@@ -635,26 +666,32 @@ class TradeManager:
         self.portfolio_value = initial_capital
         self.max_positions = max_positions
         self.position_count = 0
-        self.trade_log = []
-        self.wins = []
-        self.losses = []
-        self.lengths = []
-        self.common_trade_columns_dtypes = {
-            'entry_date': 'datetime64[ns]', 'multiplier': 'int64',
-            'entry_price': 'float64', 'stop_loss': 'float64',
-            'take_profit': 'float64', 'position_size': 'float64',
-            'share_amount': 'int64', 'highest_close_since_entry': 'float64',
-            'lowest_close_since_entry': 'float64'
+        self.trade_log = deque()  # Use deque instead of list
+        self.wins = deque()       # Use deque instead of list
+        self.losses = deque()     # Use deque instead of list
+        self.lengths = deque()    # Use deque instead of list
+        
+        # Define column dtypes for better memory usage
+        self.dtypes = {
+            'entry_date': 'datetime64[ns]',
+            'multiplier': 'int8',
+            'entry_price': 'float32',
+            'stop_loss': 'float32',
+            'take_profit': 'float32',
+            'position_size': 'float32',
+            'share_amount': 'int32',
+            'highest_close_since_entry': 'float32',
+            'lowest_close_since_entry': 'float32'
         }
-        self.active_trades = pd.DataFrame(columns=self.common_trade_columns_dtypes.keys())
-        self.active_trades = self.active_trades.astype(self.common_trade_columns_dtypes)
+        
+        # Initialize active trades DataFrame with proper dtypes
+        self.active_trades = pd.DataFrame(columns=self.dtypes.keys()).astype(self.dtypes)
 
     # ----------------------------------------------------------------------------------------------------------
 
     def _calculate_entry_parameters(self, entry_params_dict):
         """
-        Calculates entry parameters for a new trade.
-        Logic derived from the original trade_entry function, incorporating optimization ideas.
+        Calculates entry parameters for a new trade with dynamic risk/reward based on volatility.
         """
         price = entry_params_dict['price']
         atr = entry_params_dict['atr']
@@ -662,13 +699,22 @@ class TradeManager:
         risk_pct = entry_params_dict['risk']
         position_size_pct = entry_params_dict['position_size']
         leverage = entry_params_dict['leverage']
-        adx = entry_params_dict.get('adx')
+        adx = entry_params_dict.get('adx', 25)  # Default ADX if not provided
 
-        position_size_multiplier = 1.5 if (adx is not None and adx > 30) else 1.0
+        # Dynamic multipliers based on volatility regime
+        atr_ratio = atr / price
+        if atr_ratio > 0.015:  # High volatility
+            atr_multiplier = 3.0 if self.direction == 'Long' else 2.5
+            reward_multiplier = 2.5  # Smaller targets in high vol
+        else:  # Low volatility
+            atr_multiplier = 2.0 if self.direction == 'Long' else 1.5  
+            reward_multiplier = 3.0  # Larger targets in low vol
+        
+        # Scale position size based on ADX strength
+        adx_strength = min(max((adx - 20) / 30, 0), 1)  # Normalized 0-1
+        position_size_multiplier = 1.0 + adx_strength  # 1-2x
         scaled_position_size = position_size_pct * position_size_multiplier
-        
-        atr_multiplier = 2.0 if (adx is not None and adx > 30) else 4.0
-        
+
         if self.direction == 'Long':
             stop_loss_price = price - atr * atr_multiplier
             risk_per_share = price - stop_loss_price
@@ -692,9 +738,8 @@ class TradeManager:
             return None
 
         take_profit = None
-        if entry_params_dict.get('reward') is not None:
-            reward_multiplier = 3.0 if (adx is not None and adx > 30) else 2.0
-            take_profit_distance = valid_risk_per_share * reward_multiplier # Use valid_risk_per_share
+        if 'reward' in entry_params_dict:
+            take_profit_distance = valid_risk_per_share * reward_multiplier
             if self.direction == 'Long':
                 take_profit = price + take_profit_distance
             else:
@@ -707,27 +752,78 @@ class TradeManager:
 
     # ----------------------------------------------------------------------------------------------------------
 
-    def process_entry(self, current_date, entry_params_dict):
-        if self.position_count >= self.max_positions or entry_params_dict['portfolio_value'] <= 0:
+    @staticmethod
+    @jit(nopython=True)
+    def _calculate_position_size(price, atr, portfolio_value, risk_pct, position_size_pct, 
+                               leverage, adx, direction):
+        """Numba-optimized position size calculation"""
+        position_size_multiplier = 1.5 if adx > 30 else 1.0
+        scaled_position_size = position_size_pct * position_size_multiplier
+        atr_multiplier = 2.0 if adx > 30 else 4.0
+        
+        stop_loss_price = price - atr * atr_multiplier if direction == 1 else price + atr * atr_multiplier
+        risk_per_share = abs(price - stop_loss_price)
+        
+        max_risk = portfolio_value * risk_pct
+        shares_risk = np.floor(max_risk / max(risk_per_share, 1e-9))
+        
+        max_exposure = portfolio_value * scaled_position_size * leverage
+        shares_leverage = np.floor(max_exposure / price)
+        
+        return min(shares_risk, shares_leverage), stop_loss_price
+    
+    # ----------------------------------------------------------------------------------------------------------
+
+    def process_entry(self, current_date, entry_params):
+        """Process new trade entry with enhanced stop calculation"""
+        if self.position_count >= self.max_positions or entry_params['portfolio_value'] <= 0:
             return False
-        trade_data = self._calculate_entry_parameters(entry_params_dict)
-        if not trade_data: return False
-        entry_price, stop_loss, take_profit, trade_pos_size_ratio, share_amount = trade_data
+            
+        direction_mult = 1 if self.direction == 'Long' else -1
         
-        new_trade_dict = {
+        # Calculate initial stop using the enhanced method
+        initial_stop = self.calculate_initial_stop(
+            price=entry_params['price'],
+            atr=entry_params['atr'],
+            adx=entry_params['adx'],
+            current_sar=entry_params.get('sar', entry_params['price'] * 0.97)  # Use SAR if provided, else fallback
+        )
+        
+        # Use the calculated stop for position sizing
+        risk_per_share = abs(entry_params['price'] - initial_stop)
+        max_risk = entry_params['portfolio_value'] * entry_params['risk']
+        shares_risk = np.floor(max_risk / max(risk_per_share, 1e-9))
+        
+        # Calculate position size based on risk and leverage
+        max_exposure = entry_params['portfolio_value'] * entry_params['position_size'] * entry_params['leverage']
+        shares_leverage = np.floor(max_exposure / entry_params['price'])
+        
+        share_amount = int(min(shares_risk, shares_leverage))
+        
+        if share_amount <= 0:
+            return False
+            
+        # Calculate take profit using risk-reward ratio
+        take_profit = None
+        if 'reward' in entry_params:
+            reward_mult = 3.0 if entry_params['adx'] > 30 else 2.0
+            take_profit_distance = risk_per_share * reward_mult
+            take_profit = entry_params['price'] + (take_profit_distance * direction_mult)
+        
+        # Create new trade with proper dtypes
+        new_trade = pd.DataFrame([{
             'entry_date': current_date,
-            'multiplier': 1 if self.direction == 'Long' else -1,
-            'entry_price': entry_price,
-            'stop_loss': stop_loss,
+            'multiplier': direction_mult,
+            'entry_price': entry_params['price'],
+            'stop_loss': initial_stop,  # Use the calculated initial stop
             'take_profit': take_profit,
-            'position_size': trade_pos_size_ratio,
+            'position_size': (share_amount * entry_params['price']) / entry_params['portfolio_value'],
             'share_amount': share_amount,
-            'highest_close_since_entry': entry_price if self.direction == 'Long' else np.nan,
-            'lowest_close_since_entry': entry_price if self.direction == 'Short' else np.nan
-        }
-        new_trade_df = pd.DataFrame([new_trade_dict]).astype(self.common_trade_columns_dtypes)
+            'highest_close_since_entry': entry_params['price'] if self.direction == 'Long' else np.nan,
+            'lowest_close_since_entry': entry_params['price'] if self.direction == 'Short' else np.nan
+        }]).astype(self.dtypes)
         
-        self.active_trades = pd.concat([self.active_trades, new_trade_df], ignore_index=True)
+        self.active_trades = pd.concat([self.active_trades, new_trade], ignore_index=True)
         self.position_count += 1
         return True
     
@@ -872,27 +968,79 @@ class TradeManager:
     # ----------------------------------------------------------------------------------------------------------
 
     def update_trailing_stops(self, current_price, current_atr, adx_value):
+        """
+        Enhanced trailing stop management with dynamic ATR multiplier based on market conditions.
+        """
         if self.active_trades.empty: 
             return
         
-        atr_multiplier_val = 2.0 if adx_value < 25 else 4.0
+        # Dynamic ATR multiplier based on ADX and volatility
+        atr_ratio = current_atr / current_price
+        if adx_value > 30 and atr_ratio < 0.01:  # Strong trend, low vol
+            atr_multiplier = 4.0  # Give more room
+        elif adx_value > 25:  # Moderate trend
+            atr_multiplier = 3.0
+        else:  # Weak trend or high vol
+            atr_multiplier = 2.0
         
         if self.direction == 'Long':
+            # Update highest prices seen
             self.active_trades.loc[:, 'highest_close_since_entry'] = np.maximum(
-                self.active_trades['highest_close_since_entry'].values, current_price
+                self.active_trades['highest_close_since_entry'].values, 
+                current_price
             )
-            new_stops = self.active_trades['highest_close_since_entry'].values - atr_multiplier_val * current_atr
+            # Calculate new stops with dynamic multiplier
+            new_stops = self.active_trades['highest_close_since_entry'].values - (atr_multiplier * current_atr)
+            # Never move stops down for longs
             self.active_trades.loc[:, 'stop_loss'] = np.maximum(
-                new_stops, self.active_trades['stop_loss'].values
+                new_stops, 
+                self.active_trades['stop_loss'].values
             )
-        else: # Short
+        else:  # Short
+            # Update lowest prices seen
             self.active_trades.loc[:, 'lowest_close_since_entry'] = np.minimum(
-                self.active_trades['lowest_close_since_entry'].values, current_price
+                self.active_trades['lowest_close_since_entry'].values, 
+                current_price
             )
-            new_stops = self.active_trades['lowest_close_since_entry'].values + atr_multiplier_val * current_atr
+            # Calculate new stops with dynamic multiplier
+            new_stops = self.active_trades['lowest_close_since_entry'].values + (atr_multiplier * current_atr)
+            # Never move stops up for shorts
             self.active_trades.loc[:, 'stop_loss'] = np.minimum(
-                new_stops, self.active_trades['stop_loss'].values
+                new_stops, 
+                self.active_trades['stop_loss'].values
             )
+
+    # ----------------------------------------------------------------------------------------------------------
+
+    def calculate_initial_stop(self, price, atr, adx, current_sar):
+        """
+        Calculate initial stop loss using multiple technical factors.
+        
+        Args:
+            price (float): Current price
+            atr (float): Average True Range
+            adx (float): ADX value
+            current_sar (float): Current Parabolic SAR value
+        """
+        # Use parabolic SAR as stop baseline
+        sar_distance = abs(price - current_sar)
+        
+        # ATR-based stop distance varies with trend strength
+        atr_multiplier = 3.0 if adx > 25 else 2.0
+        atr_distance = atr * atr_multiplier
+        
+        # Use the smaller of SAR and ATR distances to set stop
+        # This helps prevent stops that are too wide
+        stop_distance = min(sar_distance, atr_distance)
+        
+        # Add minimum stop distance based on price
+        min_stop_distance = price * 0.005  # 0.5% minimum
+        stop_distance = max(stop_distance, min_stop_distance)
+        
+        if self.direction == 'Long':
+            return price - stop_distance
+        else:
+            return price + stop_distance
 
     # ----------------------------------------------------------------------------------------------------------
 
@@ -920,90 +1068,73 @@ def create_empty_stats(risk_free_rate=0.04):
 
 # --------------------------------------------------------------------------------------------------------------------------
 
+@jit(nopython=True)
+def _calculate_risk_metrics(returns_array, risk_free_daily):
+    """Numba-optimized calculation of risk metrics"""
+    excess_returns = returns_array - risk_free_daily
+    returns_mean = np.mean(excess_returns)
+    returns_std = np.std(excess_returns)
+    
+    # Sharpe Ratio
+    sharpe = (returns_mean / returns_std) * np.sqrt(252) if returns_std != 0 else 0
+    
+    # Sortino Ratio
+    downside_returns = returns_array[returns_array < 0]
+    downside_std = np.std(downside_returns) if len(downside_returns) > 0 else 0
+    sortino = ((np.mean(returns_array) - risk_free_daily) / downside_std) * np.sqrt(252) if downside_std != 0 else 0
+    
+    return sharpe, sortino
+
+# --------------------------------------------------------------------------------------------------------------------------
+
 def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
-    """
-    Compile comprehensive statistics about trading performance using optimized NumPy operations
-    
-    Parameters:
-    equity (pd.Series): Portfolio equity curve
-    trade_log (list): List of trade dictionaries containing trade details
-    wins (list): List of winning trade amounts
-    losses (list): List of losing trade amounts
-    risk_free_rate (float): Annual risk-free rate (default 0.04 or 4%)
-    
-    Returns:
-    dict: Dictionary of trading statistics
-    """
-    # Handle empty trade log efficiently
+    """Vectorized trade statistics calculation using NumPy and Numba"""
     if not trade_log:
-        return {
-            'Total Trades': 0,
-            'Win Rate': 0,
-            'Net Profit (%)': 0,
-            'Profit Factor': 0,
-            'Expectancy (%)': 0,
-            'Max Drawdown (%)': 0,
-            'Annualized Return (%)': 0,
-            'Sharpe Ratio': 0,
-            'Sortino Ratio': 0
-        }
+        return create_empty_stats()
     
-    # Convert lists to NumPy arrays for faster operations
+    # Convert lists to NumPy arrays
     wins_array = np.array(wins) if wins else np.array([0.0])
     losses_array = np.array(losses) if losses else np.array([0.0])
     
-    # Basic trade statistics with NumPy
+    # Basic trade statistics (vectorized)
     total_trades = len(trade_log)
-    win_count = len(wins)
-    loss_count = len(losses)
-    win_rate = (win_count / total_trades) * 100 if total_trades > 0 else 0
+    win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
     
-    # Profit metrics with NumPy sum (much faster than Python's sum())
-    gross_profit = np.sum(wins_array) if win_count > 0 else 0
-    gross_loss = np.sum(losses_array) if loss_count > 0 else 0
+    # Profit metrics (vectorized)
+    gross_profit = np.sum(wins_array)
+    gross_loss = np.sum(losses_array)
     net_profit = gross_profit + gross_loss
     
-    # Extract initial and final capital once (avoid repeated access)
+    # Portfolio metrics (vectorized)
     initial_capital = equity.iloc[0]
     final_capital = equity.iloc[-1]
     net_profit_pct = ((final_capital / initial_capital) - 1) * 100
     
-    # Risk metrics with safe division
+    # Risk metrics (vectorized)
     profit_factor = abs(gross_profit / gross_loss) if gross_loss != 0 else np.inf
     
-    # Calculate average win and loss with NumPy mean
-    avg_win = np.mean(wins_array) if win_count > 0 else 0
-    avg_loss = np.mean(losses_array) if loss_count > 0 else 0
-    
-    # Calculate expectancy with vectorized operations
+    # Expectancy calculation (vectorized)
+    avg_win = np.mean(wins_array) if len(wins) > 0 else 0
+    avg_loss = np.mean(losses_array) if len(losses) > 0 else 0
     win_prob = win_rate / 100
     expectancy = (win_prob * avg_win) + ((1 - win_prob) * avg_loss)
     expectancy_pct = (expectancy / initial_capital) * 100 if initial_capital > 0 else 0
     
-    # Calculate drawdown using NumPy's cumulative maximum
+    # Drawdown calculation (vectorized)
     equity_values = equity.values
     running_max = np.maximum.accumulate(equity_values)
-    drawdown_values = ((equity_values - running_max) / running_max) * 100
-    max_drawdown = abs(np.min(drawdown_values)) if len(drawdown_values) > 0 else 0
+    drawdowns = ((equity_values - running_max) / running_max) * 100
+    max_drawdown = abs(np.min(drawdowns))
     
-    # Calculate time-based metrics
+    # Time-based metrics
     days = (equity.index[-1] - equity.index[0]).days
     years = days / 365.25
     annualized_return = ((final_capital / initial_capital) ** (1/years) - 1) * 100 if years > 0 else 0
     
-    # Calculate daily returns for risk ratios
-    daily_returns = equity.pct_change().fillna(0).values
-    
-    # Calculate Sharpe ratio with NumPy operations
-    excess_returns = daily_returns - (risk_free_rate / 252)  # Daily risk-free rate
-    returns_mean = np.mean(excess_returns)
-    returns_std = np.std(excess_returns)
-    sharpe_ratio = (returns_mean / returns_std) * np.sqrt(252) if returns_std != 0 else 0
-    
-    # Calculate Sortino ratio with NumPy vectorized operations
-    downside_returns = daily_returns[daily_returns < 0]
-    downside_std = np.std(downside_returns) if len(downside_returns) > 0 else 0
-    sortino_ratio = ((np.mean(daily_returns) - (risk_free_rate / 252)) / downside_std) * np.sqrt(252) if downside_std != 0 else 0
+    # Calculate risk ratios using Numba-optimized function
+    daily_returns = np.diff(np.log(equity_values))
+    daily_rf_rate = risk_free_rate / 252
+    sharpe_ratio, sortino_ratio = _calculate_risk_metrics(daily_returns, daily_rf_rate)
     
     return {
         'Total Trades': total_trades,
@@ -1019,117 +1150,330 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
 
 # --------------------------------------------------------------------------------------------------------------------------
 
+@jit(nopython=True, parallel=True)
+def _evaluate_parameters_batch(param_arrays, price_data, indicator_data):
+    """
+    Vectorized and JIT-compiled evaluation of multiple parameter sets simultaneously.
+    
+    Args:
+        param_arrays: numpy array of shape (n_params, n_features) containing parameter combinations
+        price_data: numpy array of price data
+        indicator_data: dict of numpy arrays for technical indicators
+    
+    Returns:
+        numpy array of shape (n_params,) containing evaluation metrics
+    """
+    n_params = param_arrays.shape[0]
+    results = np.zeros(n_params, dtype=np.float32)
+    
+    for i in range(n_params):
+        # Extract parameters
+        long_risk = param_arrays[i, 0]
+        long_reward = param_arrays[i, 1]
+        short_risk = param_arrays[i, 2]
+        short_reward = param_arrays[i, 3]
+        position_size = param_arrays[i, 4]
+        
+        # Quick validation
+        if long_risk >= long_reward or short_risk >= short_reward:
+            results[i] = -np.inf
+            continue
+            
+        # Calculate signals and returns
+        signals = np.zeros(len(price_data))
+        for j in range(1, len(price_data)):
+            # Simplified signal generation for performance
+            if indicator_data['fast_ma'][j] > indicator_data['slow_ma'][j]:
+                signals[j] = 1
+            elif indicator_data['fast_ma'][j] < indicator_data['slow_ma'][j]:
+                signals[j] = -1
+                
+        # Calculate returns
+        position_values = signals * position_size
+        returns = np.diff(price_data) / price_data[:-1]
+        strategy_returns = position_values[:-1] * returns
+        
+        # Calculate metrics
+        if len(strategy_returns) > 0:
+            sharpe = np.sqrt(252) * np.mean(strategy_returns) / np.std(strategy_returns) if np.std(strategy_returns) > 0 else -np.inf
+            results[i] = sharpe
+        else:
+            results[i] = -np.inf
+            
+    return results
+
+# --------------------------------------------------------------------------------------------------------------------------
+
+def _random_parameter_sampling(param_lists, sample_size, num_params_before_weights, optimization_type, ticker, base_df):
+    """
+    Smart random sampling of parameter combinations.
+    Args:
+        param_lists: List of parameter value lists
+        sample_size: Number of combinations to generate
+        num_params_before_weights: Number of parameters in combo before scoring weights (specific to 'technical')
+        optimization_type: String, 'basic' or 'technical'
+        ticker: The ticker symbol string
+        base_df: The base DataFrame for the ticker
+    Returns:
+        List of parameter combinations
+    """
+    param_grid = deque()
+    seen_combinations = set()
+    total_attempts = 0
+    max_attempts = sample_size * 5  # Increased attempts for potentially sparse valid space
+
+    while len(param_grid) < sample_size and total_attempts < max_attempts:
+        indices = [np.random.randint(len(p_list)) for p_list in param_lists]
+        param_key = tuple(indices)
+
+        if param_key in seen_combinations:
+            total_attempts += 1
+            continue
+        seen_combinations.add(param_key)
+
+        combo = [param_lists[j][idx] for j, idx in enumerate(indices)]
+        total_attempts += 1
+
+        # Initialize tech_params with all global defaults
+        tech_params = {
+            'FAST': FAST, 'SLOW': SLOW,
+            'RSI_OVERSOLD': RSI_OVERSOLD, 'RSI_OVERBOUGHT': RSI_OVERBOUGHT,
+            'DEVS': DEVS, 'ADX_THRESHOLD': ADX_THRESHOLD_DEFAULT,
+            'MIN_BUY_SCORE': MIN_BUY_SCORE_DEFAULT, 'MIN_SELL_SCORE': MIN_SELL_SCORE_DEFAULT,
+            'REQUIRE_CLOUD': REQUIRE_CLOUD_DEFAULT,
+            'WEEKLY_MA_PERIOD': WEEKLY_MA_PERIOD,
+            'TREND_WEIGHTS': TREND_WEIGHTS.copy(),
+            'CONFIRMATION_WEIGHTS': CONFIRMATION_WEIGHTS.copy(),
+            # USE_TRAILING_STOPS and MAX_OPEN_POSITIONS will be set from combo
+        }
+
+        if optimization_type == 'basic':
+            long_risk_val = combo[0]
+            long_reward_val = combo[1]
+            short_risk_val = combo[2]
+            short_reward_val = combo[3]
+            pos_size_val = combo[4]
+            tech_params['USE_TRAILING_STOPS'] = combo[5]
+            tech_params['MAX_OPEN_POSITIONS'] = combo[6]
+            # Technical indicators and scoring weights remain default
+
+        elif optimization_type == 'technical':
+            long_risk_val = DEFAULT_LONG_RISK
+            long_reward_val = DEFAULT_LONG_REWARD
+            short_risk_val = DEFAULT_SHORT_RISK
+            short_reward_val = DEFAULT_SHORT_REWARD
+            pos_size_val = DEFAULT_POSITION_SIZE
+
+            tech_params['USE_TRAILING_STOPS'] = combo[0]
+            tech_params['MAX_OPEN_POSITIONS'] = combo[1]
+            
+            # Scoring weights start after USE_TRAILING_STOPS and MAX_OPEN_POSITIONS
+            # num_params_before_weights is 2 for 'technical'
+            weight_values = combo[num_params_before_weights:]
+            
+            trend_weight_keys = list(TREND_WEIGHTS.keys())
+            conf_weight_keys = list(CONFIRMATION_WEIGHTS.keys())
+            
+            current_trend_weights_dict = tech_params['TREND_WEIGHTS']
+            idx_offset = 0
+            for i, key in enumerate(trend_weight_keys):
+                if (idx_offset + i) < len(weight_values):
+                    current_trend_weights_dict[key] = weight_values[idx_offset + i]
+            
+            idx_offset += len(trend_weight_keys)
+            current_confirmation_weights_dict = tech_params['CONFIRMATION_WEIGHTS']
+            for i, key in enumerate(conf_weight_keys):
+                if (idx_offset + i) < len(weight_values):
+                    current_confirmation_weights_dict[key] = weight_values[idx_offset + i]
+        else:
+            # Should not happen if optimize_parameters is structured correctly
+            continue
+
+        # Validation for risk/reward
+        if long_reward_val > 0 and long_risk_val >= long_reward_val: continue
+        if short_reward_val > 0 and short_risk_val >= short_reward_val: continue
+        
+        param_grid.append((
+            ticker, base_df.copy(),
+            long_risk_val, long_reward_val,
+            short_risk_val, short_reward_val,
+            pos_size_val, tech_params
+        ))
+        
+    return list(param_grid)
+
+def _generate_parameter_grid(param_lists, num_params_before_weights, optimization_type, ticker, base_df):
+    """
+    Generates a grid of all possible parameter combinations.
+    Args:
+        param_lists: List of parameter value lists.
+        num_params_before_weights: Number of parameters in combo before scoring weights (specific to 'technical')
+        optimization_type: String, 'basic' or 'technical'
+        ticker: The ticker symbol string.
+        base_df: The base DataFrame for the ticker.
+    Returns:
+        List of parameter combination tuples.
+    """
+    generated_params = deque()
+    
+    current_total_combos = 1
+    for p_list_item in param_lists: # Renamed p_list to p_list_item to avoid conflict
+        current_total_combos *= len(p_list_item) if p_list_item else 1
+
+    all_combinations = itertools.product(*param_lists)
+
+    print(f"Generating and filtering all {current_total_combos} parameter combinations for {optimization_type}...")
+    for combo in tqdm(all_combinations, total=current_total_combos, desc=f"Generating {optimization_type} Combinations", unit="combo"):
+        tech_params = {
+            'FAST': FAST, 'SLOW': SLOW,
+            'RSI_OVERSOLD': RSI_OVERSOLD, 'RSI_OVERBOUGHT': RSI_OVERBOUGHT,
+            'DEVS': DEVS, 'ADX_THRESHOLD': ADX_THRESHOLD_DEFAULT,
+            'MIN_BUY_SCORE': MIN_BUY_SCORE_DEFAULT, 'MIN_SELL_SCORE': MIN_SELL_SCORE_DEFAULT,
+            'REQUIRE_CLOUD': REQUIRE_CLOUD_DEFAULT,
+            'WEEKLY_MA_PERIOD': WEEKLY_MA_PERIOD,
+            'TREND_WEIGHTS': TREND_WEIGHTS.copy(),
+            'CONFIRMATION_WEIGHTS': CONFIRMATION_WEIGHTS.copy(),
+        }
+
+        if optimization_type == 'basic':
+            long_risk_val = combo[0]
+            long_reward_val = combo[1]
+            short_risk_val = combo[2]
+            short_reward_val = combo[3]
+            pos_size_val = combo[4]
+            tech_params['USE_TRAILING_STOPS'] = combo[5]
+            tech_params['MAX_OPEN_POSITIONS'] = combo[6]
+
+        elif optimization_type == 'technical':
+            long_risk_val = DEFAULT_LONG_RISK
+            long_reward_val = DEFAULT_LONG_REWARD
+            short_risk_val = DEFAULT_SHORT_RISK
+            short_reward_val = DEFAULT_SHORT_REWARD
+            pos_size_val = DEFAULT_POSITION_SIZE
+
+            tech_params['USE_TRAILING_STOPS'] = combo[0]
+            tech_params['MAX_OPEN_POSITIONS'] = combo[1]
+            
+            weight_values = combo[num_params_before_weights:] # num_params_before_weights is 2
+            
+            trend_weight_keys = list(TREND_WEIGHTS.keys())
+            conf_weight_keys = list(CONFIRMATION_WEIGHTS.keys())
+            
+            current_trend_weights_dict = tech_params['TREND_WEIGHTS']
+            idx_offset = 0
+            for i, key in enumerate(trend_weight_keys):
+                if (idx_offset + i) < len(weight_values):
+                    current_trend_weights_dict[key] = weight_values[idx_offset + i]
+            
+            idx_offset += len(trend_weight_keys)
+            current_confirmation_weights_dict = tech_params['CONFIRMATION_WEIGHTS']
+            for i, key in enumerate(conf_weight_keys):
+                if (idx_offset + i) < len(weight_values):
+                    current_confirmation_weights_dict[key] = weight_values[idx_offset + i]
+        else:
+            continue
+
+        if long_reward_val > 0 and long_risk_val >= long_reward_val: continue
+        if short_reward_val > 0 and short_risk_val >= short_reward_val: continue
+        
+        generated_params.append((
+            ticker, base_df.copy(),
+            long_risk_val, long_reward_val,
+            short_risk_val, short_reward_val,
+            pos_size_val, tech_params
+        ))
+        
+    return list(generated_params)
+
+
+# --------------------------------------------------------------------------------------------------------------------------
+
 def optimize_parameters(ticker=TICKER, 
                         visualize_best=VISUALIZE_BEST_DEFAULT, 
                         optimization_type=OPTIMIZATION_TYPE_DEFAULT):
     """
-    Optimize strategy parameters using parallel processing.
-    Data is fetched once. Indicators are calculated per technical parameter set.
+    Optimize strategy parameters using smart sampling and parallel processing.
     """
-    print(f"Starting parameter optimization for {ticker}...")
+    print(f"Starting parameter optimization for {ticker} of type: {optimization_type}...")
+    
+    # Ensure ticker is a string for yf.download
+    current_ticker_str = ticker[0] if isinstance(ticker, list) else ticker
 
-    # Download data once
-    base_df = yf.download(ticker, period="5y", progress=False, auto_adjust=True)
+    base_df = yf.download(current_ticker_str, period="5y", progress=False, auto_adjust=True)
     if base_df.empty:
-        print(f"Error: No data downloaded for {ticker}. Aborting optimization.")
+        print(f"Error: No data downloaded for {current_ticker_str}. Aborting optimization.")
         return None, []
     
-    # When setting up parameter lists for 'basic' optimization,
-    # you can now use these global defaults for the single-value lists:
+    use_trailing_stops_options_range = [True, False] 
+
     if optimization_type == 'basic':
-        long_risks = [0.01, 0.02, 0.03, 0.04, 0.05] # Or [DEFAULT_LONG_RISK]
-        long_rewards = [0.02, 0.03, 0.05, 0.07, 0.10] # Or [DEFAULT_LONG_REWARD]
-        short_risks = [0.01, 0.02, 0.03, 0.04, 0.05] # Or [DEFAULT_SHORT_RISK]
-        short_rewards = [0.02, 0.03, 0.05, 0.07, 0.10] # Or [DEFAULT_SHORT_REWARD]
-        position_sizes = [0.02, 0.05, 0.10, 0.15, 0.20]
+        long_risks = [0.01, 0.02, 0.03, 0.04, 0.05]
+        long_rewards = [0.02, 0.03, 0.05, 0.07, 0.10]
+        short_risks = [0.01, 0.02, 0.03, 0.04, 0.05]
+        short_rewards = [0.02, 0.03, 0.05, 0.07, 0.10]
+        position_sizes = [0.02, 0.05, 0.10, 0.15, 0.20] # Percentage of portfolio for one position
+        max_open_positions_options = [3, 5, 10, 15]
         
-        fast_periods = [FAST]
-        slow_periods = [SLOW]
-        rsi_lower_thresholds = [RSI_OVERSOLD]
-        rsi_upper_thresholds = [RSI_OVERBOUGHT]
-        bb_deviations = [DEVS]
-        
-        adx_thresholds = [ADX_THRESHOLD_DEFAULT] # Use global default
-        min_buy_scores = [MIN_BUY_SCORE_DEFAULT]   # Use global default
-        min_sell_scores = [MIN_SELL_SCORE_DEFAULT] # Use global default
-        require_cloud_contexts = [REQUIRE_CLOUD_DEFAULT] # Use global default
-        
+        param_lists = [
+            long_risks, long_rewards, short_risks, short_rewards, position_sizes,
+            use_trailing_stops_options_range, 
+            max_open_positions_options  
+        ]
+        # For 'basic', all elements in param_lists are distinct parameters.
+        # No "weights" in the sense of scoring weights are being optimized here.
+        num_params_before_weights = len(param_lists) 
+
     elif optimization_type == 'technical':
-        long_risks = [DEFAULT_LONG_RISK]
-        long_rewards = [DEFAULT_LONG_REWARD]
-        short_risks = [DEFAULT_SHORT_RISK]
-        short_rewards = [DEFAULT_SHORT_REWARD]
-        position_sizes = [DEFAULT_POSITION_SIZE]
+        # Risk/Reward/Position Size are fixed to defaults for 'technical' optimization
+        # Their values will be taken from global defaults in the helper functions.
         
-        fast_periods = [10, 15, 20, 25]
-        slow_periods = [40, 50, 60]
-        rsi_lower_thresholds = [25, 30, 35]
-        rsi_upper_thresholds = [65, 70, 75]
-        bb_deviations = [1.8, 2.0, 2.2]
-        adx_thresholds = [20, 25, 30]
-        min_buy_scores = [2.5, 3.0, 3.5]
-        min_sell_scores = [2.5, 3.0, 3.5]
-        require_cloud_contexts = [True, False]
-        
-    else:  # comprehensive optimization
-        long_risks = [0.02, 0.03, 0.04]
-        long_rewards = [0.03, 0.05, 0.07]
-        short_risks = [0.02, 0.03, 0.04]
-        short_rewards = [0.03, 0.05, 0.07]
-        position_sizes = [0.05, 0.10, 0.15]
-        
-        fast_periods = [15, 20, 25]
-        slow_periods = [40, 50, 60]
-        rsi_lower_thresholds = [25, 30, 35]
-        rsi_upper_thresholds = [65, 70, 75]
-        bb_deviations = [1.8, 2.0, 2.2]
-        adx_thresholds = [20, 25, 30]
-        min_buy_scores = [2.5, 3.0, 3.5]
-        min_sell_scores = [2.5, 3.0, 3.5]
-        require_cloud_contexts = [True, False]
+        # Optimize execution rules and scoring weights
+        max_open_positions_options = [5, 10, 15] 
 
-    # Create parameter combinations using itertools.product
-    param_lists = [
-        long_risks, long_rewards, short_risks, short_rewards, position_sizes,
-        fast_periods, slow_periods,
-        rsi_lower_thresholds, rsi_upper_thresholds,
-        bb_deviations, adx_thresholds,
-        min_buy_scores, min_sell_scores,
-        require_cloud_contexts
-    ]
+        trend_primary_weights = [2.0, 3.0, 4.0, 5.0]
+        trend_strength_weights = [1.5, 2.5, 3.5, 4.5]
+        trend_cloud_confirmation_weights = [1.0, 1.5, 2.0, 2.5] 
+        trend_kumo_confirmation_weights = [0.5, 1.0, 1.5, 2.0]
+        trend_ma_alignment_weights = [1.0, 1.5, 2.0, 2.5]
+        
+        conf_rsi_weights = [0.8, 1.0, 1.2, 1.5]
+        conf_mfi_weights = [0.5, 0.8, 1.0, 1.2]
+        conf_volume_weights = [0.5, 1.0, 1.5, 2.0]
+        conf_bollinger_weights = [0.3, 0.5, 0.8, 1.0]
+        
+        param_lists = [
+            use_trailing_stops_options_range, 
+            max_open_positions_options, 
+            # Scoring Weights (9 lists)
+            trend_primary_weights, trend_strength_weights, trend_cloud_confirmation_weights,
+            trend_kumo_confirmation_weights, trend_ma_alignment_weights,
+            conf_rsi_weights, conf_mfi_weights, conf_volume_weights, conf_bollinger_weights
+        ]
+        # Parameters before scoring weights are: use_trailing_stops, max_open_positions
+        num_params_before_weights = 2 
+    else:
+        print(f"Unknown optimization_type: {optimization_type}. Supported types: 'basic', 'technical'. Aborting.")
+        return None, []
+        
+    total_combos = 1
+    for p_list_item in param_lists: # Renamed p_list to p_list_item
+        total_combos *= len(p_list_item) if p_list_item else 1
     
-    raw_combinations = itertools.product(*param_lists)
+    param_grid = deque() 
+    # Define sample_size, e.g., based on total_combos or a fixed cap
+    # sample_size_cap = 50000 # Example cap for random sampling
+    sample_size_cap = 200 # More reasonable cap for typical use
+    sample_size = min(total_combos, sample_size_cap)
     
-    param_grid = []
-    for combo in raw_combinations:
-        long_risk_val, long_reward_val, short_risk_val, short_reward_val, pos_size_val, \
-        fast_val, slow_val, rsi_low_val, rsi_high_val, bb_dev_val, adx_thresh_val, \
-        min_buy_val, min_sell_val, req_cloud_val = combo
-
-        if fast_val >= slow_val:
-            continue
-        if rsi_low_val >= rsi_high_val:
-            continue
-
-        tech_params = {
-            'FAST': fast_val,
-            'SLOW': slow_val,
-            'RSI_OVERSOLD': rsi_low_val,
-            'RSI_OVERBOUGHT': rsi_high_val,
-            'DEVS': bb_dev_val,
-            # These parameters are part of tech_params for record-keeping and potential use in signals,
-            # but ensure your 'indicators' function only receives what it expects.
-            'ADX_THRESHOLD': adx_thresh_val,
-            'MIN_BUY_SCORE': min_buy_val,
-            'MIN_SELL_SCORE': min_sell_val,
-            'REQUIRE_CLOUD': req_cloud_val
-        }
-        # Pass a copy of base_df if indicators might modify it,
-        # or ensure indicators always works on its own copy (which your current one does).
-        param_grid.append((ticker, base_df.copy(), 
-                       long_risk_val, long_reward_val, 
-                       short_risk_val, short_reward_val, 
-                       pos_size_val, tech_params))
+    if total_combos > sample_size and sample_size > 0 : # Ensure sample_size is positive
+        print(f"Total combinations ({total_combos}) > sample_size ({sample_size}). Using random sampling.")
+        param_grid = _random_parameter_sampling(param_lists, sample_size, num_params_before_weights, optimization_type, current_ticker_str, base_df)
+    elif total_combos > 0: # Ensure there's at least one combination
+        print(f"Generating all {total_combos} combinations.")
+        param_grid = _generate_parameter_grid(param_lists, num_params_before_weights, optimization_type, current_ticker_str, base_df)
+    else:
+        print("No parameter combinations to generate. Aborting.")
+        return None, []
 
     if not param_grid:
         print("No valid parameter combinations generated. Aborting.")
@@ -1138,158 +1482,226 @@ def optimize_parameters(ticker=TICKER,
     start_time = datetime.now()
     print(f"Testing {len(param_grid)} parameter combinations using multiprocessing...")
     
-    # Adjust seconds_per_test as data download is no longer per test
-    seconds_per_test = 0.5 # Example: Reduced estimated time
-    total_cores = max(1, mp.cpu_count() - 1)
-    estimated_seconds = len(param_grid) * seconds_per_test / total_cores
-    estimated_time = timedelta(seconds=estimated_seconds)
-    
-    print(f"Estimated completion time: {estimated_time} "
-          f"(using {total_cores} cores, ~{seconds_per_test:.2f}s per test)")
+    # Estimate time (optional, can be rough)
+    # seconds_per_test = 0.3 # Adjusted estimate
+    # total_cores = max(1, mp.cpu_count() - 1)
+    # estimated_seconds = len(param_grid) * seconds_per_test / total_cores
+    # estimated_time = timedelta(seconds=estimated_seconds)
+    # print(f"Estimated completion time: {estimated_time} (using {total_cores} cores, ~{seconds_per_test:.2f}s per test)")
     
     results = []
-    # Ensure the target function for pool.map is correct (parameter_test)
-    with mp.Pool(processes=total_cores) as pool:
-        results = pool.map(parameter_test, param_grid) 
+    # Ensure parameter_test is defined and handles the tuple structure correctly
+    with mp.Pool(processes=max(1, mp.cpu_count() - 2)) as pool: # Leave 2 cores free
+        results = list(tqdm(pool.imap_unordered(parameter_test, param_grid), total=len(param_grid), desc="Running Backtests"))
     
     if not results:
         print("No results from parameter tests. Aborting.")
         return None, []
 
-    # Filter out None results if any error occurred in parameter_test and returned None
-    results = [r for r in results if r is not None and 'sharpe' in r]
+    results = [r for r in results if r is not None and 'sharpe' in r and r['sharpe'] is not None and not np.isnan(r['sharpe'])]
     if not results:
-        print("All parameter tests failed or returned invalid results. Aborting.")
+        print("All parameter tests failed or returned invalid/None/NaN Sharpe values. Aborting.")
         return None, []
-
+        
     best_result = max(results, key=lambda x: x['sharpe'])
     sorted_results = sorted(results, key=lambda x: x['sharpe'], reverse=True)
     
     print("\nTop 5 Parameter Combinations:")
-    headers = ["L.Risk", "L.Reward", "S.Risk", "S.Reward", "Pos Size", "Fast", "Slow", "RSI Low", "RSI High", "BB Dev",
-            "ADX Thres", "Min Buy", "Min Sell", "Cloud Req", 
-            "Win%", "Profit%", "MaxDD%", "Sharpe", "# Trades"]
-    rows = []
     
-    for i, result in enumerate(sorted_results[:5]):
-        rows.append([
-            f"{result['long_risk']*100:.1f}%", 
-            f"{result['long_reward']*100:.1f}%",
-            f"{result['short_risk']*100:.1f}%", 
-            f"{result['short_reward']*100:.1f}%", 
-            f"{result['position_size']*100:.1f}%",
-            f"{result['tech_params']['FAST']}",
-            f"{result['tech_params']['SLOW']}",
-            f"{result['tech_params']['RSI_OVERSOLD']}",
-            f"{result['tech_params']['RSI_OVERBOUGHT']}",
-            f"{result['tech_params']['DEVS']:.1f}",
-            f"{result['tech_params']['ADX_THRESHOLD']}",
-            f"{result['tech_params']['MIN_BUY_SCORE']:.1f}",
-            f"{result['tech_params']['MIN_SELL_SCORE']:.1f}",
-            f"{result['tech_params']['REQUIRE_CLOUD']}",
-            f"{result['win_rate']:.1f}", 
-            f"{result['net_profit_pct']:.1f}", 
-            f"{result['max_drawdown']:.1f}", 
-            f"{result['sharpe']:.2f}", 
-            f"{result['num_trades']}"
+    # Define base headers common to all types
+    base_headers = ["L.Risk", "L.Reward", "S.Risk", "S.Reward", "Pos Size", "TrailStop", "MaxPos"]
+    perf_headers = ["Win%", "Profit%", "MaxDD%", "Sharpe", "# Trades"]
+    
+    headers = list(base_headers) # Start with a copy
+
+    if optimization_type == 'technical':
+        # For 'technical', Risk/Reward/Pos.Size are fixed but still good to show.
+        # Technical indicator parameters are fixed (not shown as optimized).
+        # Scoring weights are optimized.
+        headers.extend([
+            "T.PrimW", "T.StrW", "T.CloudW", "T.KumoW", "T.MAW",
+            "C.RSIW", "C.MFIW", "C.VolW", "C.BBW"
         ])
+    # For 'basic', only base_headers and perf_headers are needed.
+    # Technical indicators and weights are fixed to default and not shown as optimized.
+
+    headers.extend(perf_headers)
     
-    print(tabulate(rows, headers=headers, tablefmt="grid"))
-    
-    if visualize_best:
-        print(f"\nRunning detailed backtest with best parameters:")
-        # ... (print statements for best_result parameters) ...
-        best_tech_params = best_result.get('tech_params', {})
-        # ... (print statements for best_tech_params) ...
+    rows = []
+    for i, result in enumerate(sorted_results[:5]):
+        tech_p_res = result.get('tech_params', {}) # Ensure tech_params exists
         
+        row_data = [
+            f"{result['long_risk']*100:.1f}%", f"{result['long_reward']*100:.1f}%",
+            f"{result['short_risk']*100:.1f}%", f"{result['short_reward']*100:.1f}%",
+            f"{result['position_size']*100:.1f}%", # This is % of portfolio per trade
+            f"{tech_p_res.get('USE_TRAILING_STOPS', USE_TRAILING_STOPS_DEFAULT)}",
+            f"{tech_p_res.get('MAX_OPEN_POSITIONS', MAX_OPEN_POSITIONS)}",
+        ]
+
+        if optimization_type == 'technical':
+            tw = tech_p_res.get('TREND_WEIGHTS', TREND_WEIGHTS) 
+            cw = tech_p_res.get('CONFIRMATION_WEIGHTS', CONFIRMATION_WEIGHTS)
+            row_data.extend([
+                f"{tw.get('primary_trend', TREND_WEIGHTS['primary_trend']):.1f}", 
+                f"{tw.get('trend_strength', TREND_WEIGHTS['trend_strength']):.1f}",
+                f"{tw.get('cloud_confirmation', TREND_WEIGHTS['cloud_confirmation']):.1f}", 
+                f"{tw.get('kumo_confirmation', TREND_WEIGHTS['kumo_confirmation']):.1f}",
+                f"{tw.get('ma_alignment', TREND_WEIGHTS['ma_alignment']):.1f}",
+                f"{cw.get('rsi', CONFIRMATION_WEIGHTS['rsi']):.1f}", 
+                f"{cw.get('mfi', CONFIRMATION_WEIGHTS['mfi']):.1f}",
+                f"{cw.get('volume', CONFIRMATION_WEIGHTS['volume']):.1f}", 
+                f"{cw.get('bollinger', CONFIRMATION_WEIGHTS['bollinger']):.1f}",
+            ])
+            
+        row_data.extend([
+            f"{result.get('win_rate', 0):.1f}", 
+            f"{result.get('net_profit_pct', -100):.1f}",
+            f"{result.get('max_drawdown', 100):.1f}", 
+            f"{result.get('sharpe', -10):.2f}",
+            f"{result.get('num_trades', 0)}"
+        ])
+        rows.append(row_data)
+        
+    if rows:
+        print(tabulate(rows, headers=headers, tablefmt="grid"))
+    else:
+        print("No results to display in table.")
+    
+    if visualize_best and best_result: # Check if best_result is not None
+        print(f"\nRunning detailed backtest with best parameters for {current_ticker_str}:")
+        best_tech_params = best_result.get('tech_params', {})
+        
+        # For visualization, always use the default technical indicator periods,
+        # as they are not optimized in 'basic' or 'technical' types.
+        # The optimized parts are risk/reward or scoring weights.
         df_with_indicators_viz = prepare_data(
             base_df.copy(), 
-            fast=best_tech_params.get('FAST', FAST),
-            slow=best_tech_params.get('SLOW', SLOW),
-            rsi_oversold=best_tech_params.get('RSI_OVERSOLD', RSI_OVERSOLD),
-            rsi_overbought=best_tech_params.get('RSI_OVERBOUGHT', RSI_OVERBOUGHT),
-            devs=best_tech_params.get('DEVS', DEVS),
-            weekly_ma_period_val=best_tech_params.get('WEEKLY_MA_PERIOD', WEEKLY_MA_PERIOD) # Ensure this is in tech_params if optimized
+            fast=FAST, # Use global default
+            slow=SLOW, # Use global default
+            rsi_oversold=RSI_OVERSOLD, # Use global default
+            rsi_overbought=RSI_OVERBOUGHT, # Use global default
+            devs=DEVS, # Use global default
+            weekly_ma_period_val=WEEKLY_MA_PERIOD # Use global default
         )
         
         final_run_result = test( 
             df_with_indicators_viz,
-            ticker, 
+            current_ticker_str, 
             long_risk=best_result['long_risk'],
             long_reward=best_result['long_reward'],
             short_risk=best_result['short_risk'],
             short_reward=best_result['short_reward'],
             position_size=best_result['position_size'],
-            use_trailing_stops=best_result.get('use_trailing_stops', USE_TRAILING_STOPS_DEFAULT), # Assuming it might be optimized
-            # Pass the actual periods used for prepare_data
-            fast_period=best_tech_params.get('FAST', FAST),
-            slow_period=best_tech_params.get('SLOW', SLOW),
-            weekly_ma_p=best_tech_params.get('WEEKLY_MA_PERIOD', WEEKLY_MA_PERIOD),
-            # Pass signal parameters from best_tech_params
-            adx_thresh=best_tech_params.get('ADX_THRESHOLD', ADX_THRESHOLD_DEFAULT),
-            min_buy_s=best_tech_params.get('MIN_BUY_SCORE', MIN_BUY_SCORE_DEFAULT),
-            min_sell_s=best_tech_params.get('MIN_SELL_SCORE', MIN_SELL_SCORE_DEFAULT),
-            req_cloud=best_tech_params.get('REQUIRE_CLOUD', REQUIRE_CLOUD_DEFAULT)
+            # Get optimized execution rules from best_tech_params
+            use_trailing_stops=best_tech_params.get('USE_TRAILING_STOPS', USE_TRAILING_STOPS_DEFAULT),
+            max_positions_param=best_tech_params.get('MAX_OPEN_POSITIONS', MAX_OPEN_POSITIONS),
+            # Technical indicators are fixed to defaults
+            fast_period=FAST,
+            slow_period=SLOW,
+            weekly_ma_p=WEEKLY_MA_PERIOD,
+            adx_thresh=ADX_THRESHOLD_DEFAULT,
+            min_buy_s=MIN_BUY_SCORE_DEFAULT,
+            min_sell_s=MIN_SELL_SCORE_DEFAULT,
+            req_cloud=REQUIRE_CLOUD_DEFAULT,
+            # Get optimized scoring weights from best_tech_params
+            trend_weights_param=best_tech_params.get('TREND_WEIGHTS', TREND_WEIGHTS), 
+            confirmation_weights_param=best_tech_params.get('CONFIRMATION_WEIGHTS', CONFIRMATION_WEIGHTS)
         )
     
     end_time = datetime.now()
     elapsed_time = end_time - start_time
-    print(f"\nParameter optimization completed in {elapsed_time}")
+    print(f"\nParameter optimization for {current_ticker_str} completed in {elapsed_time}")
     
     return best_result, sorted_results
 
 # --------------------------------------------------------------------------------------------------------------------------
 
-def parameter_test(args): # Modified to accept a single 'args' tuple
+def parameter_test(args):
     """
-    Run a single parameter test. Receives pre-fetched base_df.
-    Designed to be used with multiprocessing.
+    GPU-accelerated parameter testing function that processes a single parameter combination.
+    
+    Args:
+        args: Tuple containing (ticker, base_df, risk params, tech_params)
+    
+    Returns:
+        Dict containing test results and statistics
     """
-    # Define default values for unpacking in case of error before full unpacking
-    ticker, base_df_arg, tech_params = None, None, {}
-    long_risk, long_reward, short_risk, short_reward, position_size = -1, -1, -1, -1, -1
-
+    ticker, base_df_arg, long_risk, long_reward, short_risk, short_reward, position_size, tech_params = args
+    
     try:
-        # Unpack parameters
-        # The tuple is (ticker_str, base_df_copy, long_risk, long_reward, short_risk, short_reward, position_size, tech_params_dict)
-        ticker, base_df_arg, long_risk, long_reward, short_risk, short_reward, position_size, tech_params = args
+        # Initialize result storage
+        results = deque()
         
+        # Extract parameters
         current_fast_period = tech_params.get('FAST', FAST)
         current_slow_period = tech_params.get('SLOW', SLOW)
-        current_weekly_ma_period = tech_params.get('WEEKLY_MA_PERIOD', WEEKLY_MA_PERIOD) # Assuming WEEKLY_MA_PERIOD might be in tech_params
-
-        df_prepared = prepare_data(
-            base_df_arg, 
-            fast=current_fast_period,
-            slow=current_slow_period,
-            rsi_oversold=tech_params.get('RSI_OVERSOLD', RSI_OVERSOLD),
-            rsi_overbought=tech_params.get('RSI_OVERBOUGHT', RSI_OVERBOUGHT),
-            devs=tech_params.get('DEVS', DEVS),
-            weekly_ma_period_val=current_weekly_ma_period
-        )
+        current_weekly_ma_period = tech_params.get('WEEKLY_MA_PERIOD', WEEKLY_MA_PERIOD)
+        current_trend_weights = tech_params.get('TREND_WEIGHTS', TREND_WEIGHTS)
+        current_confirmation_weights = tech_params.get('CONFIRMATION_WEIGHTS', CONFIRMATION_WEIGHTS)
+        current_use_trailing_stops = tech_params.get('USE_TRAILING_STOPS', USE_TRAILING_STOPS_DEFAULT)
+        current_max_open_positions = tech_params.get('MAX_OPEN_POSITIONS', MAX_OPEN_POSITIONS)
         
-        # Construct column names based on the parameters used for prepare_data
+        # Prepare data with GPU acceleration if available
+        if HAS_GPU:
+            # Convert to CuPy arrays for GPU processing
+            try:
+                df_gpu = cp.asarray(base_df_arg.values)
+                df_prepared = prepare_data(
+                    cp.asnumpy(df_gpu),  # Convert back to numpy for prepare_data
+                    fast=current_fast_period,
+                    slow=current_slow_period,
+                    rsi_oversold=tech_params.get('RSI_OVERSOLD', RSI_OVERSOLD),
+                    rsi_overbought=tech_params.get('RSI_OVERBOUGHT', RSI_OVERBOUGHT),
+                    devs=tech_params.get('DEVS', DEVS),
+                    weekly_ma_period_val=current_weekly_ma_period
+                )
+            except Exception as gpu_error:
+                print(f"GPU processing failed: {gpu_error}. Falling back to CPU.")
+                df_prepared = prepare_data(
+                    base_df_arg.copy(),
+                    fast=current_fast_period,
+                    slow=current_slow_period,
+                    rsi_oversold=tech_params.get('RSI_OVERSOLD', RSI_OVERSOLD),
+                    rsi_overbought=tech_params.get('RSI_OVERBOUGHT', RSI_OVERBOUGHT),
+                    devs=tech_params.get('DEVS', DEVS),
+                    weekly_ma_period_val=current_weekly_ma_period
+                )
+        else:
+            df_prepared = prepare_data(
+                base_df_arg.copy(),
+                fast=current_fast_period,
+                slow=current_slow_period,
+                rsi_oversold=tech_params.get('RSI_OVERSOLD', RSI_OVERSOLD),
+                rsi_overbought=tech_params.get('RSI_OVERBOUGHT', RSI_OVERBOUGHT),
+                devs=tech_params.get('DEVS', DEVS),
+                weekly_ma_period_val=current_weekly_ma_period
+            )
+        
+        # Set up column names for moving averages
         fast_ma_col = f"{current_fast_period}_ma"
         slow_ma_col = f"{current_slow_period}_ma"
         weekly_ma_col = f"Weekly_MA{current_weekly_ma_period}"
-
+        
+        # Run momentum strategy
         trade_log, trade_stats, portfolio_equity, trade_returns = momentum(
             df_prepared,
+            fast_ma_col_name=fast_ma_col,
+            slow_ma_col_name=slow_ma_col,
+            weekly_ma_col_name=weekly_ma_col,
             long_risk=long_risk,
             long_reward=long_reward,
             short_risk=short_risk,
             short_reward=short_reward,
             position_size=position_size,
-            # Pass signal generation parameters from tech_params
+            max_positions=current_max_open_positions,
+            use_trailing_stops=current_use_trailing_stops,
             adx_threshold_sig=tech_params.get('ADX_THRESHOLD', ADX_THRESHOLD_DEFAULT),
             min_buy_score_sig=tech_params.get('MIN_BUY_SCORE', MIN_BUY_SCORE_DEFAULT),
             min_sell_score_sig=tech_params.get('MIN_SELL_SCORE', MIN_SELL_SCORE_DEFAULT),
             require_cloud_sig=tech_params.get('REQUIRE_CLOUD', REQUIRE_CLOUD_DEFAULT),
-            # Pass the constructed column names
-            fast_ma_col_name=fast_ma_col,
-            slow_ma_col_name=slow_ma_col,
-            weekly_ma_col_name=weekly_ma_col
-            # MAX_OPEN_POSITIONS, LEVERAGE, USE_TRAILING_STOPS_DEFAULT are likely using defaults in momentum
+            trend_weights_sig=current_trend_weights,
+            confirmation_weights_sig=current_confirmation_weights
         )
         
         return {
@@ -1303,18 +1715,21 @@ def parameter_test(args): # Modified to accept a single 'args' tuple
             'win_rate': trade_stats.get('Win Rate', 0),
             'net_profit_pct': trade_stats.get('Net Profit (%)', -100),
             'max_drawdown': trade_stats.get('Max Drawdown (%)', 100),
-            'sharpe': trade_stats.get('Sharpe Ratio', -10), 
+            'sharpe': trade_stats.get('Sharpe Ratio', -10),
             'profit_factor': trade_stats.get('Profit Factor', 0),
             'num_trades': trade_stats.get('Total Trades', 0)
         }
         
     except Exception as e:
-        # It's good to know which parameters caused an error if it happens
-        current_params_str = (f"long_risk={long_risk}, long_reward={long_reward}, "
-                            f"short_risk={short_risk}, short_reward={short_reward}, "
-                            f"pos_size={position_size}, tech={tech_params}")
+        # Log error details
+        current_params_str = (
+            f"long_risk={long_risk}, long_reward={long_reward}, "
+            f"short_risk={short_risk}, short_reward={short_reward}, "
+            f"pos_size={position_size}, tech={tech_params}"
+        )
         print(f"Error testing parameters for {ticker if ticker else 'UnknownTicker'} ({current_params_str}): {e}")
-        # Return a result with very poor performance or None
+        
+        # Return default values
         return {
             'ticker': ticker if ticker else 'UnknownTicker',
             'long_risk': long_risk,
@@ -1326,50 +1741,51 @@ def parameter_test(args): # Modified to accept a single 'args' tuple
             'win_rate': 0.0,
             'net_profit_pct': -100.0,
             'max_drawdown': 100.0,
-            'sharpe': -10.0, # Critical for max() key
+            'sharpe': -10.0,
             'profit_factor': 0.0,
             'num_trades': 0
         }
 
 # --------------------------------------------------------------------------------------------------------------------------
 
-def test(df_input, # Renamed from df to df_input to avoid confusion with internal df
-         TICKER_STR, # Renamed from TICKER to avoid confusion with global
+def test(df_input,
+         TICKER_STR, 
          long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
          short_risk=DEFAULT_SHORT_RISK, short_reward=DEFAULT_SHORT_REWARD,
          position_size=DEFAULT_POSITION_SIZE, 
-         use_trailing_stops=USE_TRAILING_STOPS_DEFAULT,
-         # Add parameters for prepare_data if they are not fixed to global defaults
-         fast_period=FAST, 
-         slow_period=SLOW, 
-         weekly_ma_p=WEEKLY_MA_PERIOD,
-         # Add signal generation parameters expected by momentum
-         adx_thresh=ADX_THRESHOLD_DEFAULT,
-         min_buy_s=MIN_BUY_SCORE_DEFAULT,
-         min_sell_s=MIN_SELL_SCORE_DEFAULT,
-         req_cloud=REQUIRE_CLOUD_DEFAULT):
+         use_trailing_stops=USE_TRAILING_STOPS_DEFAULT, # Added to signature
+         max_positions_param=MAX_OPEN_POSITIONS, # Added to signature
+         fast_period=FAST, slow_period=SLOW, weekly_ma_p=WEEKLY_MA_PERIOD,
+         adx_thresh=ADX_THRESHOLD_DEFAULT, min_buy_s=MIN_BUY_SCORE_DEFAULT,
+         min_sell_s=MIN_SELL_SCORE_DEFAULT, req_cloud=REQUIRE_CLOUD_DEFAULT,
+         trend_weights_param=None, confirmation_weights_param=None): 
     
-    df = df_input.copy() # Work on a copy
+    df = df_input.copy()
 
     current_fast_ma_col = f"{fast_period}_ma"
     current_slow_ma_col = f"{slow_period}_ma"
     current_weekly_ma_col = f"Weekly_MA{weekly_ma_p}"
+
+    final_trend_weights = trend_weights_param if trend_weights_param is not None else TREND_WEIGHTS
+    final_confirmation_weights = confirmation_weights_param if confirmation_weights_param is not None else CONFIRMATION_WEIGHTS
     
     trade_log, trade_stats, portfolio_equity, trade_returns = momentum(
         df, 
+        fast_ma_col_name=current_fast_ma_col,
+        slow_ma_col_name=current_slow_ma_col,
+        weekly_ma_col_name=current_weekly_ma_col,
         long_risk=long_risk, long_reward=long_reward,
         short_risk=short_risk, short_reward=short_reward,
         position_size=position_size, 
-        max_positions=MAX_OPEN_POSITIONS, 
-        risk_free_rate=0.04, # This is a default in momentum, can be passed if needed
-        use_trailing_stops=use_trailing_stops,
+        max_positions=max_positions_param, # Use passed parameter
+        risk_free_rate=0.04,
+        use_trailing_stops=use_trailing_stops, # Use passed parameter
         adx_threshold_sig=adx_thresh,
         min_buy_score_sig=min_buy_s,
         min_sell_score_sig=min_sell_s,
         require_cloud_sig=req_cloud,
-        fast_ma_col_name=current_fast_ma_col,
-        slow_ma_col_name=current_slow_ma_col,
-        weekly_ma_col_name=current_weekly_ma_col
+        trend_weights_sig=final_trend_weights, 
+        confirmation_weights_sig=final_confirmation_weights
     )
     
     # Add asset returns to dataframe for comparison
@@ -1397,14 +1813,13 @@ def test(df_input, # Renamed from df to df_input to avoid confusion with interna
     else:
         best_trade_pct = worst_trade_pct = avg_trade_pct = max_duration = avg_duration = 0
 
-    # Print summary stats with right alignment
-    print(f"\n=== {TICKER} STRATEGY SUMMARY ===")
+    print(f"\n=== {TICKER_STR} STRATEGY SUMMARY ===") 
     print(f"Long Risk: {long_risk*100:.1f}% | Long Reward: {long_reward*100:.1f}%")
     print(f"Short Risk: {short_risk*100:.1f}% | Short Reward: {short_reward*100:.1f}%")
     print(f"Position Size: {position_size*100:.1f}%")
     print(f"Use Trailing Stops: {use_trailing_stops}")
+    print(f"Max Open Positions: {max_positions_param}") # Added print for max positions
     
-    # Format financial metrics with tabulate
     metrics = [
         ["Starting Capital [$]", f"{portfolio_equity.iloc[0]:,.2f}"],
         ["Ending Capital [$]", f"{portfolio_equity.iloc[-1]:,.2f}"],
@@ -1414,19 +1829,17 @@ def test(df_input, # Renamed from df to df_input to avoid confusion with interna
         ["Equity Final [$]", f"{portfolio_equity.iloc[-1]:,.2f}"],
         ["Equity Peak [$]", f"{peak_equity:,.2f}"],
         ["Return [%]", f"{trade_stats['Net Profit (%)']:.2f}"],
-        ["Buy & Hold Return [%]", f"{buy_hold_return:.2f}"],  # Now we have a scalar value
+        ["Buy & Hold Return [%]", f"{buy_hold_return:.2f}"],
         ["Annual Return [%]", f"{trade_stats['Annualized Return (%)']:.2f}"],
         ["Sharpe Ratio", f"{trade_stats['Sharpe Ratio']:.2f}"],
         ["Sortino Ratio", f"{trade_stats['Sortino Ratio']:.2f}"],
         ["Max. Drawdown [%]", f"{trade_stats['Max Drawdown (%)']:.2f}"],
     ]
-    
     print(tabulate(metrics, tablefmt="simple", colalign=("left", "right")))
     
-    # Print trade summary with tabulate
-    print(f"\n=== {TICKER} TRADE SUMMARY ===")
+    print(f"\n=== {TICKER_STR} TRADE SUMMARY ===") 
     trade_metrics = [
-        ["Total Trades", f"{trade_stats['Total Trades']:.2f}"],
+        ["Total Trades", f"{trade_stats['Total Trades']:.0f}"], 
         ["Win Rate [%]", f"{trade_stats['Win Rate']:.2f}"],
         ["Best Trade [%]", f"{best_trade_pct:.2f}"],
         ["Worst Trade [%]", f"{worst_trade_pct:.2f}"],
@@ -1436,22 +1849,17 @@ def test(df_input, # Renamed from df to df_input to avoid confusion with interna
         ["Profit Factor", f"{trade_stats['Profit Factor']:.2f}"],
         ["Expectancy [%]", f"{trade_stats['Expectancy (%)']:.2f}"]
     ]
-    
     print(tabulate(trade_metrics, tablefmt="simple", colalign=("left", "right")))
     
-    # Create visualizations
-    # create_backtest_charts(df, portfolio_equity, trade_stats, trade_log, TICKER)
+    # create_backtest_charts(df, portfolio_equity, trade_stats, trade_log, TICKER_STR) 
     
     return {
-        'TICKER': TICKER,
-        'df': df,
-        'equity': portfolio_equity,
-        'trade_stats': trade_stats,
-        'trade_log': trade_log,
-        'long_risk': long_risk,
-        'long_reward': long_reward,
-        'short_risk': short_risk,
-        'short_reward': short_reward
+        'TICKER': TICKER_STR, 
+        'df': df, 'equity': portfolio_equity, 'trade_stats': trade_stats, 'trade_log': trade_log,
+        'long_risk': long_risk, 'long_reward': long_reward,
+        'short_risk': short_risk, 'short_reward': short_reward,
+        'use_trailing_stops': use_trailing_stops, # Added to result
+        'max_positions': max_positions_param # Added to result
     }
 
 # --------------------------------------------------------------------------------------------------------------------------
