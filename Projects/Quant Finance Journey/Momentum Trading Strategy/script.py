@@ -2,10 +2,14 @@ import pandas as pd
 import numpy as np
 try:
     import cupy as cp
+    # Test GPU availability
+    cp.cuda.runtime.getDeviceCount()
     HAS_GPU = True
-except ImportError:
+    print("GPU acceleration enabled")
+except Exception as e:
     HAS_GPU = False
-    print("GPU acceleration not available. Using CPU only.")
+    print(f"GPU acceleration not available: {e}")
+    print("Using CPU only")
 import yfinance as yf
 from tabulate import tabulate  
 import pandas_ta as ta 
@@ -19,6 +23,12 @@ from numba import jit
 from tqdm import tqdm
 
 # --------------------------------------------------------------------------------------------------------------------------
+
+
+# Script Execution Defaults 
+OPTIMIZE_DEFAULT = True
+VISUALIZE_BEST_DEFAULT = False
+OPTIMIZATION_TYPE_DEFAULT = 'basic'
 
 # Trade Management
 ADX_THRESHOLD_DEFAULT = 25
@@ -78,11 +88,6 @@ MFI_OVERSOLD = 30
 # Bollinger Bands strategy parameters
 BB_LEN = 20
 DEVS = 2
-
-# Script Execution Defaults 
-OPTIMIZE_DEFAULT = False
-VISUALIZE_BEST_DEFAULT = False
-OPTIMIZATION_TYPE_DEFAULT = 'basic'
 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -1159,14 +1164,15 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
 # --------------------------------------------------------------------------------------------------------------------------
 
 @jit(nopython=True, parallel=True)
-def _evaluate_parameters_batch(param_arrays, price_data, indicator_data):
+def _evaluate_parameters_batch_cpu(param_arrays, price_data, fast_ma, slow_ma):
     """
     Vectorized and JIT-compiled evaluation of multiple parameter sets simultaneously.
     
     Args:
         param_arrays: numpy array of shape (n_params, n_features) containing parameter combinations
         price_data: numpy array of price data
-        indicator_data: dict of numpy arrays for technical indicators
+        fast_ma: numpy array of fast moving average values
+        slow_ma: numpy array of slow moving average values
     
     Returns:
         numpy array of shape (n_params,) containing evaluation metrics
@@ -1191,9 +1197,9 @@ def _evaluate_parameters_batch(param_arrays, price_data, indicator_data):
         signals = np.zeros(len(price_data))
         for j in range(1, len(price_data)):
             # Simplified signal generation for performance
-            if indicator_data['fast_ma'][j] > indicator_data['slow_ma'][j]:
+            if fast_ma[j] > slow_ma[j]:
                 signals[j] = 1
-            elif indicator_data['fast_ma'][j] < indicator_data['slow_ma'][j]:
+            elif fast_ma[j] < slow_ma[j]:
                 signals[j] = -1
                 
         # Calculate returns
@@ -1209,6 +1215,64 @@ def _evaluate_parameters_batch(param_arrays, price_data, indicator_data):
             results[i] = -np.inf
             
     return results
+
+# --------------------------------------------------------------------------------------------------------------------------
+
+def _evaluate_parameters_batch_gpu(param_arrays, price_data, fast_ma, slow_ma):
+    """GPU version of parameter evaluation using CuPy"""
+    try:
+        # Convert input arrays to GPU arrays
+        param_arrays_gpu = cp.asarray(param_arrays, dtype=cp.float32)
+        price_data_gpu = cp.asarray(price_data, dtype=cp.float32)
+        fast_ma_gpu = cp.asarray(fast_ma, dtype=cp.float32)
+        slow_ma_gpu = cp.asarray(slow_ma, dtype=cp.float32)
+        
+        n_params = param_arrays_gpu.shape[0]
+        results = cp.zeros(n_params, dtype=cp.float32)
+        
+        # Vectorized operations on GPU
+        signals = cp.zeros((n_params, len(price_data_gpu)), dtype=cp.float32)
+        
+        # Calculate signals for all parameter sets at once
+        for i in range(1, len(price_data_gpu)):
+            signals[:, i] = cp.where(fast_ma_gpu[i] > slow_ma_gpu[i], 1, 
+                                   cp.where(fast_ma_gpu[i] < slow_ma_gpu[i], -1, 0))
+        
+        # Broadcast position sizes
+        position_values = signals * param_arrays_gpu[:, 4:5]
+        
+        # Calculate returns
+        returns = cp.diff(price_data_gpu) / price_data_gpu[:-1]
+        strategy_returns = position_values[:, :-1] * returns
+        
+        # Calculate metrics
+        valid_returns = cp.any(strategy_returns != 0, axis=1)
+        means = cp.mean(strategy_returns, axis=1)
+        stds = cp.std(strategy_returns, axis=1)
+        
+        # Calculate Sharpe ratios
+        results = cp.where(
+            cp.logical_and(valid_returns, stds > 0),
+            cp.sqrt(252) * means / cp.maximum(stds, 1e-8),
+            -cp.inf
+        )
+        
+        # Risk-reward validation
+        invalid_params = cp.logical_or(
+            param_arrays_gpu[:, 0] >= param_arrays_gpu[:, 1],  # long_risk >= long_reward
+            param_arrays_gpu[:, 2] >= param_arrays_gpu[:, 3]   # short_risk >= short_reward
+        )
+        results = cp.where(invalid_params, -cp.inf, results)
+        
+        # Free GPU memory explicitly
+        del param_arrays_gpu, price_data_gpu, fast_ma_gpu, slow_ma_gpu
+        cp.get_default_memory_pool().free_all_blocks()
+        
+        return cp.asnumpy(results)
+        
+    except Exception as e:
+        print(f"GPU processing error: {e}")
+        raise  # Re-raise the exception to trigger CPU fallback
 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -1428,13 +1492,10 @@ def optimize_parameters(ticker=TICKER,
             use_trailing_stops_options_range, 
             max_open_positions_options  
         ]
-        # For 'basic', all elements in param_lists are distinct parameters.
-        # No "weights" in the sense of scoring weights are being optimized here.
+        
         num_params_before_weights = len(param_lists) 
 
     elif optimization_type == 'technical':
-        # Risk/Reward/Position Size are fixed to defaults for 'technical' optimization
-        # Their values will be taken from global defaults in the helper functions.
         
         # Optimize execution rules and scoring weights
         max_open_positions_options = [5, 10, 15] 
@@ -1464,47 +1525,38 @@ def optimize_parameters(ticker=TICKER,
         print(f"Unknown optimization_type: {optimization_type}. Supported types: 'basic', 'technical'. Aborting.")
         return None, []
         
+    # Calculate total combinations
     total_combos = 1
-    for p_list_item in param_lists: # Renamed p_list to p_list_item
-        total_combos *= len(p_list_item) if p_list_item else 1
+    for p_list in param_lists:
+        total_combos *= len(p_list) if p_list else 1
     
-    param_grid = deque() 
-    # Define sample_size, e.g., based on total_combos or a fixed cap
-    # sample_size_cap = 50000 # Example cap for random sampling
-    sample_size_cap = 200 # More reasonable cap for typical use
-    sample_size = min(total_combos, sample_size_cap)
-    
-    if total_combos > sample_size and sample_size > 0 : # Ensure sample_size is positive
-        print(f"Total combinations ({total_combos}) > sample_size ({sample_size}). Using random sampling.")
-        param_grid = _random_parameter_sampling(param_lists, sample_size, num_params_before_weights, optimization_type, current_ticker_str, base_df)
-    elif total_combos > 0: # Ensure there's at least one combination
-        print(f"Generating all {total_combos} combinations.")
-        param_grid = _generate_parameter_grid(param_lists, num_params_before_weights, optimization_type, current_ticker_str, base_df)
-    else:
-        print("No parameter combinations to generate. Aborting.")
-        return None, []
+    print(f"Generating all {total_combos} parameter combinations...")
+    param_grid = _generate_parameter_grid(param_lists, num_params_before_weights, optimization_type, current_ticker_str, base_df)
 
     if not param_grid:
         print("No valid parameter combinations generated. Aborting.")
         return None, []
 
-    start_time = datetime.now()
+    starttime = datetime.now()
     print(f"Testing {len(param_grid)} parameter combinations using multiprocessing...")
     
-    
-    results_list = [] # Renamed from results to avoid conflict with Numba results
-    # Ensure parameter_test is defined and handles the tuple structure correctly
-    with mp.Pool(processes=max(1, mp.cpu_count() - 2)) as pool: # Leave 2 cores free
-        results_list = list(tqdm(pool.imap_unordered(parameter_test, param_grid), total=len(param_grid), desc="Running Backtests"))
-    
-    if not results_list:
-        print("No results from parameter tests. Aborting.")
-        return None, []
-
-    results_list = [r for r in results_list if r is not None and 'sharpe' in r and r['sharpe'] is not None and not np.isnan(r['sharpe'])]
-    if not results_list:
-        print("All parameter tests failed or returned invalid/None/NaN Sharpe values. Aborting.")
-        return None, []
+    # Create progress bar for parameter testing
+    with tqdm(total=len(param_grid), desc="Parameter Testing Progress", 
+              bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+        
+        results_list = []
+        with mp.Pool(processes=max(1, mp.cpu_count() - 2)) as pool:
+            for result in pool.imap_unordered(parameter_test, param_grid):
+                results_list.append(result)
+                pbar.update(1)
+                
+                # Display current best result
+                if result and 'sharpe' in result and result['sharpe'] is not None:
+                    current_best = max(results_list, key=lambda x: x['sharpe'])
+                    pbar.set_postfix({
+                        'Best Sharpe': f"{current_best['sharpe']:.2f}",
+                        'Win Rate': f"{current_best['win_rate']:.1f}%"
+                    })
         
     best_result = max(results_list, key=lambda x: x['sharpe'])
     sorted_results = sorted(results_list, key=lambda x: x['sharpe'], reverse=True)
@@ -1512,7 +1564,7 @@ def optimize_parameters(ticker=TICKER,
     print("\nTop 5 Parameter Combinations:")
     
     # Define base headers common to all types
-    base_headers = ["L.Risk", "L.Reward", "S.Risk", "S.Reward", "Pos Size", "TrailStop", "MaxPos"]
+    base_headers = ["L.Risk", "L.Reward", "S.Risk", "S.Reward", "Pos Size", "MaxPos"]
     perf_headers = ["Win%", "Profit%", "MaxDD%", "Sharpe", "# Trades"]
     
     headers = list(base_headers) # Start with a copy
@@ -1613,7 +1665,7 @@ def optimize_parameters(ticker=TICKER,
         )
     
     end_time = datetime.now()
-    elapsed_time = end_time - start_time
+    elapsed_time = end_time - starttime
     print(f"\nParameter optimization for {current_ticker_str} completed in {elapsed_time}")
     
     return best_result, sorted_results
@@ -1622,24 +1674,14 @@ def optimize_parameters(ticker=TICKER,
 
 def parameter_test(args):
     """
-    Parameter testing function that processes a single parameter combination.
-    It's designed to be used with multiprocessing.
-    
-    Args:
-        args: Tuple containing (ticker, base_df_original, long_risk, long_reward, 
-                               short_risk, short_reward, position_size, tech_params)
-    
-    Returns:
-        Dict containing test results and statistics, or None if an error occurs.
+    Parameter testing function with GPU acceleration when available.
     """
+    global HAS_GPU
+    
     ticker, base_df_original, long_risk, long_reward, short_risk, short_reward, position_size, tech_params = args
     
-    # It's crucial to work on a copy of the DataFrame in each process
-    # as prepare_data and other functions might modify it.
-    base_df_arg = base_df_original.copy()
-
     try:
-        # Extract parameters from tech_params, falling back to global defaults
+        # Extract parameters and prepare data
         current_fast_period = tech_params.get('FAST', FAST)
         current_slow_period = tech_params.get('SLOW', SLOW)
         current_weekly_ma_period = tech_params.get('WEEKLY_MA_PERIOD', WEEKLY_MA_PERIOD)
@@ -1647,13 +1689,11 @@ def parameter_test(args):
         current_confirmation_weights = tech_params.get('CONFIRMATION_WEIGHTS', CONFIRMATION_WEIGHTS)
         current_use_trailing_stops = tech_params.get('USE_TRAILING_STOPS', USE_TRAILING_STOPS_DEFAULT)
         current_max_open_positions = tech_params.get('MAX_OPEN_POSITIONS', MAX_OPEN_POSITIONS)
+
+        param_array = np.array([[long_risk, long_reward, short_risk, short_reward, position_size]], dtype=np.float32)
         
-        # Prepare data (CPU path)
-        # The HAS_GPU logic for prepare_data was removed as prepare_data is CPU-bound.
-        # If parts of prepare_data or momentum were to be GPU-accelerated with CuPy,
-        # that logic would need to be within those functions, operating on CuPy arrays.
         df_prepared = prepare_data(
-            base_df_arg, # Pass the copied DataFrame
+            base_df_original.copy(),
             fast=current_fast_period,
             slow=current_slow_period,
             rsi_oversold=tech_params.get('RSI_OVERSOLD', RSI_OVERSOLD),
@@ -1661,6 +1701,38 @@ def parameter_test(args):
             devs=tech_params.get('DEVS', DEVS),
             weekly_ma_period_val=current_weekly_ma_period
         )
+
+        if HAS_GPU:
+            try:
+                # GPU path
+                results = _evaluate_parameters_batch_gpu(
+                    param_array,
+                    df_prepared['Close'].values,
+                    df_prepared[f"{current_fast_period}_ma"].values,
+                    df_prepared[f"{current_slow_period}_ma"].values
+                )
+                sharpe = float(results[0])
+                
+            except Exception as gpu_error:
+                print(f"GPU processing failed, falling back to CPU: {gpu_error}")
+                HAS_GPU = False
+                # Fall back to CPU evaluation
+                results = _evaluate_parameters_batch_cpu(
+                    param_array,
+                    df_prepared['Close'].values,
+                    df_prepared[f"{current_fast_period}_ma"].values,
+                    df_prepared[f"{current_slow_period}_ma"].values
+                )
+                sharpe = float(results[0])
+        else:
+            # CPU path
+            results = _evaluate_parameters_batch_cpu(
+                param_array,
+                df_prepared['Close'].values,
+                df_prepared[f"{current_fast_period}_ma"].values,
+                df_prepared[f"{current_slow_period}_ma"].values
+            )
+            sharpe = float(results[0])
         
         # Set up column names for moving averages
         fast_ma_col = f"{current_fast_period}_ma"
@@ -1695,29 +1767,22 @@ def parameter_test(args):
             'short_risk': short_risk,
             'short_reward': short_reward,
             'position_size': position_size,
-            'tech_params': tech_params, # Store the tech_params used for this run
+            'tech_params': tech_params,
             'win_rate': trade_stats.get('Win Rate', 0),
             'net_profit_pct': trade_stats.get('Net Profit (%)', -100),
             'max_drawdown': trade_stats.get('Max Drawdown (%)', 100),
-            'sharpe': trade_stats.get('Sharpe Ratio', -10), # Default to a low value if not found
+            'sharpe': trade_stats.get('Sharpe Ratio', -10),
             'profit_factor': trade_stats.get('Profit Factor', 0),
             'num_trades': trade_stats.get('Total Trades', 0)
         }
         
     except Exception as e:
-        # Log error details for the specific parameter set
         current_params_str = (
             f"long_risk={long_risk}, long_reward={long_reward}, "
             f"short_risk={short_risk}, short_reward={short_reward}, "
             f"pos_size={position_size}, tech_params_keys={list(tech_params.keys()) if tech_params else 'None'}"
         )
-        # Avoid printing the full tech_params dict if it's very large in logs
         print(f"Error testing parameters for {ticker if ticker else 'UnknownTicker'} ({current_params_str}): {e}")
-        # Consider logging the full traceback for detailed debugging if needed:
-        # import traceback
-        # print(traceback.format_exc())
-        
-        # Return a structure with default/failure values to avoid breaking the main loop
         return {
             'ticker': ticker if ticker else 'UnknownTicker',
             'long_risk': long_risk,
@@ -1729,7 +1794,7 @@ def parameter_test(args):
             'win_rate': 0.0,
             'net_profit_pct': -100.0,
             'max_drawdown': 100.0,
-            'sharpe': -10.0, # Ensure a valid numeric type for sorting/max
+            'sharpe': -10.0,
             'profit_factor': 0.0,
             'num_trades': 0
         }
