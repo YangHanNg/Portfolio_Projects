@@ -80,7 +80,7 @@ BB_LEN = 20
 DEVS = 2
 
 # Script Execution Defaults 
-OPTIMIZE_DEFAULT = True
+OPTIMIZE_DEFAULT = False
 VISUALIZE_BEST_DEFAULT = False
 OPTIMIZATION_TYPE_DEFAULT = 'basic'
 
@@ -792,11 +792,12 @@ class TradeManager:
         # Use the calculated stop for position sizing
         risk_per_share = abs(entry_params['price'] - initial_stop)
         max_risk = entry_params['portfolio_value'] * entry_params['risk']
-        shares_risk = np.floor(max_risk / max(risk_per_share, 1e-9))
+        # Ensure risk_per_share is not zero to avoid division by zero
+        shares_risk = np.floor(max_risk / max(risk_per_share, 1e-9)) if max(risk_per_share, 1e-9) > 0 else 0
         
         # Calculate position size based on risk and leverage
         max_exposure = entry_params['portfolio_value'] * entry_params['position_size'] * entry_params['leverage']
-        shares_leverage = np.floor(max_exposure / entry_params['price'])
+        shares_leverage = np.floor(max_exposure / entry_params['price']) if entry_params['price'] > 0 else 0
         
         share_amount = int(min(shares_risk, shares_leverage))
         
@@ -817,13 +818,15 @@ class TradeManager:
             'entry_price': entry_params['price'],
             'stop_loss': initial_stop,  # Use the calculated initial stop
             'take_profit': take_profit,
-            'position_size': (share_amount * entry_params['price']) / entry_params['portfolio_value'],
+            'position_size': (share_amount * entry_params['price']) / entry_params['portfolio_value'] if entry_params['portfolio_value'] > 0 else 0,
             'share_amount': share_amount,
             'highest_close_since_entry': entry_params['price'] if self.direction == 'Long' else np.nan,
             'lowest_close_since_entry': entry_params['price'] if self.direction == 'Short' else np.nan
         }]).astype(self.dtypes)
         
-        self.active_trades = pd.concat([self.active_trades, new_trade], ignore_index=True)
+        concatenated_trades = pd.concat([self.active_trades, new_trade], ignore_index=True)
+        self.active_trades = concatenated_trades.astype(self.dtypes)
+
         self.position_count += 1
         return True
     
@@ -974,41 +977,46 @@ class TradeManager:
         if self.active_trades.empty: 
             return
         
-        # Dynamic ATR multiplier based on ADX and volatility
-        atr_ratio = current_atr / current_price
+        current_atr_f32 = np.float32(current_atr)
+        safe_current_price = np.float32(current_price) if current_price != 0 else np.float32(1e-9)
+        atr_ratio = current_atr_f32 / safe_current_price
+        
         if adx_value > 30 and atr_ratio < 0.01:  # Strong trend, low vol
-            atr_multiplier = 4.0  # Give more room
+            atr_multiplier = np.float32(4.0)  # Give more room
         elif adx_value > 25:  # Moderate trend
-            atr_multiplier = 3.0
+            atr_multiplier = np.float32(3.0)
         else:  # Weak trend or high vol
-            atr_multiplier = 2.0
+            atr_multiplier = np.float32(2.0)
         
         if self.direction == 'Long':
             # Update highest prices seen
             self.active_trades.loc[:, 'highest_close_since_entry'] = np.maximum(
                 self.active_trades['highest_close_since_entry'].values, 
-                current_price
-            )
+                np.float32(current_price) # Ensure current_price is also float32 for comparison
+            ).astype(np.float32) # Explicitly cast the result
             # Calculate new stops with dynamic multiplier
-            new_stops = self.active_trades['highest_close_since_entry'].values - (atr_multiplier * current_atr)
+            new_stops = self.active_trades['highest_close_since_entry'].values - (atr_multiplier * current_atr_f32)
+            
             # Never move stops down for longs
             self.active_trades.loc[:, 'stop_loss'] = np.maximum(
                 new_stops, 
                 self.active_trades['stop_loss'].values
-            )
+            ).astype(np.float32) # Explicitly cast the final result to float32
         else:  # Short
             # Update lowest prices seen
             self.active_trades.loc[:, 'lowest_close_since_entry'] = np.minimum(
                 self.active_trades['lowest_close_since_entry'].values, 
-                current_price
-            )
+                np.float32(current_price) # Ensure current_price is also float32 for comparison
+            ).astype(np.float32) # Explicitly cast the result
+
             # Calculate new stops with dynamic multiplier
-            new_stops = self.active_trades['lowest_close_since_entry'].values + (atr_multiplier * current_atr)
+            new_stops = self.active_trades['lowest_close_since_entry'].values + (atr_multiplier * current_atr_f32)
+            
             # Never move stops up for shorts
             self.active_trades.loc[:, 'stop_loss'] = np.minimum(
                 new_stops, 
                 self.active_trades['stop_loss'].values
-            )
+            ).astype(np.float32) # Explicitly cast the final result to float32
 
     # ----------------------------------------------------------------------------------------------------------
 
@@ -1213,7 +1221,7 @@ def _random_parameter_sampling(param_lists, sample_size, num_params_before_weigh
         num_params_before_weights: Number of parameters in combo before scoring weights (specific to 'technical')
         optimization_type: String, 'basic' or 'technical'
         ticker: The ticker symbol string
-        base_df: The base DataFrame for the ticker
+        base_df: The base DataFrame for the ticker (passed by reference, copied in parameter_test)
     Returns:
         List of parameter combinations
     """
@@ -1294,13 +1302,15 @@ def _random_parameter_sampling(param_lists, sample_size, num_params_before_weigh
         if short_reward_val > 0 and short_risk_val >= short_reward_val: continue
         
         param_grid.append((
-            ticker, base_df.copy(),
+            ticker, base_df, # Pass base_df by reference; copy will be made in parameter_test
             long_risk_val, long_reward_val,
             short_risk_val, short_reward_val,
             pos_size_val, tech_params
         ))
         
     return list(param_grid)
+
+# --------------------------------------------------------------------------------------------------------------------------
 
 def _generate_parameter_grid(param_lists, num_params_before_weights, optimization_type, ticker, base_df):
     """
@@ -1310,7 +1320,7 @@ def _generate_parameter_grid(param_lists, num_params_before_weights, optimizatio
         num_params_before_weights: Number of parameters in combo before scoring weights (specific to 'technical')
         optimization_type: String, 'basic' or 'technical'
         ticker: The ticker symbol string.
-        base_df: The base DataFrame for the ticker.
+        base_df: The base DataFrame for the ticker (passed by reference, copied in parameter_test)
     Returns:
         List of parameter combination tuples.
     """
@@ -1377,14 +1387,13 @@ def _generate_parameter_grid(param_lists, num_params_before_weights, optimizatio
         if short_reward_val > 0 and short_risk_val >= short_reward_val: continue
         
         generated_params.append((
-            ticker, base_df.copy(),
+            ticker, base_df, # Pass base_df by reference; copy will be made in parameter_test
             long_risk_val, long_reward_val,
             short_risk_val, short_reward_val,
             pos_size_val, tech_params
         ))
         
     return list(generated_params)
-
 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -1482,29 +1491,23 @@ def optimize_parameters(ticker=TICKER,
     start_time = datetime.now()
     print(f"Testing {len(param_grid)} parameter combinations using multiprocessing...")
     
-    # Estimate time (optional, can be rough)
-    # seconds_per_test = 0.3 # Adjusted estimate
-    # total_cores = max(1, mp.cpu_count() - 1)
-    # estimated_seconds = len(param_grid) * seconds_per_test / total_cores
-    # estimated_time = timedelta(seconds=estimated_seconds)
-    # print(f"Estimated completion time: {estimated_time} (using {total_cores} cores, ~{seconds_per_test:.2f}s per test)")
     
-    results = []
+    results_list = [] # Renamed from results to avoid conflict with Numba results
     # Ensure parameter_test is defined and handles the tuple structure correctly
     with mp.Pool(processes=max(1, mp.cpu_count() - 2)) as pool: # Leave 2 cores free
-        results = list(tqdm(pool.imap_unordered(parameter_test, param_grid), total=len(param_grid), desc="Running Backtests"))
+        results_list = list(tqdm(pool.imap_unordered(parameter_test, param_grid), total=len(param_grid), desc="Running Backtests"))
     
-    if not results:
+    if not results_list:
         print("No results from parameter tests. Aborting.")
         return None, []
 
-    results = [r for r in results if r is not None and 'sharpe' in r and r['sharpe'] is not None and not np.isnan(r['sharpe'])]
-    if not results:
+    results_list = [r for r in results_list if r is not None and 'sharpe' in r and r['sharpe'] is not None and not np.isnan(r['sharpe'])]
+    if not results_list:
         print("All parameter tests failed or returned invalid/None/NaN Sharpe values. Aborting.")
         return None, []
         
-    best_result = max(results, key=lambda x: x['sharpe'])
-    sorted_results = sorted(results, key=lambda x: x['sharpe'], reverse=True)
+    best_result = max(results_list, key=lambda x: x['sharpe'])
+    sorted_results = sorted(results_list, key=lambda x: x['sharpe'], reverse=True)
     
     print("\nTop 5 Parameter Combinations:")
     
@@ -1528,13 +1531,13 @@ def optimize_parameters(ticker=TICKER,
     headers.extend(perf_headers)
     
     rows = []
-    for i, result in enumerate(sorted_results[:5]):
-        tech_p_res = result.get('tech_params', {}) # Ensure tech_params exists
+    for i, result_item in enumerate(sorted_results[:5]): # Renamed result to result_item
+        tech_p_res = result_item.get('tech_params', {}) # Ensure tech_params exists
         
         row_data = [
-            f"{result['long_risk']*100:.1f}%", f"{result['long_reward']*100:.1f}%",
-            f"{result['short_risk']*100:.1f}%", f"{result['short_reward']*100:.1f}%",
-            f"{result['position_size']*100:.1f}%", # This is % of portfolio per trade
+            f"{result_item['long_risk']*100:.1f}%", f"{result_item['long_reward']*100:.1f}%",
+            f"{result_item['short_risk']*100:.1f}%", f"{result_item['short_reward']*100:.1f}%",
+            f"{result_item['position_size']*100:.1f}%", # This is % of portfolio per trade
             f"{tech_p_res.get('USE_TRAILING_STOPS', USE_TRAILING_STOPS_DEFAULT)}",
             f"{tech_p_res.get('MAX_OPEN_POSITIONS', MAX_OPEN_POSITIONS)}",
         ]
@@ -1555,11 +1558,11 @@ def optimize_parameters(ticker=TICKER,
             ])
             
         row_data.extend([
-            f"{result.get('win_rate', 0):.1f}", 
-            f"{result.get('net_profit_pct', -100):.1f}",
-            f"{result.get('max_drawdown', 100):.1f}", 
-            f"{result.get('sharpe', -10):.2f}",
-            f"{result.get('num_trades', 0)}"
+            f"{result_item.get('win_rate', 0):.1f}", 
+            f"{result_item.get('net_profit_pct', -100):.1f}",
+            f"{result_item.get('max_drawdown', 100):.1f}", 
+            f"{result_item.get('sharpe', -10):.2f}",
+            f"{result_item.get('num_trades', 0)}"
         ])
         rows.append(row_data)
         
@@ -1619,21 +1622,24 @@ def optimize_parameters(ticker=TICKER,
 
 def parameter_test(args):
     """
-    GPU-accelerated parameter testing function that processes a single parameter combination.
+    Parameter testing function that processes a single parameter combination.
+    It's designed to be used with multiprocessing.
     
     Args:
-        args: Tuple containing (ticker, base_df, risk params, tech_params)
+        args: Tuple containing (ticker, base_df_original, long_risk, long_reward, 
+                               short_risk, short_reward, position_size, tech_params)
     
     Returns:
-        Dict containing test results and statistics
+        Dict containing test results and statistics, or None if an error occurs.
     """
-    ticker, base_df_arg, long_risk, long_reward, short_risk, short_reward, position_size, tech_params = args
+    ticker, base_df_original, long_risk, long_reward, short_risk, short_reward, position_size, tech_params = args
     
+    # It's crucial to work on a copy of the DataFrame in each process
+    # as prepare_data and other functions might modify it.
+    base_df_arg = base_df_original.copy()
+
     try:
-        # Initialize result storage
-        results = deque()
-        
-        # Extract parameters
+        # Extract parameters from tech_params, falling back to global defaults
         current_fast_period = tech_params.get('FAST', FAST)
         current_slow_period = tech_params.get('SLOW', SLOW)
         current_weekly_ma_period = tech_params.get('WEEKLY_MA_PERIOD', WEEKLY_MA_PERIOD)
@@ -1642,41 +1648,19 @@ def parameter_test(args):
         current_use_trailing_stops = tech_params.get('USE_TRAILING_STOPS', USE_TRAILING_STOPS_DEFAULT)
         current_max_open_positions = tech_params.get('MAX_OPEN_POSITIONS', MAX_OPEN_POSITIONS)
         
-        # Prepare data with GPU acceleration if available
-        if HAS_GPU:
-            # Convert to CuPy arrays for GPU processing
-            try:
-                df_gpu = cp.asarray(base_df_arg.values)
-                df_prepared = prepare_data(
-                    cp.asnumpy(df_gpu),  # Convert back to numpy for prepare_data
-                    fast=current_fast_period,
-                    slow=current_slow_period,
-                    rsi_oversold=tech_params.get('RSI_OVERSOLD', RSI_OVERSOLD),
-                    rsi_overbought=tech_params.get('RSI_OVERBOUGHT', RSI_OVERBOUGHT),
-                    devs=tech_params.get('DEVS', DEVS),
-                    weekly_ma_period_val=current_weekly_ma_period
-                )
-            except Exception as gpu_error:
-                print(f"GPU processing failed: {gpu_error}. Falling back to CPU.")
-                df_prepared = prepare_data(
-                    base_df_arg.copy(),
-                    fast=current_fast_period,
-                    slow=current_slow_period,
-                    rsi_oversold=tech_params.get('RSI_OVERSOLD', RSI_OVERSOLD),
-                    rsi_overbought=tech_params.get('RSI_OVERBOUGHT', RSI_OVERBOUGHT),
-                    devs=tech_params.get('DEVS', DEVS),
-                    weekly_ma_period_val=current_weekly_ma_period
-                )
-        else:
-            df_prepared = prepare_data(
-                base_df_arg.copy(),
-                fast=current_fast_period,
-                slow=current_slow_period,
-                rsi_oversold=tech_params.get('RSI_OVERSOLD', RSI_OVERSOLD),
-                rsi_overbought=tech_params.get('RSI_OVERBOUGHT', RSI_OVERBOUGHT),
-                devs=tech_params.get('DEVS', DEVS),
-                weekly_ma_period_val=current_weekly_ma_period
-            )
+        # Prepare data (CPU path)
+        # The HAS_GPU logic for prepare_data was removed as prepare_data is CPU-bound.
+        # If parts of prepare_data or momentum were to be GPU-accelerated with CuPy,
+        # that logic would need to be within those functions, operating on CuPy arrays.
+        df_prepared = prepare_data(
+            base_df_arg, # Pass the copied DataFrame
+            fast=current_fast_period,
+            slow=current_slow_period,
+            rsi_oversold=tech_params.get('RSI_OVERSOLD', RSI_OVERSOLD),
+            rsi_overbought=tech_params.get('RSI_OVERBOUGHT', RSI_OVERBOUGHT),
+            devs=tech_params.get('DEVS', DEVS),
+            weekly_ma_period_val=current_weekly_ma_period
+        )
         
         # Set up column names for moving averages
         fast_ma_col = f"{current_fast_period}_ma"
@@ -1711,25 +1695,29 @@ def parameter_test(args):
             'short_risk': short_risk,
             'short_reward': short_reward,
             'position_size': position_size,
-            'tech_params': tech_params,
+            'tech_params': tech_params, # Store the tech_params used for this run
             'win_rate': trade_stats.get('Win Rate', 0),
             'net_profit_pct': trade_stats.get('Net Profit (%)', -100),
             'max_drawdown': trade_stats.get('Max Drawdown (%)', 100),
-            'sharpe': trade_stats.get('Sharpe Ratio', -10),
+            'sharpe': trade_stats.get('Sharpe Ratio', -10), # Default to a low value if not found
             'profit_factor': trade_stats.get('Profit Factor', 0),
             'num_trades': trade_stats.get('Total Trades', 0)
         }
         
     except Exception as e:
-        # Log error details
+        # Log error details for the specific parameter set
         current_params_str = (
             f"long_risk={long_risk}, long_reward={long_reward}, "
             f"short_risk={short_risk}, short_reward={short_reward}, "
-            f"pos_size={position_size}, tech={tech_params}"
+            f"pos_size={position_size}, tech_params_keys={list(tech_params.keys()) if tech_params else 'None'}"
         )
+        # Avoid printing the full tech_params dict if it's very large in logs
         print(f"Error testing parameters for {ticker if ticker else 'UnknownTicker'} ({current_params_str}): {e}")
+        # Consider logging the full traceback for detailed debugging if needed:
+        # import traceback
+        # print(traceback.format_exc())
         
-        # Return default values
+        # Return a structure with default/failure values to avoid breaking the main loop
         return {
             'ticker': ticker if ticker else 'UnknownTicker',
             'long_risk': long_risk,
@@ -1741,7 +1729,7 @@ def parameter_test(args):
             'win_rate': 0.0,
             'net_profit_pct': -100.0,
             'max_drawdown': 100.0,
-            'sharpe': -10.0,
+            'sharpe': -10.0, # Ensure a valid numeric type for sorting/max
             'profit_factor': 0.0,
             'num_trades': 0
         }

@@ -1,0 +1,11 @@
+pandas
+numpy
+yfinance
+tabulate
+pandas-ta
+matplotlib
+seaborn
+numba
+tqdm
+cupy
+
