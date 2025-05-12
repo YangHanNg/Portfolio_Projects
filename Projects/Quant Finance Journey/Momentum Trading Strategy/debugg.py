@@ -7,16 +7,21 @@ import pandas_ta as ta
 from datetime import datetime, timedelta
 import multiprocessing as mp 
 import itertools
+import matplotlib as plt
+import seaborn as sns
 
 # --------------------------------------------------------------------------------------------------------------------------
 
 # Base parameters
 TICKER = ['SPY']
-INITIAL_CAPITAL = 10000.0
+INITIAL_CAPITAL = 100000.0
+LEVERAGE = 1.0 
+TRAILING_STOP_ATR_MULTIPLIER = 3.0
 
 # Moving average strategy parameters
 FAST = 20
 SLOW = 50
+WEEKLY_MA_PERIOD = 50
 
 # MACD strategy parameters
 MACD_FAST = 12
@@ -25,8 +30,8 @@ MACD_SPAN = 9
 
 # RSI strategy parameters
 RSI_LENGTH = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
+RSI_OVERBOUGHT = 75
+RSI_OVERSOLD = 35
 
 # MFI strategy parameters
 MFI_LENGTH = 14
@@ -38,23 +43,24 @@ BB_LEN = 20
 DEVS = 2
 
 # Risk & Reward
-DEFAULT_LONG_RISK = 0.02  # 5% risk per long trade
-DEFAULT_LONG_REWARD = 0.1  # 10% target profit per long trade
-DEFAULT_SHORT_RISK = 0.01  # 5% risk per short trade
-DEFAULT_SHORT_REWARD = 0.03  # 10% target profit per short trade
-DEFAULT_POSITION_SIZE = 0.8  # 10% of portfolio per trade
-MAX_OPEN_POSITIONS = 2  # Maximum number of concurrent open positions
+DEFAULT_LONG_RISK = 0.03  
+DEFAULT_LONG_REWARD = 0.06  
+DEFAULT_SHORT_RISK = 0.02  
+DEFAULT_SHORT_REWARD = 0.04  
+DEFAULT_POSITION_SIZE = 0.10  
+MAX_OPEN_POSITIONS = 3 
 
 TREND_STRONG = 1
 TREND_WEAK = 0.75
 ADX_THRESHOLD_DEFAULT = 25
-MIN_BUY_SCORE_DEFAULT = 2.5
-MIN_SELL_SCORE_DEFAULT = 5.5
-REQUIRE_CLOUD_DEFAULT = True # Default for Ichimoku cloud requirement in signals
+MIN_BUY_SCORE_DEFAULT = 3.0
+MIN_SELL_SCORE_DEFAULT = 5.0
+REQUIRE_CLOUD_DEFAULT = False
+USE_TRAILING_STOPS_DEFAULT = False
 
-# Script Execution Defaults
+# Script Execution Defaults 
 OPTIMIZE_DEFAULT = False
-VISUALIZE_BEST_DEFAULT = False # For optimize_parameters
+VISUALIZE_BEST_DEFAULT = False
 OPTIMIZATION_TYPE_DEFAULT = 'basic'
 
 # --------------------------------------------------------------------------------------------------------------------------
@@ -104,6 +110,24 @@ def indicators(df, fast=None, slow=None, rsi_oversold=None, rsi_overbought=None,
         
         for i in range(slow-1, len(close_np)):
             slow_ma[i] = np.mean(close_np[i-slow+1:i+1])
+
+        # Volume Moving Average (Volume_MA20)
+        volume_ma20 = np.empty_like(volume_np, dtype=float) # Ensure float for mean
+        volume_ma20_period = 20
+        volume_ma20[:volume_ma20_period-1] = np.nan
+        for i in range(volume_ma20_period-1, len(volume_np)):
+            volume_ma20[i] = np.mean(volume_np[i-volume_ma20_period+1:i+1])
+
+        # Weekly Moving Average (Weekly_MA50)
+        # Ensure the DataFrame index is a DatetimeIndex
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+        
+        df_weekly = df['Close'].resample('W').last() # Resample to weekly, take last close of week
+        weekly_ma50_series = df_weekly.rolling(window=WEEKLY_MA_PERIOD, min_periods=1).mean() # Calculate 50-week MA
+        # Map weekly MA back to daily data, forward fill to handle NaNs within the week
+        df[f'Weekly_MA{WEEKLY_MA_PERIOD}'] = weekly_ma50_series.reindex(df.index, method='ffill')
+        weekly_ma50_np = df[f'Weekly_MA{WEEKLY_MA_PERIOD}'].values
         
         # MACD - using NumPy for EMA calculation
         alpha_fast = 2.0 / (MACD_FAST + 1)
@@ -323,6 +347,8 @@ def indicators(df, fast=None, slow=None, rsi_oversold=None, rsi_overbought=None,
         # Apply calculated arrays back to DataFrame
         df.loc[:, f'{fast}_ma'] = fast_ma
         df.loc[:, f'{slow}_ma'] = slow_ma
+        df.loc[:, 'Volume_MA20'] = volume_ma20 # Added Volume_MA20
+        df[f'Weekly_MA{WEEKLY_MA_PERIOD}'] = weekly_ma50_np
         df.loc[:, 'EMA_fast'] = ema_fast
         df.loc[:, 'EMA_slow'] = ema_slow
         df.loc[:, 'MACD'] = macd
@@ -366,440 +392,299 @@ def momentum(df,
              long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
              short_risk=DEFAULT_SHORT_RISK, short_reward=DEFAULT_SHORT_REWARD,
              position_size=DEFAULT_POSITION_SIZE, 
-             max_positions=MAX_OPEN_POSITIONS, risk_free_rate=0.04):
+             max_positions=MAX_OPEN_POSITIONS, risk_free_rate=0.04,
+             leverage_ratio=LEVERAGE, use_trailing_stops=USE_TRAILING_STOPS_DEFAULT):
     """
-    Execute the momentum strategy with optimized NumPy operations
-    
-    Uses pre-allocation, vectorized operations and minimizes object creation
+    Execute the momentum strategy with optimized NumPy operations,
+    staggered exits, volume confirmation, trailing stops, and parallel long/short trading.
     """
-    # Check if DataFrame is empty after preprocessing
     if len(df) == 0:
         print("Warning: Empty dataframe provided to momentum. Returning empty results.")
         empty_equity = pd.Series(dtype='float64')
         empty_returns = pd.Series(dtype='float64')
         return [], {
-            'Total Trades': 0,
-            'Win Rate': 0,
-            'Net Profit (%)': 0,
-            'Profit Factor': 0,
-            'Expectancy (%)': 0,
-            'Max Drawdown (%)': 0,
-            'Annualized Return (%)': 0,
-            'Sharpe Ratio': 0,
-            'Sortino Ratio': 0
+            'Total Trades': 0, 'Win Rate': 0, 'Net Profit (%)': 0, 'Profit Factor': 0,
+            'Expectancy (%)': 0, 'Max Drawdown (%)': 0, 'Annualized Return (%)': 0,
+            'Sharpe Ratio': 0, 'Sortino Ratio': 0
         }, empty_equity, empty_returns
     
-    # Pre-extract data from dataframe to avoid repeated access
     df_index = df.index
     close_values = df['Close'].values
 
-    # Create param column names once
     param_cols = [f'{FAST}_ma', f'{SLOW}_ma', 'RSI', 'MFI', 'Close', 'Lower_Band',
                  'Upper_Band', 'ATR', 'ADX', 'SAR', 'ROC', 'Tenkan_sen',
                  'Kijun_sen', 'Senkou_span_A', 'Senkou_span_B']
     
-    # Check columns once before the loop
-    missing_cols = [col for col in param_cols if col not in df.columns]
-    if missing_cols:
-        print(f"Missing required columns: {missing_cols}")
-        print("Available columns:", df.columns.tolist())
+    weekly_ma_col_name = f'Weekly_MA{WEEKLY_MA_PERIOD}'
+    missing_cols_check = [col for col in param_cols + ['Volume_MA20', weekly_ma_col_name, 'ADX'] if col not in df.columns]
+    if missing_cols_check:
+        print(f"Warning: Missing columns for momentum strategy: {missing_cols_check}")
     
-    # Initialize tracking variables
-    initial_capital = INITIAL_CAPITAL
-    available_capital = initial_capital
-    portfolio_value = initial_capital
 
-    # Pre-allocate arrays for better performance
-    equity = pd.Series(initial_capital, index=df_index, dtype='float64')
+    initial_capital = INITIAL_CAPITAL
+    portfolio_value = initial_capital # This will track realized equity
+
+    # Item 3: Separate Realized and Unrealized PnL Tracking
+    realized_equity_curve = pd.Series(initial_capital, index=df_index, dtype='float64')
+    unrealized_pnl_curve = pd.Series(0.0, index=df_index, dtype='float64')
+    total_equity_curve = pd.Series(initial_capital, index=df_index, dtype='float64') # For reporting and stats
+
     trade_returns = pd.Series(0.0, index=df_index)
     
-    # Define dtypes for active trade DataFrames
     common_trade_columns_dtypes = {
-        'entry_date': 'datetime64[ns]',
-        'multiplier': 'int64',
-        'entry_price': 'float64',
-        'stop_loss': 'float64',
-        'take_profit': 'float64', # Pandas handles None as np.nan in float columns
-        'position_size': 'float64',
-        'share_amount': 'int64'
+        'entry_date': 'datetime64[ns]', 'multiplier': 'int64', 'entry_price': 'float64',
+        'stop_loss': 'float64', 'take_profit': 'float64', 'position_size': 'float64',
+        'share_amount': 'int64', 
+        'highest_close_since_entry': 'float64', 
+        'lowest_close_since_entry': 'float64'   
     }
 
-    # Use DataFrames for active trades (more efficient than appending to lists)
     active_long_trades = pd.DataFrame(columns=common_trade_columns_dtypes.keys()).astype(common_trade_columns_dtypes)
     active_short_trades = pd.DataFrame(columns=common_trade_columns_dtypes.keys()).astype(common_trade_columns_dtypes)
     
-    # Initialize position counters
     long_positions = short_positions = 0
+    trade_log, wins, losses, lengths = [], [], [], []
 
-    # Trade tracking with pre-allocation for better append performance
-    trade_log = []
-    # Pre-allocate with reasonable initial capacity
-    wins = []
-    losses = []
-    lengths = []
+    prev_buy_signal, prev_sell_signal = False, False
+    
+    empty_df = pd.DataFrame(columns=common_trade_columns_dtypes.keys()).astype(common_trade_columns_dtypes)
 
-    prev_buy_signal = False
-    prev_sell_signal = False
-    prev_buy_score = 0.0
-    prev_sell_score = 0.0
-
-    # Main loop - start from 1 to avoid index error on i-1
     for i in range(1, len(df)):
         current_date = df_index[i]
         current_price = close_values[i]
-        
-        # Default equity to previous day (will be updated if trades exit)
-        equity.iloc[i] = equity.iloc[i-1]
-        
-        # Signal calculation for current bar
-        try:
-            if missing_cols:
-                buy_signal, sell_signal = False, False
-                buy_score, sell_score = 0.0, 0.0
-            else:
-                # Build signal parameters efficiently
-                params = []
-                chikou_span_added = False
-                
-                for col in param_cols:
-                    try:
-                        val = df[col].iloc[i]
-                        params.append(val)
-                        
-                        # Add Chikou span reference after Close
-                        if col == 'Close' and i-26 >= 0 and not chikou_span_added:
-                            params.append(df[col].iloc[i-26])
-                            chikou_span_added = True
-                    except Exception as e:
-                        print(f"Error accessing {col} at index {i}: {e}")
-                        params.append(None)
-                
-                # Ensure params has correct length (16 parameters expected)
-                while len(params) < 16:
-                    params.append(None)
-                
-                # Signal calculation with error handling
+        current_atr = df['ATR'].iloc[i] if 'ATR' in df.columns and not pd.isna(df['ATR'].iloc[i]) else 0.01 # Default ATR if missing
+        current_adx = df['ADX'].iloc[i] if 'ADX' in df.columns and not pd.isna(df['ADX'].iloc[i]) else 25 # Default ADX
+
+        # Calculate current signals for bar 'i'
+        current_buy_signal, current_sell_signal, _, _ = False, False, 0.0, 0.0
+        if not missing_cols_check: 
+            params = []
+            chikou_span_added = False
+            for col_name in param_cols:
                 try:
-                    current_buy_signal, current_sell_signal, current_buy_score, current_sell_score = signals(*params)
-                except Exception as e:
-                    current_buy_signal, current_sell_signal = False, False
-                    current_buy_score, current_sell_score = 0.0, 0.0
-
-                # Use previous signals to determine trade logic (shifted execution)
-                buy_signal = prev_buy_signal
-                sell_signal = prev_sell_signal
-                buy_score = prev_buy_score
-                sell_score = prev_sell_score
-
-                # Update previous signal for the next bar
-                prev_buy_signal = current_buy_signal
-                prev_sell_signal = current_sell_signal
-                prev_buy_score = current_buy_score
-                prev_sell_score = current_sell_score
-
-        except Exception as e:
-            print(f"Error in signal preparation at index {i}: {e}")
-            current_buy_signal, current_sell_signal = False, False
-            current_buy_score, current_sell_score = 0.0, 0.0
+                    val = df[col_name].iloc[i]
+                    params.append(val)
+                    if col_name == 'Close' and i - 26 >= 0 and not chikou_span_added:
+                        params.append(df[col_name].iloc[i - 26]) 
+                        chikou_span_added = True
+                except KeyError: 
+                    params.append(None) 
             
-        # Using a cached empty DataFrame for resetting - more efficient than creating new ones
-        empty_df = pd.DataFrame(columns=common_trade_columns_dtypes.keys()).astype(common_trade_columns_dtypes)
+            while len(params) < 16: 
+                params.append(None)
             
-        # --- Exit short positions on buy signal ---
-        if buy_signal and not active_short_trades.empty:
-            # Process all short exits in batch where possible
-            for idx, trade in active_short_trades.iterrows():
-                portfolio_value, available_capital, trade_log, wins, losses, lengths, trade_returns = trade_exit(
-                    trade['entry_date'], current_date, 
-                    (trade['multiplier'], trade['entry_price'], trade['stop_loss'], 
-                     trade['take_profit'], trade['position_size'], trade['share_amount']),
-                    'Short', current_price, portfolio_value, available_capital, 
-                    trade_log, wins, losses, lengths, trade_returns, 'Buy Signal'
-                )
+            try:
+                current_buy_signal, current_sell_signal, _, _ = signals(*params)
+            except Exception as e:
+                pass 
+
+        buy_signal = prev_buy_signal
+        sell_signal = prev_sell_signal
+
+        # Item 1: Trailing Stop Logic: Whipsaws in Choppy Markets
+        if use_trailing_stops:
+            atr_multiplier = 2.0 if current_adx < 25 else 4.0 # Tighter in weak/choppy trends
             
-            # Reset short trades efficiently
-            active_short_trades = empty_df.copy()  # More efficient than creating new DataFrame
-            short_positions = 0
-            equity.iloc[i] = portfolio_value  # Update equity after exits
-
-        # --- Exit long positions on sell signal ---
-        if sell_signal and not active_long_trades.empty:
-            for idx, trade in active_long_trades.iterrows():
-                portfolio_value, available_capital, trade_log, wins, losses, lengths, trade_returns = trade_exit(
-                    trade['entry_date'], current_date, 
-                    (trade['multiplier'], trade['entry_price'], trade['stop_loss'], 
-                     trade['take_profit'], trade['position_size'], trade['share_amount']),
-                    'Long', current_price, portfolio_value, available_capital, 
-                    trade_log, wins, losses, lengths, trade_returns, 'Sell Signal'
-                )
+            if not active_long_trades.empty:
+                for idx, trade_row in active_long_trades.iterrows():
+                    current_highest = max(trade_row['highest_close_since_entry'], current_price)
+                    active_long_trades.at[idx, 'highest_close_since_entry'] = current_highest
+                    new_trailing_stop = current_highest - atr_multiplier * current_atr
+                    active_long_trades.at[idx, 'stop_loss'] = max(new_trailing_stop, trade_row['stop_loss'])
             
-            # Reset long trades efficiently
-            active_long_trades = empty_df.copy()
-            long_positions = 0
-            equity.iloc[i] = portfolio_value  # Update equity after exits
+            if not active_short_trades.empty:
+                for idx, trade_row in active_short_trades.iterrows():
+                    current_lowest = min(trade_row.get('lowest_close_since_entry', current_price), current_price)
+                    active_short_trades.at[idx, 'lowest_close_since_entry'] = current_lowest
+                    new_trailing_stop = current_lowest + atr_multiplier * current_atr
+                    active_short_trades.at[idx, 'stop_loss'] = min(new_trailing_stop, trade_row['stop_loss'])
 
-            # --- Enter short if allowed ---
-            if long_positions == 0 and short_positions < max_positions and available_capital > 0:
-                trade_data = trade_entry('Short', current_price, df['ATR'].iloc[i], 
-                                            portfolio_value, available_capital, position_size, short_risk, short_reward)
-                if trade_data:
-                    (entry_price, stop_loss, take_profit, trade_position_size, share_amount) = trade_data
-                    
-                    # Create trade entry efficiently
-                    new_trade = pd.DataFrame({
-                        'entry_date': [current_date],
-                        'multiplier': [-1],
-                        'entry_price': [entry_price],
-                        'stop_loss': [stop_loss],
-                        'take_profit': [take_profit],
-                        'position_size': [trade_position_size],
-                        'share_amount': [share_amount]
-                    })
-                    
-                    # More efficient than pd.concat for single row additions
-                    active_short_trades = pd.concat([active_short_trades, new_trade], ignore_index=True)
-                    
-                    available_capital -= share_amount * entry_price
-                    short_positions += 1
-                    trade_log.append(create_trade_log(current_date, 'Short', entry_price, trade_position_size, share_amount))
-
-        # --- Check stop losses and take profits (Long) - vectorized approach ---
+        # --- Process Long Exits ---
         if not active_long_trades.empty:
-            # Avoid unnecessary resets and use numpy for conditions
-            active_long_trades = active_long_trades.reset_index(drop=True)
-            
-            # Use NumPy arrays for vectorized comparison (faster than pandas)
-            long_prices = active_long_trades['entry_price'].values
-            long_stops = active_long_trades['stop_loss'].values
-            long_targets = active_long_trades['take_profit'].values
-            
-            # Calculate exit conditions vectorized
-            take_profit_exits = ~np.isnan(long_targets) & (current_price >= long_targets)
-            stop_loss_exits = current_price <= long_stops
-            exits = take_profit_exits | stop_loss_exits
-            
-            if np.any(exits):
-                # Get indices of exiting trades
-                exit_indices = np.where(exits)[0]
-                
-                # Process exits
-                exit_trades = active_long_trades.iloc[exit_indices].copy()
-                for idx, trade in exit_trades.iterrows():
-                    exit_reason = 'Take Profit' if take_profit_exits[trade.name] else 'Stop Loss'
-                    
-                    portfolio_value, available_capital, trade_log, wins, losses, lengths, trade_returns = trade_exit(
-                        trade['entry_date'], current_date, 
-                        (trade['multiplier'], trade['entry_price'], trade['stop_loss'], 
-                         trade['take_profit'], trade['position_size'], trade['share_amount']),
-                        'Long', current_price, portfolio_value, available_capital, 
-                        trade_log, wins, losses, lengths, trade_returns, exit_reason
-                    )
-                    long_positions -= 1
-                
-                # Keep non-exiting trades efficiently
-                active_long_trades = active_long_trades[~exits].reset_index(drop=True)
-                equity.iloc[i] = portfolio_value  # Update equity after exits
+            trades_to_keep_long_list = []
+            for idx, trade_row in active_long_trades.iterrows():
+                trade = trade_row.to_dict() 
+                exited_fully_this_iteration = False
+                exit_reason_this_iteration = None
 
-        # --- Check stop losses and take profits (Short) - vectorized approach ---
-        if not active_short_trades.empty:
-            # Calculate exit conditions vectorized
-            active_short_trades = active_short_trades.reset_index(drop=True)
-            
-            # Use NumPy arrays for vectorized comparison
-            short_prices = active_short_trades['entry_price'].values
-            short_stops = active_short_trades['stop_loss'].values
-            short_targets = active_short_trades['take_profit'].values
-            
-            # Calculate exit conditions vectorized
-            take_profit_exits = ~np.isnan(short_targets) & (current_price <= short_targets)
-            stop_loss_exits = current_price >= short_stops
-            exits = take_profit_exits | stop_loss_exits
-            
-            if np.any(exits):
-                # Get indices of exiting trades
-                exit_indices = np.where(exits)[0]
+                if sell_signal: # This is prev_sell_signal
+                    is_trend_still_valid = (current_adx > 25 and current_price > df[f'{SLOW}_ma'].iloc[i]) if f'{SLOW}_ma' in df.columns else False
+                    if is_trend_still_valid: 
+                        partial_shares_to_exit = int(trade['share_amount'] * 0.3)
+                        if partial_shares_to_exit > 0:
+                            realized_pnl_from_exit, _, _, _, _, _, _, _ = trade_exit(
+                                trade['entry_date'], current_date,
+                                (trade['multiplier'], trade['entry_price'], trade['stop_loss'], trade['take_profit'], 
+                                 trade['position_size'], partial_shares_to_exit), 
+                                'Long', current_price, portfolio_value, 0, 
+                                trade_log, wins, losses, lengths, trade_returns, 'Partial Profit (Sell Signal)'
+                            )
+                            portfolio_value += realized_pnl_from_exit 
+                            trade['share_amount'] -= partial_shares_to_exit
+                            if trade['share_amount'] <= 0:
+                                exited_fully_this_iteration = True
+                                long_positions -= 1
+                    else: 
+                        realized_pnl_from_exit, _, _, _, _, _, _, _ = trade_exit(
+                            trade['entry_date'], current_date,
+                            (trade['multiplier'], trade['entry_price'], trade['stop_loss'], trade['take_profit'],
+                             trade['position_size'], trade['share_amount']), 
+                            'Long', current_price, portfolio_value, 0,
+                            trade_log, wins, losses, lengths, trade_returns, 'Full Exit (Sell Signal - Trend Broken)'
+                        )
+                        portfolio_value += realized_pnl_from_exit
+                        exited_fully_this_iteration = True
+                        long_positions -= 1
                 
-                # Process exits
-                exit_trades = active_short_trades.iloc[exit_indices].copy()
-                for idx, trade in exit_trades.iterrows():
-                    exit_reason = 'Take Profit' if take_profit_exits[trade.name] else 'Stop Loss'
+                if not exited_fully_this_iteration:
+                    if current_price <= trade['stop_loss']:
+                        exit_reason_this_iteration = 'Stop Loss'
+                    elif trade['take_profit'] is not None and current_price >= trade['take_profit']:
+                        exit_reason_this_iteration = 'Take Profit'
                     
-                    portfolio_value, available_capital, trade_log, wins, losses, lengths, trade_returns = trade_exit(
-                        trade['entry_date'], current_date, 
-                        (trade['multiplier'], trade['entry_price'], trade['stop_loss'], 
-                         trade['take_profit'], trade['position_size'], trade['share_amount']),
-                        'Short', current_price, portfolio_value, available_capital, 
-                        trade_log, wins, losses, lengths, trade_returns, exit_reason
+                    if exit_reason_this_iteration:
+                        realized_pnl_from_exit, _, _, _, _, _, _, _ = trade_exit(
+                            trade['entry_date'], current_date,
+                            (trade['multiplier'], trade['entry_price'], trade['stop_loss'], trade['take_profit'],
+                             trade['position_size'], trade['share_amount']), 
+                            'Long', current_price, portfolio_value, 0,
+                            trade_log, wins, losses, lengths, trade_returns, exit_reason_this_iteration
+                        )
+                        portfolio_value += realized_pnl_from_exit
+                        exited_fully_this_iteration = True
+                        long_positions -= 1
+                
+                if not exited_fully_this_iteration and trade['share_amount'] > 0:
+                    trades_to_keep_long_list.append(trade)
+            
+            active_long_trades = pd.DataFrame(trades_to_keep_long_list).astype(common_trade_columns_dtypes) if trades_to_keep_long_list else empty_df.copy()
+
+        # --- Process Short Exits ---
+        if not active_short_trades.empty:
+            trades_to_keep_short_list = []
+            for idx, trade_row in active_short_trades.iterrows():
+                trade = trade_row.to_dict()
+                exited_fully_this_iteration = False
+                exit_reason_this_iteration = None
+                
+                # Consider buy_signal (prev_buy_signal) for exiting shorts
+                if buy_signal: # This is prev_buy_signal
+                    # Add logic if shorts should be exited on a counter-signal (buy_signal)
+                    # For now, we'll assume SL/TP are primary for shorts, or end of simulation
+                    pass
+
+
+                if not exit_reason_this_iteration: 
+                    if current_price >= trade['stop_loss']: 
+                        exit_reason_this_iteration = 'Stop Loss'
+                    elif trade['take_profit'] is not None and current_price <= trade['take_profit']: 
+                        exit_reason_this_iteration = 'Take Profit'
+
+                if exit_reason_this_iteration:
+                    realized_pnl_from_exit, _, _, _, _, _, _, _ = trade_exit(
+                        trade['entry_date'], current_date,
+                        (trade['multiplier'], trade['entry_price'], trade['stop_loss'], trade['take_profit'],
+                         trade['position_size'], trade['share_amount']),
+                        'Short', current_price, portfolio_value, 0,
+                        trade_log, wins, losses, lengths, trade_returns, exit_reason_this_iteration
                     )
+                    portfolio_value += realized_pnl_from_exit
+                    exited_fully_this_iteration = True
                     short_positions -= 1
                 
-                # Keep non-exiting trades
-                active_short_trades = active_short_trades[~exits].reset_index(drop=True)
-                equity.iloc[i] = portfolio_value  # Update equity after exits
+                if not exited_fully_this_iteration and trade['share_amount'] > 0:
+                    trades_to_keep_short_list.append(trade)
 
-        # --- Enter long if buy signal ---
-        if buy_signal and long_positions < max_positions and available_capital > 0:
-            trade_data = trade_entry('Long', current_price, df['ATR'].iloc[i], 
-                                        portfolio_value, available_capital, position_size, long_risk, long_reward)
+            active_short_trades = pd.DataFrame(trades_to_keep_short_list).astype(common_trade_columns_dtypes) if trades_to_keep_short_list else empty_df.copy()
+
+        # --- Enter Long ---
+        volume_confirmed = df['Volume'].iloc[i] > df['Volume_MA20'].iloc[i] if 'Volume_MA20' in df.columns and not pd.isna(df['Volume_MA20'].iloc[i]) and not pd.isna(df['Volume'].iloc[i]) else False
+        if buy_signal and volume_confirmed and long_positions < max_positions and portfolio_value > 0: 
+            trade_data = trade_entry('Long', current_price, current_atr, portfolio_value, 
+                        position_size, long_risk, long_reward,
+                        leverage_ratio, current_adx)
             if trade_data:
-                (entry_price, stop_loss, take_profit, trade_position_size, share_amount) = trade_data
-                
-                # Create trade efficiently
-                new_trade = pd.DataFrame({
-                    'entry_date': [current_date],
-                    'multiplier': [1],
-                    'entry_price': [entry_price],
-                    'stop_loss': [stop_loss],
-                    'take_profit': [take_profit],
-                    'position_size': [trade_position_size],
-                    'share_amount': [share_amount]
-                })
-                
-                # Use efficient DataFrame concatenation
-                active_long_trades = pd.concat([active_long_trades, new_trade], ignore_index=True)
-                
-                available_capital -= share_amount * entry_price
+                entry_price, stop_loss, take_profit, trade_pos_size_ratio, share_amount = trade_data
+                new_trade_dict = {
+                    'entry_date': current_date, 'multiplier': 1, 'entry_price': entry_price,
+                    'stop_loss': stop_loss, 'take_profit': take_profit, 
+                    'position_size': trade_pos_size_ratio, 'share_amount': share_amount,
+                    'highest_close_since_entry': entry_price,
+                    'lowest_close_since_entry': np.nan 
+                }
+                active_long_trades = pd.concat([active_long_trades, pd.DataFrame([new_trade_dict])], ignore_index=True)
                 long_positions += 1
-                trade_log.append(create_trade_log(current_date, 'Long', entry_price, trade_position_size, share_amount))
 
-    # --- Final position exit ---
-    # Only process if we have data
+        # --- Sell-Signal Filtering & Enter Short ---
+        filtered_sell_signal = sell_signal # sell_signal is prev_sell_signal
+        if sell_signal: 
+            # Item 2: Weekly MA Filter: Delayed Reactions
+            if weekly_ma_col_name in df.columns and not pd.isna(df[weekly_ma_col_name].iloc[i]):
+                current_weekly_ma = df[weekly_ma_col_name].iloc[i]
+                # Ensure we don't go out of bounds for previous weekly MA
+                prev_weekly_ma = df[weekly_ma_col_name].iloc[i-1] if i > 0 and not pd.isna(df[weekly_ma_col_name].iloc[i-1]) else current_weekly_ma
+                
+                weekly_uptrend_momentum = (current_price > current_weekly_ma) and (current_weekly_ma > prev_weekly_ma)
+                if weekly_uptrend_momentum:
+                    filtered_sell_signal = False 
+                    
+        if filtered_sell_signal and short_positions < max_positions and portfolio_value > 0:
+            trade_data = trade_entry('Short', current_price, current_atr, portfolio_value,
+                        position_size, short_risk, short_reward,
+                        leverage_ratio, current_adx)
+            if trade_data:
+                entry_price, stop_loss, take_profit, trade_pos_size_ratio, share_amount = trade_data
+                new_trade_dict = {
+                    'entry_date': current_date, 'multiplier': -1, 'entry_price': entry_price,
+                    'stop_loss': stop_loss, 'take_profit': take_profit,
+                    'position_size': trade_pos_size_ratio, 'share_amount': share_amount,
+                    'highest_close_since_entry': np.nan, 
+                    'lowest_close_since_entry': entry_price 
+                }
+                active_short_trades = pd.concat([active_short_trades, pd.DataFrame([new_trade_dict])], ignore_index=True)
+                short_positions += 1
+        
+        # Item 3: Unrealized PnL Tracking & Equity Update
+        realized_equity_curve.iloc[i] = portfolio_value # portfolio_value is realized equity after exits for day i
+
+        current_unrealized_pnl_scalar = 0.0
+        if not active_long_trades.empty:
+            for _, trade in active_long_trades.iterrows():
+                current_unrealized_pnl_scalar += (current_price - trade['entry_price']) * trade['share_amount']
+        if not active_short_trades.empty:
+            for _, trade in active_short_trades.iterrows():
+                current_unrealized_pnl_scalar += (trade['entry_price'] - current_price) * trade['share_amount']
+        
+        unrealized_pnl_curve.iloc[i] = current_unrealized_pnl_scalar
+        total_equity_curve.iloc[i] = realized_equity_curve.iloc[i] + unrealized_pnl_curve.iloc[i]
+
+        prev_buy_signal = current_buy_signal
+        prev_sell_signal = current_sell_signal
+
     if len(df_index) > 0:
         final_date = df_index[-1]
         final_price = close_values[-1]
+        final_realized_portfolio_value = portfolio_value 
+        
+        for trades_df, direction_str in [(active_long_trades, 'Long'), (active_short_trades, 'Short')]:
+            if not trades_df.empty:
+                for idx, trade in trades_df.iterrows():
+                    pnl_on_exit, _, _, _, _, _, _, _ = trade_exit(
+                        trade['entry_date'], final_date,
+                        (trade['multiplier'], trade['entry_price'], trade['stop_loss'], trade['take_profit'],
+                         trade['position_size'], trade['share_amount']),
+                        direction_str, final_price, final_realized_portfolio_value, 0, 
+                        trade_log, wins, losses, lengths, trade_returns, 'End of Simulation'
+                    )
+                    final_realized_portfolio_value += pnl_on_exit 
+        
+        if len(total_equity_curve) > 0: 
+            realized_equity_curve.iloc[-1] = final_realized_portfolio_value
+            unrealized_pnl_curve.iloc[-1] = 0.0 # All positions closed
+            total_equity_curve.iloc[-1] = final_realized_portfolio_value
 
-        # Close remaining positions efficiently
-        if not active_long_trades.empty:
-            for idx, trade in active_long_trades.iterrows():
-                portfolio_value, available_capital, trade_log, wins, losses, lengths, trade_returns = trade_exit(
-                    trade['entry_date'], final_date, 
-                    (trade['multiplier'], trade['entry_price'], trade['stop_loss'], 
-                     trade['take_profit'], trade['position_size'], trade['share_amount']),
-                    'Long', final_price, portfolio_value, available_capital, 
-                    trade_log, wins, losses, lengths, trade_returns, 'End of Simulation'
-                )
-
-        if not active_short_trades.empty:
-            for idx, trade in active_short_trades.iterrows():
-                portfolio_value, available_capital, trade_log, wins, losses, lengths, trade_returns = trade_exit(
-                    trade['entry_date'], final_date, 
-                    (trade['multiplier'], trade['entry_price'], trade['stop_loss'], 
-                     trade['take_profit'], trade['position_size'], trade['share_amount']),
-                    'Short', final_price, portfolio_value, available_capital, 
-                    trade_log, wins, losses, lengths, trade_returns, 'End of Simulation'
-                )
-
-        # Update final equity value
-        if len(equity) > 0:
-            equity.iloc[-1] = portfolio_value
-
-    # Compile statistics
-    trade_stats = trade_statistics(equity, trade_log, wins, losses, risk_free_rate)
-
-    return trade_log, trade_stats, equity, trade_returns
-
-# --------------------------------------------------------------------------------------------------------------------------
-
-def test(df, TICKER, 
-         long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
-         short_risk=DEFAULT_SHORT_RISK, short_reward=DEFAULT_SHORT_REWARD,
-         position_size=DEFAULT_POSITION_SIZE):
-    # Make a copy to avoid SettingWithCopyWarning
-    df = df.copy()
-    
-    # Ensure all required columns exist
-    df = ensure_required_columns(df)
-    
-    # Run backtest with enhanced trade tracking
-    trade_log, trade_stats, portfolio_equity, trade_returns = momentum(
-        df, 
-        long_risk=long_risk, long_reward=long_reward,
-        short_risk=short_risk, short_reward=short_reward,
-        position_size=position_size, 
-        max_positions=MAX_OPEN_POSITIONS, 
-        risk_free_rate=0.04
-    )
-    
-    # Add asset returns to dataframe for comparison
-    df.loc[:, 'Asset_Returns'] = df['Close'].pct_change().fillna(0).cumsum()
-    
-    # Convert equity curve to returns for comparison
-    df.loc[:, 'Strategy_Returns'] = (portfolio_equity / portfolio_equity.iloc[0] - 1)
-    
-    # Calculate additional metrics - Fix: ensure buy_hold_return is a scalar
-    # Convert to scalar by using .iloc to access first and last elements
-    first_close = df['Close'].iloc[0] 
-    last_close = df['Close'].iloc[-1]
-    buy_hold_return = ((last_close / first_close) - 1) * 100
-    
-    peak_equity = portfolio_equity.max()
-    exposure_time = ((df.index[-1] - df.index[0]).days)
-    
-    # Find the best and worst trades
-    if trade_log:
-        best_trade_pct = max([t['PnL'] for t in trade_log if t['PnL'] is not None]) / portfolio_equity.iloc[0] * 100 if trade_log else 0
-        worst_trade_pct = min([t['PnL'] for t in trade_log if t['PnL'] is not None]) / portfolio_equity.iloc[0] * 100 if trade_log else 0
-        avg_trade_pct = sum([t['PnL'] for t in trade_log if t['PnL'] is not None]) / len(trade_log) / portfolio_equity.iloc[0] * 100 if trade_log else 0
-        max_duration = max([t['Duration'] for t in trade_log if t['Duration'] is not None]) if trade_log else 0
-        avg_duration = sum([t['Duration'] for t in trade_log if t['Duration'] is not None]) / len(trade_log) if trade_log else 0
-    else:
-        best_trade_pct = worst_trade_pct = avg_trade_pct = max_duration = avg_duration = 0
-
-    # Print summary stats with right alignment
-    print(f"\n=== {TICKER} STRATEGY SUMMARY ===")
-    print(f"Long Risk: {long_risk*100:.1f}% | Long Reward: {long_reward*100:.1f}%")
-    print(f"Short Risk: {short_risk*100:.1f}% | Short Reward: {short_reward*100:.1f}%")
-    print(f"Position Size: {position_size*100:.1f}%")
-    
-    # Format financial metrics with tabulate
-    metrics = [
-        ["Starting Capital [$]", f"{portfolio_equity.iloc[0]:,.2f}"],
-        ["Ending Capital [$]", f"{portfolio_equity.iloc[-1]:,.2f}"],
-        ["Start", f"{df.index[0].strftime('%Y-%m-%d')}"],
-        ["End", f"{df.index[-1].strftime('%Y-%m-%d')}"],
-        ["Duration [days]", f"{exposure_time}"],
-        ["Equity Final [$]", f"{portfolio_equity.iloc[-1]:,.2f}"],
-        ["Equity Peak [$]", f"{peak_equity:,.2f}"],
-        ["Return [%]", f"{trade_stats['Net Profit (%)']:.2f}"],
-        ["Buy & Hold Return [%]", f"{buy_hold_return:.2f}"],  # Now we have a scalar value
-        ["Annual Return [%]", f"{trade_stats['Annualized Return (%)']:.2f}"],
-        ["Sharpe Ratio", f"{trade_stats['Sharpe Ratio']:.2f}"],
-        ["Sortino Ratio", f"{trade_stats['Sortino Ratio']:.2f}"],
-        ["Max. Drawdown [%]", f"{trade_stats['Max Drawdown (%)']:.2f}"],
-    ]
-    
-    print(tabulate(metrics, tablefmt="simple", colalign=("left", "right")))
-    
-    # Print trade summary with tabulate
-    print(f"\n=== {TICKER} TRADE SUMMARY ===")
-    trade_metrics = [
-        ["Total Trades", f"{trade_stats['Total Trades']:.2f}"],
-        ["Win Rate [%]", f"{trade_stats['Win Rate']:.2f}"],
-        ["Best Trade [%]", f"{best_trade_pct:.2f}"],
-        ["Worst Trade [%]", f"{worst_trade_pct:.2f}"],
-        ["Avg. Trade [%]", f"{avg_trade_pct:.2f}"],
-        ["Max. Trade Duration [days]", f"{max_duration}"],
-        ["Avg. Trade Duration [days]", f"{avg_duration:.1f}"],
-        ["Profit Factor", f"{trade_stats['Profit Factor']:.2f}"],
-        ["Expectancy [%]", f"{trade_stats['Expectancy (%)']:.2f}"]
-    ]
-    
-    print(tabulate(trade_metrics, tablefmt="simple", colalign=("left", "right")))
-    
-    # Create visualizations
-    # create_backtest_charts(df, portfolio_equity, trade_stats, trade_log, TICKER)
-    
-    return {
-        'TICKER': TICKER,
-        'df': df,
-        'equity': portfolio_equity,
-        'trade_stats': trade_stats,
-        'trade_log': trade_log,
-        'long_risk': long_risk, # Store for reference
-        'long_reward': long_reward,
-        'short_risk': short_risk,
-        'short_reward': short_reward
-    }
+    trade_stats = trade_statistics(total_equity_curve, trade_log, wins, losses, risk_free_rate) # Use total_equity_curve for stats
+    return trade_log, trade_stats, total_equity_curve, trade_returns
 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -853,8 +738,8 @@ def signals(fast_ma, slow_ma, rsi, mfi, close, lower_band, upper_band, atr, adx,
         conditions = {
             'ma_buy': fast_ma > slow_ma,
             'ma_sell': fast_ma < slow_ma,
-            'rsi_buy': rsi < 30,  
-            'rsi_sell': rsi > 70,  
+            'rsi_buy': (rsi > 40) & (rsi < 65),  
+            'rsi_sell': rsi > 75,  
             'bb_buy': close < lower_band,
             'bb_sell': close > upper_band,
             'mfi_buy': mfi < 30,  
@@ -934,16 +819,20 @@ def signals(fast_ma, slow_ma, rsi, mfi, close, lower_band, upper_band, atr, adx,
         min_sell_score = min_sell_score
         # Final signal determination (simplified logic)
         if require_cloud:
-            buy_signal = (buy_score >= min_buy_score) and (conditions['strong_trend'] or conditions['above_cloud'] or conditions['tenkan_kijun_buy'])
-            sell_signal = (sell_score >= min_sell_score) and (conditions['strong_trend'] or conditions['below_cloud'])
+            buy_signal = (buy_score >= min_buy_score) and (
+                sum([conditions['ma_buy'], conditions['rsi_buy'], conditions['tenkan_kijun_buy']]) >= 2
+            )
+            sell_signal = (sell_score >= min_sell_score) and (
+                sum([conditions['ma_sell'], conditions['rsi_sell'], conditions['below_cloud']]) >= 2
+            )
         else:
-            buy_signal = buy_score >= min_buy_score  
-            sell_signal = sell_score >= min_sell_score 
+            buy_signal = (buy_score >= min_buy_score) and (
+                sum([conditions['ma_buy'], conditions['rsi_buy'], conditions['tenkan_kijun_buy']]) >= 2
+            )  
+            sell_signal = (sell_score >= min_sell_score) and (
+                sum([conditions['ma_sell'], conditions['rsi_sell'], conditions['below_cloud']]) >= 2
+            ) 
             
-        # Print signal results for debugging
-        # if buy_signal or sell_signal:
-             # print(f"Signal generated: buy={buy_signal}, sell={sell_signal}, buy_score={buy_score:.2f}, sell_score={sell_score:.2f}")
-
     else:
         # Array case - pick just the first element for simplicity
         # Most of your logic can remain, but let's just make sure we return scalar values
@@ -981,49 +870,109 @@ def signals(fast_ma, slow_ma, rsi, mfi, close, lower_band, upper_band, atr, adx,
 
 # --------------------------------------------------------------------------------------------------------------------------
 
-def trade_exit(entry_date, exit_date, trade_info, direction, exit_price,
-               portfolio_value, available_capital, trade_log, wins, losses, lengths, trade_returns, reason):
+def trade_entry(direction, price, atr, portfolio_value, 
+               configured_position_size, 
+               configured_risk, 
+               configured_reward=None,
+               leverage_ratio=1.0,
+               adx_value=None,  # New: Dynamic sizing based on trend strength
+               use_trailing_stops=True):  # New: Flag for trailing stops
     """
-    Process a trade exit with optimized NumPy operations
+    Enhanced trade entry with:
+    - Dynamic position sizing (scales up in strong trends)
+    - Volatility-adjusted stops (3x ATR for stronger trends)
+    - Smarter take-profit logic (adaptive risk-reward)
+    """
+    # --- 1. Dynamic Position Sizing ---
+    # Scale up position size in strong trends (ADX > 30)
+    position_size_multiplier = 1.5 if (adx_value is not None and adx_value > 30) else 1.0
+    scaled_position_size = configured_position_size * position_size_multiplier
+
+    # --- 2. Calculate Risk Parameters ---
+    # Wider stops in strong trends (3x ATR), tighter in weak trends (1.5x ATR)
+    atr_multiplier = 2.0 if (adx_value is not None and adx_value > 30) else 4.0
     
-    Returns updated portfolio metrics after closing a position
+    if direction == 'Long':
+        stop_loss_price = price - atr * atr_multiplier
+        risk_per_share = price - stop_loss_price
+    else:  # Short
+        stop_loss_price = price + atr * atr_multiplier
+        risk_per_share = stop_loss_price - price
+
+    if risk_per_share <= 0:
+        return None
+
+    # --- 3. Share Calculation (Risk vs. Leverage Constraints) ---
+    max_monetary_risk = portfolio_value * configured_risk
+    num_shares_risk = np.floor(max_monetary_risk / risk_per_share)
+
+    base_exposure = portfolio_value * scaled_position_size
+    max_notional = base_exposure * leverage_ratio
+    num_shares_leverage = np.floor(max_notional / price)
+
+    share_amount = min(num_shares_risk, num_shares_leverage)
+    if share_amount <= 0:
+        return None
+
+    # --- 4. Adaptive Take-Profit ---
+    if configured_reward is not None:
+        # Dynamic R:R - wider targets in strong trends
+        reward_multiplier = 3.0 if (adx_value is not None and adx_value > 30) else 2.0
+        take_profit_distance = risk_per_share * reward_multiplier
+        
+        if direction == 'Long':
+            take_profit = price + take_profit_distance
+        else:
+            take_profit = price - take_profit_distance
+    else:
+        take_profit = None
+
+    # --- 5. Return Trade Data ---
+    actual_notional = share_amount * price
+    exposure_ratio = actual_notional / portfolio_value
+
+    return price, stop_loss_price, take_profit, exposure_ratio, share_amount
+
+# --------------------------------------------------------------------------------------------------------------------------
+
+def trade_exit(entry_date, exit_date, trade_info, direction, exit_price,
+               current_portfolio_value_before_exit, # Renamed for clarity
+               available_capital_dummy, # This is not really used for PnL calculation here
+               trade_log, wins, losses, lengths, trade_returns, reason):
     """
-    # Validate trade_info format
+    Process a trade exit.
+    Returns PnL of this specific trade, and updates shared lists (trade_log, wins, etc.).
+    """
     if not isinstance(trade_info, (list, tuple)) or len(trade_info) < 5:
         print(f"Error: Invalid trade_info format. Expected tuple/list with 5+ elements, got {type(trade_info)} with {len(trade_info) if hasattr(trade_info, '__len__') else 'unknown'} elements.")
-        return portfolio_value, available_capital, trade_log, wins, losses, lengths, trade_returns
+        # Return 0 PnL and unchanged lists if error
+        return 0.0, current_portfolio_value_before_exit, available_capital_dummy, trade_log, wins, losses, lengths, trade_returns
     
-    # Efficient unpacking with direct indexing (faster than multiple unpacking operations)
     trade_multiplier = trade_info[0]
     entry_price = trade_info[1]
-    stop_loss = trade_info[2]
-    take_profit = trade_info[3] if len(trade_info) > 3 and trade_info[3] is not None else None
-    position_size = trade_info[-2]
+    # stop_loss = trade_info[2] # Not directly used in PnL calc here
+    # take_profit = trade_info[3] if len(trade_info) > 3 and trade_info[3] is not None else None # Not directly used
+    # position_size = trade_info[-2] # Not directly used
     share_amount = trade_info[-1]
 
-    # Calculate profit and loss using a conditional expression
     is_long = direction == 'Long'
     pnl = (exit_price - entry_price) * share_amount if is_long else (entry_price - exit_price) * share_amount
 
-    # Update capital (no NumPy needed, simple scalar operations)
-    available_capital += (share_amount * exit_price)
-    portfolio_value += pnl
+    # available_capital would be updated by: available_capital += (share_amount * exit_price)
+    # But since we are only returning PnL, we don't update it here directly.
+    # The main momentum loop will update its 'portfolio_value' (realized equity) using this pnl.
 
-    # Track trade metrics
     duration = (exit_date - entry_date).days
     lengths.append(duration)
 
-    # Efficient win/loss tracking
     if pnl > 0:
         wins.append(pnl)
     else:
         losses.append(pnl)
 
-    # Update trade returns - keep pandas series indexing for date lookup
     if exit_date in trade_returns.index:
         trade_returns.loc[exit_date] += pnl
     
-    # Create trade log entry
     trade_log.append({
         'Entry Date': entry_date,
         'Exit Date': exit_date,
@@ -1036,49 +985,8 @@ def trade_exit(entry_date, exit_date, trade_info, direction, exit_price,
         'Exit Reason': reason
     })
 
-    return portfolio_value, available_capital, trade_log, wins, losses, lengths, trade_returns
-
-# --------------------------------------------------------------------------------------------------------------------------
-
-def trade_entry(direction, price, atr, portfolio_value, available_capital, position_size, risk, reward=None):
-    """
-    Calculate trade entry parameters with optimized operations
-    
-    Returns entry parameters for a new trade, or None if the trade is invalid
-    """
-    # Calculate position sizing using vectorized operations
-    risk_amount = risk * portfolio_value
-    trade_position_size = min(position_size, available_capital / portfolio_value)
-    
-    # Add debugging
-    #print(f"Trade entry - direction: {direction}, price: {price:.2f}, ATR: {atr:.2f}")
-    #print(f"Portfolio value: ${portfolio_value:.2f}, Available: ${available_capital:.2f}")
-    #print(f"Position size: {trade_position_size:.4f} (capped at {position_size:.4f})")
-    
-    # Use NumPy's floor division for share calculation (faster than int conversion)
-    share_amount = np.floor((trade_position_size * portfolio_value) / float(price)).astype(np.int64)
-    
-    #if share_amount == 0:
-        #print("Trade rejected: Share amount is zero")
-        #return None
-
-    # Use a conditional expression for stop_loss
-    is_long = direction == 'Long'
-    stop_loss = price - atr * 1.5 if is_long else price + atr * 1.5
-                         
-    # Handle optional reward parameter
-    if reward is not None:
-        take_profit = price + atr * 2 if is_long else price - atr * 2
-    else:
-        take_profit = None
-
-    # Direction validation (unchanged, already optimal)
-    if direction not in ('Long', 'Short'):
-        print(f"Trade rejected: Invalid direction '{direction}'")
-        return None
-
-    # print(f"Trade accepted: {share_amount} shares at ${price:.2f}, stop: ${stop_loss:.2f}")
-    return price, stop_loss, take_profit, trade_position_size, share_amount
+    # Return the PnL of this trade, and the other lists/values as they were passed or updated
+    return pnl, current_portfolio_value_before_exit, available_capital_dummy, trade_log, wins, losses, lengths, trade_returns
 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -1616,6 +1524,193 @@ def parameter_test(args): # Modified to accept a single 'args' tuple
 
 # --------------------------------------------------------------------------------------------------------------------------
 
+def test(df, TICKER, 
+         long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
+         short_risk=DEFAULT_SHORT_RISK, short_reward=DEFAULT_SHORT_REWARD,
+         position_size=DEFAULT_POSITION_SIZE, use_trailing_stops=USE_TRAILING_STOPS_DEFAULT):
+    # Make a copy to avoid SettingWithCopyWarning
+    df = df.copy()
+    
+    # Ensure all required columns exist
+    df = ensure_required_columns(df)
+    
+    # Run backtest with enhanced trade tracking
+    trade_log, trade_stats, portfolio_equity, trade_returns = momentum(
+        df, 
+        long_risk=long_risk, long_reward=long_reward,
+        short_risk=short_risk, short_reward=short_reward,
+        position_size=position_size, 
+        max_positions=MAX_OPEN_POSITIONS, 
+        risk_free_rate=0.04
+    )
+    
+    # Add asset returns to dataframe for comparison
+    df.loc[:, 'Asset_Returns'] = df['Close'].pct_change().fillna(0).cumsum()
+    
+    # Convert equity curve to returns for comparison
+    df.loc[:, 'Strategy_Returns'] = (portfolio_equity / portfolio_equity.iloc[0] - 1)
+    
+    # Calculate additional metrics - Fix: ensure buy_hold_return is a scalar
+    # Convert to scalar by using .iloc to access first and last elements
+    first_close = df['Close'].iloc[0] 
+    last_close = df['Close'].iloc[-1]
+    buy_hold_return = ((last_close / first_close) - 1) * 100
+    
+    peak_equity = portfolio_equity.max()
+    exposure_time = ((df.index[-1] - df.index[0]).days)
+    
+    # Find the best and worst trades
+    if trade_log:
+        best_trade_pct = max([t['PnL'] for t in trade_log if t['PnL'] is not None]) / portfolio_equity.iloc[0] * 100 if trade_log else 0
+        worst_trade_pct = min([t['PnL'] for t in trade_log if t['PnL'] is not None]) / portfolio_equity.iloc[0] * 100 if trade_log else 0
+        avg_trade_pct = sum([t['PnL'] for t in trade_log if t['PnL'] is not None]) / len(trade_log) / portfolio_equity.iloc[0] * 100 if trade_log else 0
+        max_duration = max([t['Duration'] for t in trade_log if t['Duration'] is not None]) if trade_log else 0
+        avg_duration = sum([t['Duration'] for t in trade_log if t['Duration'] is not None]) / len(trade_log) if trade_log else 0
+    else:
+        best_trade_pct = worst_trade_pct = avg_trade_pct = max_duration = avg_duration = 0
+
+    # Print summary stats with right alignment
+    print(f"\n=== {TICKER} STRATEGY SUMMARY ===")
+    print(f"Long Risk: {long_risk*100:.1f}% | Long Reward: {long_reward*100:.1f}%")
+    print(f"Short Risk: {short_risk*100:.1f}% | Short Reward: {short_reward*100:.1f}%")
+    print(f"Position Size: {position_size*100:.1f}%")
+    print(f"Use Trailing Stops: {use_trailing_stops}")
+    
+    # Format financial metrics with tabulate
+    metrics = [
+        ["Starting Capital [$]", f"{portfolio_equity.iloc[0]:,.2f}"],
+        ["Ending Capital [$]", f"{portfolio_equity.iloc[-1]:,.2f}"],
+        ["Start", f"{df.index[0].strftime('%Y-%m-%d')}"],
+        ["End", f"{df.index[-1].strftime('%Y-%m-%d')}"],
+        ["Duration [days]", f"{exposure_time}"],
+        ["Equity Final [$]", f"{portfolio_equity.iloc[-1]:,.2f}"],
+        ["Equity Peak [$]", f"{peak_equity:,.2f}"],
+        ["Return [%]", f"{trade_stats['Net Profit (%)']:.2f}"],
+        ["Buy & Hold Return [%]", f"{buy_hold_return:.2f}"],  # Now we have a scalar value
+        ["Annual Return [%]", f"{trade_stats['Annualized Return (%)']:.2f}"],
+        ["Sharpe Ratio", f"{trade_stats['Sharpe Ratio']:.2f}"],
+        ["Sortino Ratio", f"{trade_stats['Sortino Ratio']:.2f}"],
+        ["Max. Drawdown [%]", f"{trade_stats['Max Drawdown (%)']:.2f}"],
+    ]
+    
+    print(tabulate(metrics, tablefmt="simple", colalign=("left", "right")))
+    
+    # Print trade summary with tabulate
+    print(f"\n=== {TICKER} TRADE SUMMARY ===")
+    trade_metrics = [
+        ["Total Trades", f"{trade_stats['Total Trades']:.2f}"],
+        ["Win Rate [%]", f"{trade_stats['Win Rate']:.2f}"],
+        ["Best Trade [%]", f"{best_trade_pct:.2f}"],
+        ["Worst Trade [%]", f"{worst_trade_pct:.2f}"],
+        ["Avg. Trade [%]", f"{avg_trade_pct:.2f}"],
+        ["Max. Trade Duration [days]", f"{max_duration}"],
+        ["Avg. Trade Duration [days]", f"{avg_duration:.1f}"],
+        ["Profit Factor", f"{trade_stats['Profit Factor']:.2f}"],
+        ["Expectancy [%]", f"{trade_stats['Expectancy (%)']:.2f}"]
+    ]
+    
+    print(tabulate(trade_metrics, tablefmt="simple", colalign=("left", "right")))
+    
+    # Create visualizations
+    # create_backtest_charts(df, portfolio_equity, trade_stats, trade_log, TICKER)
+    
+    return {
+        'TICKER': TICKER,
+        'df': df,
+        'equity': portfolio_equity,
+        'trade_stats': trade_stats,
+        'trade_log': trade_log,
+        'long_risk': long_risk, # Store for reference
+        'long_reward': long_reward,
+        'short_risk': short_risk,
+        'short_reward': short_reward
+    }
+
+# --------------------------------------------------------------------------------------------------------------------------
+
+def create_backtest_charts(df, equity, trade_stats, trade_log, ticker):
+    """Create visualization charts for the backtest results"""
+    # Set style for plots
+    plt.style.use('fivethirtyeight')
+    
+    # Create a 2x2 subplot figure
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+    fig.suptitle(f'Strategy Backtest Results for {ticker}', fontsize=16)
+    
+    # Plot 1: Equity Curve vs Buy & Hold
+    ax1 = axes[0, 0]
+    asset_returns = df['Close'] / df['Close'].iloc[0]
+    equity_norm = equity / equity.iloc[0]
+    
+    ax1.plot(df.index, asset_returns, 'b-', label=f'{ticker} Buy & Hold')
+    ax1.plot(df.index, equity_norm, 'g-', label='Strategy Equity')
+    
+    # Add buy and sell markers if available
+    buys = [t for t in trade_log if t['Direction'] == 'Long']
+    sells = [t for t in trade_log if t['Direction'] == 'Short']
+    
+    for trade in buys:
+        if trade['Entry Date'] in df.index:
+            ax1.scatter(trade['Entry Date'], asset_returns.loc[trade['Entry Date']], 
+                      marker='^', color='green', s=100, alpha=0.7)
+    
+    for trade in sells:
+        if trade['Entry Date'] in df.index:
+            ax1.scatter(trade['Entry Date'], asset_returns.loc[trade['Entry Date']], 
+                      marker='v', color='red', s=100, alpha=0.7)
+            
+    ax1.set_title('Equity Curve vs Buy & Hold')
+    ax1.legend()
+    ax1.grid(True)
+    
+    # Plot 2: Drawdown
+    ax2 = axes[0, 1]
+    running_max = equity.cummax()
+    drawdown = ((equity - running_max) / running_max) * 100
+    
+    ax2.fill_between(df.index, drawdown, 0, color='red', alpha=0.3)
+    ax2.set_title('Strategy Drawdown (%)')
+    ax2.set_ylabel('Drawdown %')
+    ax2.grid(True)
+    
+    # Plot 3: Trade Returns Distribution
+    ax3 = axes[1, 0]
+    all_returns = [t['PnL'] for t in trade_log if t['PnL'] is not None]
+    if all_returns:
+        sns.histplot(all_returns, kde=True, ax=ax3, color='blue')
+        ax3.axvline(0, color='r', linestyle='--')
+        ax3.set_title('Trade Returns Distribution')
+        ax3.set_xlabel('Profit/Loss ($)')
+    else:
+        ax3.text(0.5, 0.5, 'No trade data available', ha='center', va='center')
+    
+    # Plot 4: Key Performance Metrics
+    ax4 = axes[1, 1]
+    metrics = [
+        f"Total Trades: {trade_stats['Total Trades']}",
+        f"Win Rate: {trade_stats['Win Rate']:.2f}%",
+        f"Net Profit: {trade_stats['Net Profit (%)']:.2f}%",
+        f"Max Drawdown: {trade_stats['Max Drawdown (%)']:.2f}%",
+        f"Sharpe Ratio: {trade_stats['Sharpe Ratio']:.2f}",
+        f"Profit Factor: {trade_stats['Profit Factor']:.2f}",
+        f"Annualized Return: {trade_stats['Annualized Return (%)']:.2f}%"
+    ]
+    
+    y_pos = range(len(metrics))
+    ax4.set_yticks(y_pos)
+    ax4.set_yticklabels(metrics)
+    ax4.set_title('Key Performance Metrics')
+    ax4.set_xlim([0, 1])  # Used only for spacing
+    ax4.set_xticks([])  # Hide x-axis
+    ax4.grid(False)
+    
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.92)
+    
+    return fig
+
+# --------------------------------------------------------------------------------------------------------------------------
+
 def main(optimize=OPTIMIZE_DEFAULT):
     # Get data with caching
     # print(f"Loading data for {TICKER}...")
@@ -1657,161 +1752,11 @@ def main(optimize=OPTIMIZE_DEFAULT):
             long_reward=DEFAULT_LONG_REWARD, 
             short_risk=DEFAULT_SHORT_RISK,
             short_reward=DEFAULT_SHORT_REWARD,
-            position_size=DEFAULT_POSITION_SIZE
+            position_size=DEFAULT_POSITION_SIZE,
+            use_trailing_stops=USE_TRAILING_STOPS_DEFAULT # Pass default here
         )
     
     return result
 
 if __name__ == "__main__":
     main()
-
-def trade_entry(direction, price, atr, portfolio_value, 
-                # available_capital, # This might be removed or its role changed
-                configured_position_size, # e.g., DEFAULT_POSITION_SIZE
-                configured_risk,          # e.g., DEFAULT_LONG_RISK
-                configured_reward=None,
-                leverage_ratio=1.0):      # New parameter from global LEVERAGE
-    """
-    Calculate trade entry parameters with optimized operations, considering leverage.
-    
-    Returns entry parameters for a new trade, or None if the trade is invalid
-    """
-    # 1. Calculate maximum capital to risk in currency terms (based on actual portfolio_value)
-    max_monetary_risk = portfolio_value * configured_risk
-
-    # 2. Determine stop-loss price based on ATR (current method)
-    if direction == 'Long':
-        stop_loss_price = price - atr * 1.5 
-        risk_per_share = price - stop_loss_price
-    else:  # Short
-        stop_loss_price = price + atr * 1.5
-        risk_per_share = stop_loss_price - price
-
-    if risk_per_share <= 0:
-        # print(f"Trade rejected: ATR stop loss invalid (Price: {price}, ATR SL: {stop_loss_price})")
-        return None
-
-    # 3. Calculate number of shares based on max_monetary_risk and risk_per_share
-    num_shares_based_on_risk_limit = np.floor(max_monetary_risk / risk_per_share)
-
-    if num_shares_based_on_risk_limit <= 0:
-        # print(f"Trade rejected: Zero shares based on risk limit (Max $: {max_monetary_risk}, Risk/Share: {risk_per_share})")
-        return None
-        
-    # 4. Calculate max notional value based on configured_position_size and leverage_ratio
-    # configured_position_size is the fraction of portfolio_value for base exposure
-    base_exposure_value = portfolio_value * configured_position_size
-    max_notional_value_allowed_by_leverage = base_exposure_value * leverage_ratio
-    num_shares_based_on_leverage_cap = np.floor(max_notional_value_allowed_by_leverage / price)
-
-    if num_shares_based_on_leverage_cap <= 0:
-        # print(f"Trade rejected: Zero shares based on leverage cap")
-        return None
-
-    # 5. Final share_amount is the minimum of the two constraints
-    share_amount = min(num_shares_based_on_risk_limit, num_shares_based_on_leverage_cap)
-
-    if share_amount == 0:
-        # print("Trade rejected: Final share amount is zero.")
-        return None
-
-    # 6. Determine take_profit (current ATR-based method or could be R:R based)
-    if configured_reward is not None:
-        # Example of R:R based take profit (ensure configured_reward is the R multiple)
-        # take_profit_distance = risk_per_share * configured_reward 
-        # if direction == 'Long':
-        #     take_profit = price + take_profit_distance
-        # else:
-        #     take_profit = price - take_profit_distance
-        # Using current ATR method for simplicity:
-        if direction == 'Long':
-            take_profit = price + atr * 2 
-        else:
-            take_profit = price - atr * 2
-    else:
-        take_profit = None
-        
-    # 7. The 'trade_position_size' to be logged/returned should reflect the actual notional exposure relative to portfolio_value
-    actual_notional_value = share_amount * price
-    # This value can be > 1.0 if leverage is used
-    effective_trade_exposure_ratio = actual_notional_value / portfolio_value 
-
-    return price, stop_loss_price, take_profit, effective_trade_exposure_ratio, share_amount
-
-def momentum(df, 
-             long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
-             short_risk=DEFAULT_SHORT_RISK, short_reward=DEFAULT_SHORT_REWARD,
-             position_size=DEFAULT_POSITION_SIZE, 
-             max_positions=MAX_OPEN_POSITIONS, risk_free_rate=0.04,
-             leverage_ratio=LEVERAGE): # Added leverage_ratio, defaulting to global
-    """
-    Execute the momentum strategy with optimized NumPy operations
-    
-    Uses pre-allocation, vectorized operations and minimizes object creation
-    """
-// ...existing code...
-# Initialize tracking variables
-    initial_capital = INITIAL_CAPITAL
-    # available_capital = initial_capital # Role of available_capital changes with leverage
-    portfolio_value = initial_capital
-    # We will use portfolio_value as the primary check for ability to trade.
-    # available_capital might represent free cash/margin, but let's simplify.
-
-// ...existing code...
-        # --- Enter short if allowed ---
-        # Check portfolio_value > 0 (or a minimum equity threshold) instead of available_capital
-        if long_positions == 0 and short_positions < max_positions and portfolio_value > 0: # Changed available_capital check
-            trade_data = trade_entry('Short', current_price, df['ATR'].iloc[i], 
-                                        portfolio_value, # Pass portfolio_value
-                                        position_size, short_risk, short_reward, # position_size is configured_position_size
-                                        leverage_ratio=leverage_ratio) # Pass leverage
-            if trade_data:
-                (entry_price, stop_loss, take_profit, trade_position_size_ratio, share_amount) = trade_data
-                
-                # Create trade entry efficiently
-                new_trade = pd.DataFrame({
-                    'entry_date': [current_date],
-                    'multiplier': [-1],
-                    'entry_price': [entry_price],
-                    'stop_loss': [stop_loss],
-                    'take_profit': [take_profit],
-                    'position_size': [trade_position_size_ratio], # Log the effective exposure ratio
-                    'share_amount': [share_amount]
-                })
-                
-                active_short_trades = pd.concat([active_short_trades, new_trade], ignore_index=True)
-                
-                # available_capital -= share_amount * entry_price # This line is removed/reconsidered for leverage
-                                                            # P&L will directly affect portfolio_value on exit.
-                                                            # Margin would be deducted in a real scenario.
-                short_positions += 1
-                trade_log.append(create_trade_log(current_date, 'Short', entry_price, trade_position_size_ratio, share_amount))
-// ...existing code...
-    # --- Enter long if buy signal ---
-    # Check portfolio_value > 0 (or a minimum equity threshold)
-    if buy_signal and long_positions < max_positions and portfolio_value > 0: # Changed available_capital check
-        trade_data = trade_entry('Long', current_price, df['ATR'].iloc[i], 
-                                    portfolio_value, # Pass portfolio_value
-                                    position_size, long_risk, long_reward, # position_size is configured_position_size
-                                    leverage_ratio=leverage_ratio) # Pass leverage
-        if trade_data:
-            (entry_price, stop_loss, take_profit, trade_position_size_ratio, share_amount) = trade_data
-            
-            # Create trade efficiently
-            new_trade = pd.DataFrame({
-                'entry_date': [current_date],
-                'multiplier': [1],
-                'entry_price': [entry_price],
-                'stop_loss': [stop_loss],
-                'take_profit': [take_profit],
-                'position_size': [trade_position_size_ratio], # Log the effective exposure ratio
-                'share_amount': [share_amount]
-            })
-            
-            active_long_trades = pd.concat([active_long_trades, new_trade], ignore_index=True)
-            
-            # available_capital -= share_amount * entry_price # This line is removed/reconsidered
-            long_positions += 1
-            trade_log.append(create_trade_log(current_date, 'Long', entry_price, trade_position_size_ratio, share_amount))
-
-            return
