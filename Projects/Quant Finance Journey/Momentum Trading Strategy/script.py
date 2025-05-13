@@ -15,15 +15,7 @@ from numba import jit
 from tqdm import tqdm
 import optuna
 from functools import partial  # Add missing import for partial
-try:
-    import cupy as cp
-    cp.cuda.runtime.getDeviceCount()
-    HAS_GPU = True
-    print("GPU acceleration enabled")
-except Exception as e:
-    HAS_GPU = False
-    print(f"GPU acceleration not available: {e}")
-    print("Using CPU only")
+import cupy as cp
 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -79,7 +71,7 @@ CONFIRMATION_WEIGHTS = {
 }
 
 # Base parameters
-TICKER = ['SPY']
+TICKER = ['PLTR']
 INITIAL_CAPITAL = 100000.0
 LEVERAGE = 1.0 
 
