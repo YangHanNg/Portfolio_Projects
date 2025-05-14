@@ -7,54 +7,47 @@ from tabulate import tabulate
 import pandas_ta as ta 
 from datetime import datetime, timedelta
 import multiprocessing as mp 
-import itertools
-import matplotlib.pyplot as plt  # Fix matplotlib import
-import seaborn as sns
 from collections import deque
 from numba import jit
 from tqdm import tqdm
 import optuna
 from functools import partial  # Add missing import for partial
 import cupy as cp
+import traceback
 
 # First, add new optimization direction constants
 OPTIMIZATION_DIRECTIONS = {
     'sharpe': 'maximize',
     'profit_factor': 'maximize',
-    'expectancy': 'maximize',
+    'returns': 'maximize',
     'max_drawdown': 'minimize',
-    'combined': 'maximize'  # For weighted combinations
 }
 
 # Add weight configuration for multi-objective optimization
 OBJECTIVE_WEIGHTS = {
-    'sharpe': 0.4,        # 40% weight for Sharpe ratio
-    'profit_factor': 0.3, # 30% weight for Profit Factor
-    'expectancy': 0.3     # 30% weight for Expectancy
+    'sharpe': 0.25,        # 40% weight for Sharpe ratio
+    'profit_factor': 0.25, # 30% weight for Profit Factor
+    'returns': 0.25,     # 30% weight for Returns
+    'max_drawdown': 0.25   # 10% weight for Max Drawdown
 }
 
 # Trade Management
 ADX_THRESHOLD_DEFAULT = 15
 MIN_BUY_SCORE_DEFAULT = 2.0
 MIN_SELL_SCORE_DEFAULT = 5.0
-REQUIRE_CLOUD_DEFAULT = True
-USE_TRAILING_STOPS_DEFAULT = False
 
 # Risk & Reward
 DEFAULT_LONG_RISK = 0.08  
 DEFAULT_LONG_REWARD = 0.13 
-DEFAULT_SHORT_RISK = 0.02  
+DEFAULT_SHORT_RISK = 0.01  
 DEFAULT_SHORT_REWARD = 0.03  
 DEFAULT_POSITION_SIZE = 0.50
 MAX_OPEN_POSITIONS = 39 
 
 SIGNAL_WEIGHTS = {
-    # Trend components
     'primary_trend': 2.5,     
     'trend_strength': 2.5,    
     'weekly_trend': 1.5,      
-    
-    # Confirmation components
     'rsi': 1.2,              
     'volume': 1.5,           
     'bollinger': 0.3         
@@ -79,212 +72,18 @@ RSI_OVERSOLD = 35
 BB_LEN = 20
 ST_DEV = 2
 
-# -------------------------------------------------------------------------------------------------------------
-def get_data(ticker):
-    data_start_year = 2013
-    data = yf.download(ticker, start=f"{data_start_year}-01-01", auto_adjust=True)
+def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, short_risk=DEFAULT_SHORT_RISK, short_reward=DEFAULT_SHORT_REWARD,
+    position_size=DEFAULT_POSITION_SIZE, risk_free_rate=0.04, leverage_ratio=LEVERAGE, max_positions=MAX_OPEN_POSITIONS,
+    adx_threshold_sig=ADX_THRESHOLD_DEFAULT, min_buy_score_sig=MIN_BUY_SCORE_DEFAULT, min_sell_score_sig=MIN_SELL_SCORE_DEFAULT,
+    signal_weights_sig=SIGNAL_WEIGHTS):
 
-    if data.empty:
-        print(f"No data available for {ticker}")
-        return None, None, None
-
-    # Fix index access - oldest is first, latest is last
-    data_oldest = data.index[0]
-    data_latest = data.index[-1]
-    
-    # Calculate data range in years
-    data_year_range = (data_latest - data_oldest).days / 365.25
-    
-    # Determine periods based on data range
-    if data_year_range > 8:
-        start_date = pd.Timestamp(f"{data_start_year}-01-01")
-        in_sample_period = start_date + pd.DateOffset(years=5)
-        out_of_sample_period = in_sample_period + pd.DateOffset(years=1)
-    else:
-        in_sample_period = data_oldest + pd.DateOffset(years=3)
-        out_of_sample_period = in_sample_period + pd.DateOffset(years=1)
-    
-    # Split data into IS and OOS DataFrames
-    in_sample_df = data[data_oldest:in_sample_period].copy()
-    out_of_sample_df = data[out_of_sample_period:data_latest].copy()
-
-    if in_sample_df.empty or out_of_sample_df.empty:
-            raise ValueError(f"No data downloaded for {ticker}")
-    
-    return in_sample_df, out_of_sample_df
-# -------------------------------------------------------------------------------------------------------------
-def prepare_data(df_IS):
-
-    # 1. Initial Setup & Memory Optimization
-    df = df_IS.copy()
-    if df.empty:
-        print("Warning: Empty dataframe provided to prepare_data.")
-        return df
-    
-    # Convert known OHLCV columns and any float64 to float32 for memory efficiency
-    ohlcv_cols_for_dtype_check = ['Open', 'High', 'Low', 'Close', 'Volume']
-    for col in df.columns:
-        if df[col].dtype == 'float64':
-            df[col] = df[col].astype('float32')
-        elif col in ohlcv_cols_for_dtype_check:
-            if not pd.api.types.is_numeric_dtype(df[col]):
-                # If OHLCV cols are present but not numeric (e.g. object), try to convert
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            # Ensure it's float32 if it's numeric but not already float32
-            if pd.api.types.is_numeric_dtype(df[col]) and df[col].dtype != 'float32':
-                 df[col] = df[col].astype('float32')
-    
-    if len(df) > 100000:  # Only for large datasets
-        for col in df.select_dtypes(include=['object']).columns:
-            try:
-                df[col] = df[col].astype('category')
-            except TypeError: # Handle cases where conversion to category might fail
-                print(f"Warning: Could not convert column '{col}' to category type.")
-    
-    # 2. Multi-index Handling Simplification
-    if isinstance(df.columns, pd.MultiIndex):
-        # Assuming the primary column names are in the first level (level 0)
-        df.columns = df.columns.droplevel(1)
-        # Ensure no duplicate column names after droplevel, take the first occurrence
-        df = df.loc[:, ~df.columns.duplicated(keep='first')]
-
-    # 3. Logic to 
-    core_ohlcv_names = ['Open', 'High', 'Low', 'Close', 'Volume']
-    # Threshold for dropping rows if NaNs are below this percentage for a given column
-    max_nan_percentage_to_drop_rows = 0.05
-    for col_name in core_ohlcv_names:
-        if col_name not in df.columns:
-                print(f"WARNING: Core column '{col_name}' is missing. Calculations requiring it may be affected or use defaults if available in the specific indicator logic.")
-        else:
-            if df[col_name].isnull().all(): # If the entire column is NaNs
-                    print(f"WARNING: Core column '{col_name}' consists entirely of NaN values. This will likely cause issues for indicators relying on it.")
-            else:
-                num_nans = df[col_name].isnull().sum()
-                if num_nans > 0:
-                    nan_percentage = num_nans / len(df)
-                    if nan_percentage < max_nan_percentage_to_drop_rows:
-                        print(f"INFO: Column '{col_name}' has {num_nans} NaN values ({nan_percentage*100:.2f}% of current data). Dropping rows with these NaNs.")
-                        df.dropna(subset=[col_name], inplace=True)
-                        if df.empty:
-                            print(f"WARNING: DataFrame became empty after dropping NaNs for column '{col_name}'.")
-                            return df # Return the now empty DataFrame
-                    else:
-                        print(f"WARNING: Column '{col_name}' has {nan_percentage*100:.2f}% NaNs, which is high. Attempting forward-fill then backward-fill.")
-                        df[col_name].ffill(inplace=True)
-                        df[col_name].bfill(inplace=True) # Fill any NaNs remaining at the beginning
-                        if df[col_name].isnull().any(): # Should only happen if column was all NaNs initially (caught above)
-                            print(f"ERROR: Column '{col_name}' still contains NaNs after ffill/bfill. This column may be unusable for some indicators.")
-
-
-    # Final check: After all initial cleaning, is 'Close' usable?
-    if 'Close' not in df.columns or df.empty or df['Close'].isnull().all():
-        print("CRITICAL ERROR: 'Close' column is missing or unusable after initial data preparation steps.")
-        return df
-    
-    # 4. Calculate Core Indicators
-    try:
-        # Main Indicators
-        # Vectorized Moving Averages
-        df[f'{FAST}_ma'] = df['Close'].rolling(window=FAST, min_periods=1).mean()
-        df[f'{SLOW}_ma'] = df['Close'].rolling(window=SLOW, min_periods=1).mean()
-        df['Volume_MA20'] = df['Volume'].rolling(window=20, min_periods=1).mean()
-        
-        # Weekly Moving Average
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index)
-        df_weekly = df['Close'].resample('W').last()
-        df[f'Weekly_MA{WEEKLY_MA_PERIOD}'] = (df_weekly.rolling(window=WEEKLY_MA_PERIOD, min_periods=1)
-            .mean().reindex(df.index, method='ffill'))
-        
-        # Relative Strength Index - Measures pct change in price
-        df['RSI'] = ta.rsi(df['Close'], length=RSI_LENGTH).fillna(50.0)
-        
-        # Bollinger Bands - Measures volatility
-        bb = ta.bbands(df['Close'], length=BB_LEN, std=ST_DEV)
-        if bb is not None and not bb.empty:
-            df['Upper_Band'] = bb[f'BBU_{BB_LEN}_{float(ST_DEV)}'].fillna(df['Close'] * 1.02)
-            df['Lower_Band'] = bb[f'BBL_{BB_LEN}_{float(ST_DEV)}'].fillna(df['Close'] * 0.98)
-        else:
-            df['Upper_Band'] = df['Close'] * 1.02
-            df['Lower_Band'] = df['Close'] * 0.98
-
-        # Secondary Indicators
-        # Average True Range - Measures volatility
-        df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14).fillna(df['Close'] * 0.02)
-
-        # Close price 26 periods ago
-        df['Close_26_ago'] = df['Close'].shift(26).ffill().fillna(df['Close'])
-
-        # Average Directional Index - Measures trend strength
-        adx_result = ta.adx(df['High'], df['Low'], df['Close'])
-        if isinstance(adx_result, pd.DataFrame) and 'ADX_14' in adx_result.columns:
-            df['ADX'] = adx_result['ADX_14'].fillna(25.0)
-        else:
-            df['ADX'] = pd.Series(25.0, index=df.index)
-
-        # Volume and Weekly Trend Confirmations
-        df['volume_confirmed'] = df['Volume'] > df['Volume_MA20']
-        df['weekly_uptrend'] = (df['Close'] > df[f'Weekly_MA{WEEKLY_MA_PERIOD}']) & \
-                       (df[f'Weekly_MA{WEEKLY_MA_PERIOD}'].shift(1).ffill() < \
-                        df[f'Weekly_MA{WEEKLY_MA_PERIOD}'])
-        
-    except Exception as e:
-        print(f"Error calculating indicators: {e}. Applying defaults.")
-
-    # 5. Validate and Fill Missing (New Default Value Handling)
-    default_values = {
-        f'{FAST}_ma': df['Close'],
-        f'{SLOW}_ma': df['Close'],
-        'RSI': 50.0,
-        'Upper_Band': df['Close'] * 1.02,
-        'Lower_Band': df['Close'] * 0.98,
-        'ATR': df['Close'] * 0.02,
-        'ADX': 25.0,
-        'Volume_MA20': df['Volume'] if 'Volume' in df else 10000.0, # Default if volume itself is missing
-        f'Weekly_MA{WEEKLY_MA_PERIOD}': df['Close'],
-        'Close_26_ago': df['Close']
-    }
-    # Fill missing values with defaults
-    for col_name, default_series_or_value in default_values.items():
-        if col_name not in df.columns or df[col_name].isnull().all(): # If col is missing or all NaN
-            df[col_name] = default_series_or_value
-        else: # If column exists but has some NaNs, fill them
-            df[col_name] = df[col_name].fillna(default_series_or_value)
-
-    # 6. Final Cleanup
-    df = df.dropna() # Drop rows where essential data might still be missing after fill attempts
-    if df.empty and not df_IS.empty:
-        print("Warning: DataFrame became empty after processing.")
-    
-    return df
-# -------------------------------------------------------------------------------------------------------------
-def momentum(df_with_indicators, long_risk=None, long_reward=None, short_risk=None, short_reward=None,
-    position_size=None, risk_free_rate=0.04, leverage_ratio=None, max_positions=None, use_trailing_stops=None,
-    adx_threshold_sig=None, min_buy_score_sig=None, min_sell_score_sig=None,
-    signal_weights_sig=None):
-    
     if df_with_indicators.empty:
         print("Warning: Empty dataframe (df_with_indicators) provided to momentum.")
         return [], create_empty_stats(), pd.Series(dtype='float64'), pd.Series(dtype='float64')
 
-    # Ensure parameters are set to defaults if None
-    long_risk = long_risk if long_risk is not None else DEFAULT_LONG_RISK
-    long_reward = long_reward if long_reward is not None else DEFAULT_LONG_REWARD
-    short_risk = short_risk if short_risk is not None else DEFAULT_SHORT_RISK
-    short_reward = short_reward if short_reward is not None else DEFAULT_SHORT_REWARD
-    position_size = position_size if position_size is not None else DEFAULT_POSITION_SIZE
-    leverage_ratio = leverage_ratio if leverage_ratio is not None else LEVERAGE
-    max_positions = max_positions if max_positions is not None else MAX_OPEN_POSITIONS
-    use_trailing_stops = use_trailing_stops if use_trailing_stops is not None else USE_TRAILING_STOPS_DEFAULT
-    adx_threshold_sig = adx_threshold_sig if adx_threshold_sig is not None else ADX_THRESHOLD_DEFAULT
-    min_buy_score_sig = min_buy_score_sig if min_buy_score_sig is not None else MIN_BUY_SCORE_DEFAULT
-    min_sell_score_sig = min_sell_score_sig if min_sell_score_sig is not None else MIN_SELL_SCORE_DEFAULT
-    final_signal_weights = signal_weights_sig if signal_weights_sig is not None else SIGNAL_WEIGHTS
-
-
     # 1. Generate signals using the indicator-laden DataFrame
-    signals_df = signals(df_with_indicators, adx_threshold=adx_threshold_sig, min_buy_score=min_buy_score_sig, 
-                         min_sell_score=min_sell_score_sig, weights=final_signal_weights)
+    signals_df = signals(df_with_indicators, adx_threshold=adx_threshold_sig, min_buy_score=min_buy_score_sig,
+                         min_sell_score=min_sell_score_sig, weights=signal_weights_sig)
 
     # 2. Initialize Trade Managers and Tracking
     # Ensure INITIAL_CAPITAL is accessible or passed if not a global
@@ -306,7 +105,7 @@ def momentum(df_with_indicators, long_risk=None, long_reward=None, short_risk=No
     for i in range(1, len(df_with_indicators)):
         current_date = df_with_indicators.index[i]
         transaction_price = df_with_indicators['Open'].iloc[i]
-        
+
         # Critical data checks for the current row
         # Data for decision making (ATR, ADX, confirmations) is from the PREVIOUS day's close
         previous_day_data_row = df_with_indicators.iloc[i-1]
@@ -315,35 +114,33 @@ def momentum(df_with_indicators, long_risk=None, long_reward=None, short_risk=No
 
         buy_signal = signals_df['buy_signal'].iloc[i-1]
         sell_signal = signals_df['sell_signal'].iloc[i-1]
-        
+
         # --- Exit Conditions (Priority Order) ---
         if trade_manager.position_count > 0:
             # 1. Check trailing stop first (highest priority)
-            trail_stop_hit = trade_manager.trailing_stops(transaction_price, previous_day_atr, previous_day_adx)
-            if trail_stop_hit:
-                trade_manager.process_exits(current_date, transaction_price)
-                continue
+            any_trailing_stop_hit = trade_manager.trailing_stops(transaction_price, current_date, previous_day_atr, previous_day_adx)
 
             # 2. Check trend validity  
             trend_valid = previous_day_adx > adx_threshold_sig
 
             # 3. Hybrid exit rules
-            if trade_manager.direction == 'Long':
-                # Partial exit on sell signal (if trend is weak)
-                if sell_signal and not trail_stop_hit:
+            if not any_trailing_stop_hit:
+                # Process exits for LONG positions based on sell signal
+                if sell_signal:
                     if trend_valid:
-                        trade_manager.process_exits(current_date, transaction_price, Trim = True)  
+                        # Partial exit for LONG positions if trend is still valid
+                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=True)  
                     else:
-                        trade_manager.process_exits(current_date, transaction_price)
-            elif trade_manager.direction == 'Short':
-                # Full exit on buy signal (shorts need tighter control)
-                if buy_signal and not trail_stop_hit:
-                    trade_manager.process_exits(current_date, transaction_price)
+                        # Full exit for LONG positions if trend is no longer valid
+                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=False)
+                
+                # Process exits for SHORT positions based on buy signal
+                if buy_signal:
+                    # Full exit for SHORT positions (shorts need tighter control)
+                    trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Short', Trim=False)
 
         # --- Entry Conditions ---
-        entry_params_base = {'price': transaction_price,
-                             'atr': previous_day_atr, 'adx': previous_day_adx,
-                             'position_size': position_size, 'leverage': leverage_ratio,}
+        entry_params_base = {'price': transaction_price, 'atr': previous_day_atr, 'adx': previous_day_adx, 'size_limit': position_size}
 
         if buy_signal and trade_manager.position_count < max_positions:
             entry_params = {**entry_params_base,
@@ -513,16 +310,19 @@ def signals(df, adx_threshold, min_buy_score, min_sell_score, weights=None):
     signals_df['sell_score'] = sell_score_np
 
     signals_df['buy_signal'] = (
-        conditions.get('primary_trend_long', False) &
-        conditions.get('rsi_uptrend', False) &
-        conditions.get('trend_strength_ok', False) &
-        conditions.get('volume_ok', False) | (buy_score_np >= actual_min_buy_np))
+        (buy_score_np >= actual_min_buy_np))
+        #conditions.get('primary_trend_long', False) &
+        # conditions.get('rsi_uptrend', False) &
+        # conditions.get('trend_strength_ok', False) |
+        # conditions.get('volume_ok', False) &
+        
 
     signals_df['sell_signal'] = (
+        (sell_score_np >= actual_min_sell_np) &
         conditions.get('primary_trend_short', False) &
         conditions.get('rsi_weak', False) &
         conditions.get('trend_strength_ok', False) &
-        conditions.get('weekly_uptrend', False)  | (sell_score_np >= actual_min_sell_np))
+        conditions.get('weekly_uptrend', False) )
 
     # 5. Signal Validation (Conflicting signals and changed status)
     conflicting = signals_df['buy_signal'] & signals_df['sell_signal']
@@ -539,6 +339,8 @@ class TradeManager:
         self.portfolio_value = initial_capital
         self.max_positions = max_positions
         self.position_count = 0
+        self.allocated_capital = 0
+        self.last_exit_was_full = False
         self.trade_log = deque()
         self.wins = deque()
         self.losses = deque()
@@ -548,7 +350,7 @@ class TradeManager:
         # Define column dtypes for better memory usage
         self.dtypes = {
             'entry_date': 'datetime64[ns]',
-            'direction': 'category',  # Added direction column
+            'direction': 'category', 
             'entry_price': 'float32',
             'stop_loss': 'float32',
             'take_profit': 'float32',
@@ -561,108 +363,105 @@ class TradeManager:
         # Initialize active trades DataFrame with proper dtypes
         self.active_trades = pd.DataFrame(columns=self.dtypes.keys()).astype(self.dtypes)
     # ----------------------------------------------------------------------------------------------------------
-    def trailing_stops(self, current_price, current_atr, adx_value):
+    def trailing_stops(self, current_price, current_date, current_atr, adx_value):
         if self.active_trades.empty:
             return False
-        
-        # Convert to float32 for consistency
+
         current_price_f32 = np.float32(current_price)
         current_atr_f32 = np.float32(current_atr)
-        
-        # Dynamic ATR multiplier based on market conditions
         atr_multiplier = np.float32(2.5 if adx_value > 30 else 1.5)
-        
-        if self.direction == 'Long':
-            # Update highest prices
-            self.active_trades['highest_close_since_entry'] = np.maximum(
-                self.active_trades['highest_close_since_entry'],
-                current_price_f32
-            )
-            # Calculate new stops
-            new_stops = self.active_trades['highest_close_since_entry'] - (atr_multiplier * current_atr_f32)
-            self.active_trades['stop_loss'] = np.maximum(new_stops, self.active_trades['stop_loss'])
-            # Check for stops hit
-            stops_hit = current_price_f32 <= self.active_trades['stop_loss']
-            
-        else:  # Short
-            # Update lowest prices
-            self.active_trades['lowest_close_since_entry'] = np.minimum(
-                self.active_trades['lowest_close_since_entry'],
-                current_price_f32
-            )
-            # Calculate new stops
-            new_stops = self.active_trades['lowest_close_since_entry'] + (atr_multiplier * current_atr_f32)
-            self.active_trades['stop_loss'] = np.minimum(new_stops, self.active_trades['stop_loss'])
-            # Check for stops hit
-            stops_hit = current_price_f32 >= self.active_trades['stop_loss']
 
-        # If any stops were hit, keep only the unaffected trades
-        if stops_hit.any():
-            # Process exits for stopped out trades
-            stopped_trades = self.active_trades[stops_hit]
-            for _, trade in stopped_trades.iterrows():
-                self.exit_pnl(trade, pd.Timestamp('now'), current_price_f32,
-                            trade['share_amount'], 'Trailing Stop')
+        # Initialize a boolean Series for stops_hit, default to False for all trades
+        stops_hit_flags = pd.Series([False] * len(self.active_trades), index=self.active_trades.index)
+
+        # --- Process Long Positions ---
+        long_trades_mask = self.active_trades['multiplier'] == 1
+        if long_trades_mask.any():
+            # Update highest prices for active long trades
+            self.active_trades.loc[long_trades_mask, 'highest_close_since_entry'] = np.maximum(
+                self.active_trades.loc[long_trades_mask, 'highest_close_since_entry'],
+                current_price_f32
+            )
+            # Calculate new stop-loss levels for long trades
+            new_stops_long = self.active_trades.loc[long_trades_mask, 'highest_close_since_entry'] - (atr_multiplier * current_atr_f32)
+            # Update stop-loss (only if new stop is higher)
+            self.active_trades.loc[long_trades_mask, 'stop_loss'] = np.maximum(
+                self.active_trades.loc[long_trades_mask, 'stop_loss'],
+                new_stops_long
+            )
+            # Check if current price hits the stop-loss for long trades
+            stops_hit_flags[long_trades_mask] = current_price_f32 <= self.active_trades.loc[long_trades_mask, 'stop_loss']
+
+        # --- Process Short Positions ---
+        short_trades_mask = self.active_trades['multiplier'] == -1
+        if short_trades_mask.any():
+            # Update lowest prices for active short trades
+            self.active_trades.loc[short_trades_mask, 'lowest_close_since_entry'] = np.minimum(
+                self.active_trades.loc[short_trades_mask, 'lowest_close_since_entry'],
+                current_price_f32
+            )
+            # Calculate new stop-loss levels for short trades
+            new_stops_short = self.active_trades.loc[short_trades_mask, 'lowest_close_since_entry'] + (atr_multiplier * current_atr_f32)
+            # Update stop-loss (only if new stop is lower)
+            self.active_trades.loc[short_trades_mask, 'stop_loss'] = np.minimum(
+                self.active_trades.loc[short_trades_mask, 'stop_loss'],
+                new_stops_short
+            )
+            # Check if current price hits the stop-loss for short trades
+            stops_hit_flags[short_trades_mask] = current_price_f32 >= self.active_trades.loc[short_trades_mask, 'stop_loss']
+
+        # --- Process Exits for Hit Stops ---
+        if stops_hit_flags.any():
+            indices_to_remove = []
+            trades_that_hit_stop = self.active_trades[stops_hit_flags]
+
+            for idx, trade in trades_that_hit_stop.iterrows():
+                pnl = self.exit_pnl(trade, current_date, current_price_f32, trade['share_amount'], 'Trailing Stop')
+                self.portfolio_value += pnl
+                # Reduce allocated capital. Consistent with process_exits, using current_price.
+                # Consider if trade['entry_price'] * trade['share_amount'] is more appropriate for allocated capital.
+                self.allocated_capital -= (current_price_f32 * trade['share_amount'])
                 self.position_count -= 1
+                indices_to_remove.append(idx)
             
-            # Keep only trades that didn't hit stops
-            self.active_trades = self.active_trades[~stops_hit].copy()
-            return True
-        
-        return False
+            if indices_to_remove:
+                self.active_trades = self.active_trades.drop(index=indices_to_remove).reset_index(drop=True)
+            return True # Indicates one or more trailing stops were hit and processed
+
+        return False # No trailing stops were hit
     # ----------------------------------------------------------------------------------------------------------
-    def process_exits(self, current_date, current_price, Trim=False):
+    def process_exits(self, current_date, current_price, direction_to_exit, Trim=False): 
 
         if self.active_trades.empty:
             return 0.0
 
         total_pnl = 0.0
-        indices_to_remove = []
+        # Use a boolean mask for marking trades to remove. Initialize to False.
+        # Important: Get indices from the original DataFrame before any potential filtering
+        original_indices = self.active_trades.index
+        indices_to_remove_mask = pd.Series(False, index=original_indices)
         
-        # Iterate over a copy of the DataFrame to avoid index issues
-        for idx, trade in self.active_trades.iterrows():
+        # Iterate over a copy of the DataFrame filtered by direction_to_exit to avoid issues while modifying
+        # Get current indices of trades matching the direction
+        relevant_trade_indices = self.active_trades[self.active_trades['direction'] == direction_to_exit].index
+
+        for idx in relevant_trade_indices:
+            # If already marked for removal by a previous iteration/check (should not happen with this loop structure but good for safety)
+            if indices_to_remove_mask.get(idx, False): # Use .get for safety if idx might somehow be invalid
+                continue
+
+            trade = self.active_trades.loc[idx] # Get the most current version of the trade
             current_shares = trade['share_amount']
             
-            if current_shares <= 0:
-                indices_to_remove.append(idx)
+            if current_shares <= 0: # Should ideally be caught earlier or not happen
+                indices_to_remove_mask[idx] = True
                 continue
 
-            exited_this_step = False
-
-            # Process Trim or Full Exit
-            if Trim:
-                shares_to_exit = int(current_shares * 0.3)
-                if shares_to_exit > 0:
-                    pnl = self.exit_pnl(trade, current_date, current_price, 
-                                    shares_to_exit, 'Partial Signal Exit')
-                    total_pnl += pnl
-                    self.portfolio_value += pnl
-                    
-                    # Update remaining shares
-                    remaining_shares = current_shares - shares_to_exit
-                    if remaining_shares > 0:
-                        self.active_trades.loc[idx, 'share_amount'] = remaining_shares
-                    else:
-                        indices_to_remove.append(idx)
-                        self.position_count -= 1
-                        exited_this_step = True
-            else:  # Full Exit 
-                pnl = self.exit_pnl(trade, current_date, current_price,
-                                current_shares, 'Full Signal Exit')
-                total_pnl += pnl
-                self.portfolio_value += pnl
-                indices_to_remove.append(idx)
-                self.position_count -= 1
-                exited_this_step = True
-            
-            if exited_this_step:
-                continue
-
-            # Check Stop Loss
+            # Priority 1: Check Stop Loss for this specific trade
             sl_hit = False
-            if self.direction == 'Long' and current_price <= trade['stop_loss']:
+            if trade['direction'] == 'Long' and current_price <= trade['stop_loss']:
                 sl_hit = True
-            elif self.direction == 'Short' and current_price >= trade['stop_loss']:
+            elif trade['direction'] == 'Short' and current_price >= trade['stop_loss']:
                 sl_hit = True
             
             if sl_hit:
@@ -670,16 +469,17 @@ class TradeManager:
                                 current_shares, 'Stop Loss')
                 total_pnl += pnl
                 self.portfolio_value += pnl
-                indices_to_remove.append(idx)
+                indices_to_remove_mask[idx] = True # Mark for removal
                 self.position_count -= 1
-                continue
+                self.allocated_capital -= (current_price * current_shares) # Assuming current_price for de-allocation
+                continue # Stop further processing for this trade if SL is hit
 
-            # Check Take Profit
+            # Priority 2: Check Take Profit for this specific trade
             tp_hit = False
-            if pd.notna(trade['take_profit']):
-                if self.direction == 'Long' and current_price >= trade['take_profit']:
+            if pd.notna(trade['take_profit']): # Ensure take_profit is not NaN
+                if trade['direction'] == 'Long' and current_price >= trade['take_profit']:
                     tp_hit = True
-                elif self.direction == 'Short' and current_price <= trade['take_profit']:
+                elif trade['direction'] == 'Short' and current_price <= trade['take_profit']:
                     tp_hit = True
             
             if tp_hit:
@@ -687,21 +487,48 @@ class TradeManager:
                                 current_shares, 'Take Profit')
                 total_pnl += pnl
                 self.portfolio_value += pnl
-                indices_to_remove.append(idx)
+                indices_to_remove_mask[idx] = True # Mark for removal
                 self.position_count -= 1
-        
-        # Remove closed positions
-        if indices_to_remove:
-            self.active_trades = self.active_trades.drop(index=indices_to_remove)
-            self.active_trades = self.active_trades.reset_index(drop=True)
+                self.allocated_capital -= (current_price * current_shares)
+                continue # Stop further processing for this trade if TP is hit
 
+            # Priority 3: Process Trim or Full Signal Exit (if not SL/TP hit for this trade)
+            # This part is only reached if the specific trade was not stopped out by SL or TP above.
+            if Trim:
+                shares_to_exit = int(current_shares * 0.3)
+                if shares_to_exit > 0:
+                    pnl = self.exit_pnl(trade, current_date, current_price, 
+                                    shares_to_exit, 'Partial Signal Exit')
+                    total_pnl += pnl
+                    self.portfolio_value += pnl
+                    self.allocated_capital -= (current_price * shares_to_exit)
+                    
+                    remaining_shares = current_shares - shares_to_exit
+                    if remaining_shares > 0:
+                        self.active_trades.loc[idx, 'share_amount'] = remaining_shares
+                        # position_count is not decremented for partial exits
+                    else: # Trim resulted in full exit
+                        indices_to_remove_mask[idx] = True # Mark for removal
+                        self.position_count -= 1
+            else:  # Full Signal Exit
+                pnl = self.exit_pnl(trade, current_date, current_price,
+                                current_shares, 'Full Signal Exit')
+                total_pnl += pnl
+                self.portfolio_value += pnl
+                indices_to_remove_mask[idx] = True # Mark for removal
+                self.position_count -= 1
+                self.allocated_capital -= (current_price * current_shares)
+            
+        # Remove all marked positions at once after iteration
+        if indices_to_remove_mask.any():
+            self.active_trades = self.active_trades[~indices_to_remove_mask].reset_index(drop=True)
+            
         return total_pnl
     # ----------------------------------------------------------------------------------------------------------
     def process_entry(self, current_date, entry_params, direction=None):
         
         is_long = direction == 'Long'
         direction_mult = 1 if is_long else -1
-        self.direction = direction
         
         # 1. Calculate Initial Stop (ATR + ADX adjusted)
         atr_multiplier = 2.5 if entry_params['adx'] > 25 else 1.5
@@ -712,14 +539,47 @@ class TradeManager:
         # 2. Position Sizing Based on Risk
         risk_per_share = abs(entry_params['price'] - initial_stop)
         max_risk_amount = entry_params['portfolio_value'] * entry_params['risk']
-        shares_risk = int(max_risk_amount / max(risk_per_share, 1e-9))  # Avoid division by zero
-    
-        # 3. Leverage-Based Maximum Shares
-        max_exposure = entry_params['portfolio_value'] * entry_params['position_size'] * entry_params['leverage']
-        shares_leverage = int(max_exposure / max(entry_params['price'], 1e-9))
-        
-        share_amount = min(shares_risk, shares_leverage)
-        if share_amount <= 0:
+        shares_by_risk = int(max_risk_amount / max(risk_per_share, 1e-9))  # Avoid division by zero
+
+        # Calculate shares based on position size limit
+        max_position_value = entry_params['portfolio_value'] * entry_params['position_size_limit']
+        shares_by_size = int(max_position_value / entry_params['price'])
+
+        shares = min(shares_by_risk, shares_by_size)
+
+        # Calculate dollar amount for this position
+        position_dollar_amount = shares * entry_params['price']
+        actual_position_size = position_dollar_amount / entry_params['portfolio_value']
+
+        # 3. Check total portfolio exposure (add here)
+        if not self.active_trades.empty:
+            total_exposure = self.active_trades['position_size'].sum()
+            max_total_exposure = 1.0  # 100% total exposure limit
+            
+            if total_exposure + actual_position_size > max_total_exposure:
+                # Calculate how much exposure is available
+                available_exposure = max_total_exposure - total_exposure
+                if available_exposure <= 0:
+                    return False
+                    
+                # Reduce position size to fit within available exposure
+                adjusted_shares = int(available_exposure * entry_params['portfolio_value'] / entry_params['price'])
+                if adjusted_shares <= 0:
+                    return False
+                    
+                shares = adjusted_shares
+                position_dollar_amount = shares * entry_params['price']
+                actual_position_size = position_dollar_amount / entry_params['portfolio_value']
+
+        # Check position size constraints
+        if actual_position_size > entry_params['position_size_limit']:
+            # Reduce shares to meet position size limit
+            shares = int(entry_params['position_size_limit'] * entry_params['portfolio_value'] / entry_params['price'])
+            position_dollar_amount = shares * entry_params['price']
+
+        # Check if we have enough available capital
+        available_capital = self.portfolio_value - self.allocated_capital
+        if position_dollar_amount > available_capital:
             return False
         
         # 4. Calculate Take-Profit Using Risk/Reward Ratio
@@ -734,13 +594,13 @@ class TradeManager:
         # 5. Create Trade
         new_trade = pd.DataFrame([{
         'entry_date': current_date,
-        'direction': direction,  # Add direction explicitly
+        'direction': direction,
         'multiplier': direction_mult,
         'entry_price': entry_params['price'],
         'stop_loss': initial_stop,
         'take_profit': take_profit,
-        'position_size': (share_amount * entry_params['price']) / entry_params['portfolio_value'],
-        'share_amount': share_amount,
+        'position_size': actual_position_size,  # Store actual position size used
+        'share_amount': shares,
         'highest_close_since_entry': entry_params['price'] if is_long else np.nan,
         'lowest_close_since_entry': entry_params['price'] if not is_long else np.nan
         }])
@@ -756,20 +616,18 @@ class TradeManager:
         else:
             self.active_trades = pd.concat([self.active_trades, new_trade], ignore_index=True)
         
+        self.allocated_capital += position_dollar_amount
         self.position_count += 1
         return True
     # ----------------------------------------------------------------------------------------------------------    
     def exit_pnl(self, trade_series, exit_date, exit_price, shares_to_exit, reason):
-        """
-        Calculates PnL for a single trade exit and logs the trade.
-        `trade_series` is a pandas Series representing the active trade row.
-        `shares_to_exit` is the number of shares being exited for this specific event.
-        """
+        
         entry_price = trade_series['entry_price']
         entry_date = trade_series['entry_date']
+        trade_direction = trade_series['direction']
 
         pnl = 0
-        if self.direction == 'Long':
+        if trade_direction == 'Long':
             pnl = (exit_price - entry_price) * shares_to_exit
         else:  # Short
             pnl = (entry_price - exit_price) * shares_to_exit
@@ -793,10 +651,10 @@ class TradeManager:
         self.trade_log.append({
             'Entry Date': entry_date,
             'Exit Date': exit_date,
-            'Direction': self.direction,
+            'Direction': trade_direction,
             'Entry Price': entry_price,
             'Exit Price': exit_price,
-            'Shares': shares_to_exit, # Log the shares actually exited
+            'Shares': shares_to_exit,
             'PnL': pnl,
             'Duration': duration,
             'Exit Reason': reason
@@ -805,17 +663,18 @@ class TradeManager:
     # ----------------------------------------------------------------------------------------------------------
     def calculate_unrealized_pnl(self, current_price):
         if self.active_trades.empty: return 0.0
-        if self.direction == 'Long':
-            return ((current_price - self.active_trades['entry_price']) * self.active_trades['share_amount']).sum()
-        else:
-            return ((self.active_trades['entry_price'] - current_price) * self.active_trades['share_amount']).sum()
+        pnl_values = (current_price - self.active_trades['entry_price']) * \
+                     self.active_trades['share_amount'] * \
+                     self.active_trades['multiplier'] # Assuming 'multiplier' column exists and is correct
+        
+        return pnl_values.sum()
     # ----------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------
 def create_empty_stats(risk_free_rate=0.04):
     return {
         'Total Trades': 0,
         'Win Rate': 0,
-        'Net Profit (%)': 0,
+        'Return (%)': 0,
         'Profit Factor': 0,
         'Expectancy (%)': 0,
         'Max Drawdown (%)': 0,
@@ -893,7 +752,7 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
     return {
         'Total Trades': total_trades,
         'Win Rate': win_rate,
-        'Net Profit (%)': net_profit_pct,
+        'Return (%)': net_profit_pct,
         'Profit Factor': profit_factor,
         'Expectancy (%)': expectancy_pct,
         'Max Drawdown (%)': max_drawdown,
@@ -901,22 +760,3 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
         'Sharpe Ratio': sharpe_ratio,
         'Sortino Ratio': sortino_ratio
     }
-# --------------------------------------------------------------------------------------------------------------------------
-def main():
-    IS_df, OOS_df = get_data(TICKER[0])
-    if IS_df is None or OOS_df is None:
-        print("Error: Data retrieval failed.")
-        return
-    prepared_data = prepare_data(IS_df)
-
-    _, stats, _, _ = momentum(prepared_data, long_risk=DEFAULT_LONG_REWARD,
-                                            long_reward=DEFAULT_LONG_REWARD, short_risk=DEFAULT_SHORT_RISK,
-                                            short_reward=DEFAULT_SHORT_REWARD, position_size=MAX_OPEN_POSITIONS,
-                                            risk_free_rate=0.04, leverage_ratio=LEVERAGE,
-                                            max_positions=MAX_OPEN_POSITIONS, use_trailing_stops=None,
-                                            adx_threshold_sig=ADX_THRESHOLD_DEFAULT, min_buy_score_sig=MIN_BUY_SCORE_DEFAULT, min_sell_score_sig=MIN_SELL_SCORE_DEFAULT,
-                                            signal_weights_sig=SIGNAL_WEIGHTS)
-    print(stats)
-
-if __name__ == "__main__":
-    main()
