@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 from tabulate import tabulate  
+import random
 import pandas_ta as ta 
 from datetime import datetime, timedelta
 import multiprocessing as mp 
@@ -12,7 +13,6 @@ from numba import jit
 from tqdm import tqdm
 import optuna
 from functools import partial  # Add missing import for partial
-import cupy as cp
 import traceback
 from scipy import stats
 from statsmodels.tsa.stattools import adfuller
@@ -78,6 +78,7 @@ ST_DEV = 2
 # -------------------------------------------------------------------------------------------------------------
 def get_data(ticker):
     data_start_year = 2013
+    print('\nDownloading data....')
     data = yf.download(ticker, start=f"{data_start_year}-01-01", auto_adjust=True)
 
     if data.empty:
@@ -106,7 +107,7 @@ def get_data(ticker):
 
     if in_sample_df.empty or out_of_sample_df.empty:
             raise ValueError(f"No data downloaded for {ticker}")
-    
+    print(f"Data split: In-Sample from {data_oldest.year} to {in_sample_period.year}, Out-of-Sample from {out_of_sample_period.year} to {data_latest.year}")
     return in_sample_df, out_of_sample_df
 # -------------------------------------------------------------------------------------------------------------
 def prepare_data(df_IS):
@@ -322,16 +323,16 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                     trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Short', Trim=False)
 
         # --- Entry Conditions ---
-        entry_params_base = {'price': transaction_price, 'atr': previous_day_atr, 'adx': previous_day_adx, 'size_limit': position_size}
+        entry_params_base = {'atr': previous_day_atr, 'adx': previous_day_adx, 'size_limit': position_size}
 
         if buy_signal and trade_manager.position_count < max_positions:
-            entry_params = {**entry_params_base,
+            entry_params = {**entry_params_base, 'price': transaction_price*(1 + 0.003),
                             'portfolio_value': trade_manager.portfolio_value,
                             'risk': long_risk, 'reward': long_reward}
             trade_manager.process_entry(current_date, entry_params, direction='Long')
 
         if sell_signal and trade_manager.position_count < max_positions:
-            entry_params = {**entry_params_base,
+            entry_params = {**entry_params_base, 'price': transaction_price*(1 - 0.003),
                             'portfolio_value': trade_manager.portfolio_value,
                             'risk': short_risk, 'reward': short_reward}
             trade_manager.process_entry(current_date, entry_params, direction='Short')
@@ -406,10 +407,7 @@ def dynamic_scores(conditions, rsi_np_arr, weights_dict, direction='long',
     return base_score
 # --------------------------------------------------------------------------------------------------------------------------
 def signals(df, adx_threshold, min_buy_score, min_sell_score, weights=None):
-    """
-    Generates trading signals for the entire DataFrame using vectorized operations, NumPy,
-    primary trend filters, secondary confirmations, and a weighted scoring approach.
-    """
+    
     fast_ma_col = f"{FAST}_ma"
     slow_ma_col = f"{SLOW}_ma"
     signals_df = pd.DataFrame(index=df.index)
@@ -492,16 +490,14 @@ def signals(df, adx_threshold, min_buy_score, min_sell_score, weights=None):
     signals_df['sell_score'] = sell_score_np
 
     signals_df['buy_signal'] = (
-        conditions.get('primary_trend_long', False) &
-        conditions.get('trend_strength_ok', False) &
-        conditions.get('rsi_uptrend', False) | (buy_score_np >= actual_min_buy_np)) # | conditions.get('volume_ok', False)
-        
+        conditions.get('trend_strength_ok', False) & conditions.get('rsi_uptrend', False) & conditions.get('primary_trend_long', False) 
+        #(buy_score_np >= actual_min_buy_np) #conditions.get('volume_ok', False)|   
+    )
 
     signals_df['sell_signal'] = (
-        conditions.get('primary_trend_short', False) &
-        conditions.get('trend_strength_ok', False) &
-        conditions.get('rsi_weak', False) | (sell_score_np >= actual_min_sell_np)) # conditions.get('weekly_uptrend', False)
-
+        conditions.get('trend_strength_ok', False) & conditions.get('rsi_weak', False) & conditions.get('primary_trend_short', False)
+        #(sell_score_np >= actual_min_sell_np) #conditions.get('weekly_uptrend', False)|  #& 
+    )
     # 5. Signal Validation (Conflicting signals and changed status)
     conflicting = signals_df['buy_signal'] & signals_df['sell_signal']
     signals_df.loc[conflicting, ['buy_signal', 'sell_signal']] = False
@@ -759,6 +755,9 @@ class TradeManager:
         if position_dollar_amount > available_capital:
             return False
         
+        # Calculate commission
+        commission = self.calculate_commission(shares, entry_params['price'])
+
         # 4. Calculate Take-Profit Using Risk/Reward Ratio
         if 'reward' in entry_params:
             # Reward distance = (risk_per_share) * (reward/risk ratio)
@@ -776,8 +775,9 @@ class TradeManager:
         'entry_price': entry_params['price'],
         'stop_loss': initial_stop,
         'take_profit': take_profit,
-        'position_size': actual_position_size,  # Store actual position size used
+        'position_size': actual_position_size,
         'share_amount': shares,
+        'commission': commission,
         'highest_close_since_entry': entry_params['price'] if is_long else np.nan,
         'lowest_close_since_entry': entry_params['price'] if not is_long else np.nan
         }])
@@ -794,9 +794,34 @@ class TradeManager:
             self.active_trades = pd.concat([self.active_trades, new_trade], ignore_index=True)
         
         self.allocated_capital += position_dollar_amount
+        self.portfolio_value -= commission
         self.position_count += 1
         return True
     # ----------------------------------------------------------------------------------------------------------    
+    def calculate_commission(self, shares, price):
+        # Fixed commission model
+        fixed_fee = 5.00  # $5 per trade
+        
+        # Per-share commission model
+        per_share_fee = 0.005 * shares  # 0.5 cents per share
+        
+        # Percentage-based model
+        percentage_fee = shares * price * 0.001  # 0.1% of trade value
+        
+        # Tiered model example
+        if shares * price < 5000:
+            tiered_fee = 5.00
+        elif shares * price < 10000:
+            tiered_fee = 7.50
+        else:
+            tiered_fee = 10.00
+        
+        # Choose your model
+        commission = per_share_fee  # or per_share_fee, percentage_fee, tiered_fee
+        
+        # Add minimum commission if needed
+        return max(commission, 1.00)  # Minimum $1.00 commission
+    # ----------------------------------------------------------------------------------------------------------
     def exit_pnl(self, trade_series, exit_date, exit_price, shares_to_exit, reason):
         
         entry_price = trade_series['entry_price']
@@ -824,7 +849,7 @@ class TradeManager:
             self.wins.append(pnl)
         else:
             self.losses.append(pnl)
-        
+        self.portfolio_value -= self.calculate_commission(shares_to_exit, exit_price)  # Deduct commission for exit
         self.trade_log.append({
             'Entry Date': entry_date,
             'Exit Date': exit_date,
@@ -1033,8 +1058,8 @@ def objectives(trial, base_df):
         trial.set_user_attr("invalid_reason", "Risk >= Reward")
         return bad_metrics_template
 
-    if (params['long_reward']/params['long_risk'] > 3 or
-        params['short_reward']/params['short_risk'] > 3):
+    if (params['long_reward']/params['long_risk'] > 4.0 or
+        params['short_reward']/params['short_risk'] > 3.0):
         trial.set_user_attr("invalid_reason", "High Reward/Risk Ratio")
         return bad_metrics_template
 
@@ -1053,9 +1078,6 @@ def objectives(trial, base_df):
         params['volume'],
         params['bollinger']
     ])
-    if total_weights < 1.5 or total_weights > 22.5:  # Arbitrary threshold for excessive weights
-        trial.set_user_attr("invalid_reason", "Excessive signal weights")
-        return bad_metrics_template
     
     # Set up signal weights
     signal_weights = SIGNAL_WEIGHTS.copy()
@@ -1091,7 +1113,7 @@ def optimize(prepared_data):
     # Optimizing parameters for Optuna
     target_metrics = list(OPTIMIZATION_DIRECTIONS.keys())
     opt_directions = [OPTIMIZATION_DIRECTIONS[metric] for metric in target_metrics]
-    n_trials=500
+    n_trials=1000
     min_completed_trials=20
     timeout=3600
 
@@ -1113,12 +1135,10 @@ def optimize(prepared_data):
 
     # Define the objective function
     objective_func = partial(objectives, base_df=data)
-
-    # Start timing
-    start_time = datetime.now()
         
     # Run optimization with progress bar
     completed_trials=0
+    print("\nOptimizing Parameters...")
     try:
         study.optimize(objective_func, n_trials=n_trials, timeout=timeout, 
                 n_jobs=max(1, mp.cpu_count() - 1),
@@ -1132,11 +1152,7 @@ def optimize(prepared_data):
         print(f"Only {completed_trials}/{min_completed_trials} minimum trials completed. Running additional trials...")
         additional_trials = min_completed_trials - completed_trials
         study.optimize(objective_func, n_trials=additional_trials,
-                      n_jobs=1, show_progress_bar=True)
-    
-    end_time = datetime.now()
-    elapsed_time = end_time - start_time
-    print(f"\nOptimization completed in {elapsed_time}")
+                      n_jobs=1, show_progress_bar=True) 
     
     # Get Pareto front solutions
     all_trials = study.trials
@@ -1173,182 +1189,85 @@ def optimize(prepared_data):
     # Extract just the trials for display
     pareto_front = [trial_tuple[0] for trial_tuple in filtered_trials]
 
-    if not pareto_front:
-        print("No valid trials found after filtering. Try adjusting the optimization parameters.")
-        return None, study
-
-    selected_params = None
-    while True:  # Loop until user confirms a selection
-        print("\nTop Pareto Optimal Solutions:")
-        display_count = min(10, len(pareto_front))  # Show at most 5 trials
-        if display_count == 0:
-            print("No valid trials to display.")
-            return None, study
-            
-        top_trials(pareto_front[:display_count])
-        
-        # Ask user to select a parameter set
-        try:
-            choice_str = input(f"\nSelect parameter set (1-{min(10, len(pareto_front))}) to simulate, or 'exit': ")
-            if choice_str.lower() == 'exit':
-                print("Exiting parameter selection.")
-                return None, study
-            choice = int(choice_str)
-            if choice < 1 or choice > min(10, len(pareto_front)):
-                print(f"Invalid selection. Please choose a number between 1 and {min(10, len(pareto_front))}")
-                continue
-            # Process selected parameters
-            selected_trial = pareto_front[choice-1]
-            selected_params = params_to_result(selected_trial.params)
-            tech_params = selected_params.get('tech_params', {})
-            
-            # Run simulation with selected parameters
-            print(f"\nSimulating with parameter set {choice}...\n")
-            
-            # Call test function with selected parameters
-            test_result = test(
-                df_input=data,
-                long_risk=selected_params['long_risk'],
-                long_reward=selected_params['long_reward'],
-                short_risk=selected_params['short_risk'],
-                short_reward=selected_params['short_reward'],
-                position_size=selected_params['position_size'],
-                max_positions_param=tech_params.get('MAX_OPEN_POSITIONS', MAX_OPEN_POSITIONS),
-                adx_thresh=tech_params.get('ADX_THRESHOLD', ADX_THRESHOLD_DEFAULT),
-                min_buy_s=tech_params.get('MIN_BUY_SCORE', MIN_BUY_SCORE_DEFAULT),
-                min_sell_s=tech_params.get('MIN_SELL_SCORE', MIN_SELL_SCORE_DEFAULT),
-                signal_weights=tech_params.get('SIGNAL_WEIGHTS', SIGNAL_WEIGHTS),
-            )
-            
-            # Ask for confirmation
-            confirm = input("\nUse these parameters? (Yes/No): ").strip().lower()
-            if confirm in ["yes", "y"]:
-                if test_result and 'trade_stats' in test_result:
-                    trade_stats = test_result['trade_stats']
-                    # Update performance_metrics with the new set of keys
-                    selected_params['performance_metrics'].update({
-                        'sharpe': trade_stats.get('Sharpe Ratio', 0),
-                        'profit_factor': trade_stats.get('Profit Factor', 0),
-                        'returns': trade_stats.get('Return (%)', 0), # Or 'Annualized Return (%)'
-                        'max_drawdown': trade_stats.get('Max Drawdown (%)', 0),
-                        'win_rate': trade_stats.get('Win Rate', 0), # Keep additional useful stats
-                        'num_trades': trade_stats.get('Total Trades', 0)
-                    })
-                break  # Exit the loop if confirmed
-            # Loop continues showing the top 5 again if user says no
-            
-        except ValueError:
-            print("Please enter a valid number.")
-        except Exception as e:
-            print(f"Error simulating parameters: {e}")
-            traceback.print_exc()
-    
-    return selected_params, study
-# -------------------------------------------------------------------------------------------------------------
-def top_trials(top_trials):
-    print("\nPareto Front Solutions:")
-    
-    score_headers = [
-        "Trial", "Sharpe", "Profit.F", "Return", "MaxDD%", "Combined Score"
-    ]
-    
-    score_rows = []
-    metric_keys_in_order = list(OPTIMIZATION_DIRECTIONS.keys())
-    
-    for i, trial in enumerate(top_trials):
-        if trial.values is None or len(trial.values) != len(metric_keys_in_order):
-            print(f"Skipping trial {i+1} due to missing metrics")
-            continue
-            
-        trial_metrics_dict = {key: trial.values[idx] for idx, key in enumerate(metric_keys_in_order)}
-
-        # Calculate combined score for display
-        combined_score = (
-            OBJECTIVE_WEIGHTS['sharpe'] * trial_metrics_dict.get('sharpe', 0) +
-            OBJECTIVE_WEIGHTS['profit_factor'] * min(trial_metrics_dict.get('profit_factor', 0), 100) +
-            OBJECTIVE_WEIGHTS['returns'] * trial_metrics_dict.get('returns', 0) -
-            OBJECTIVE_WEIGHTS['max_drawdown'] * abs(trial_metrics_dict.get('max_drawdown', 0))
-        )
-
-        # Create score row
-        score_row = [
-            f"{i+1}",  # Trial number
-            f"{trial_metrics_dict.get('sharpe', 0):.2f}",
-            f"{trial_metrics_dict.get('profit_factor', 0):.2f}",
-            f"{trial_metrics_dict.get('returns', 0):.2f}%",
-            f"{trial_metrics_dict.get('max_drawdown', 0):.2f}%",
-            f"{combined_score:.2f}"
-        ]
-        score_rows.append(score_row)
-    
-    if score_rows:
-        print("\nCombined Scores (weighted - for illustrative ranking):")
-        print(tabulate(score_rows, headers=score_headers, tablefmt="grid"))
-    else:
-        print("No valid trials to display.")
+    return pareto_front[:10]
 # -------------------------------------------------------------------------------------------------------------
 def params_to_result(params):
-    # Extract base parameters
+    
+    # Validate required base parameters exist
+    required_base = ['long_risk', 'long_reward', 'short_risk', 'short_reward', 'position_size']
+    for param in required_base:
+        if param not in params:
+            raise ValueError(f"Missing required parameter: {param}")
+    
+    # Extract base parameters with validation
     base_params = {
-        'long_risk': params['long_risk'],
-        'long_reward': params['long_reward'],
-        'short_risk': params['short_risk'],
-        'short_reward': params['short_reward'],
-        'position_size': params['position_size']
+        'long_risk': float(params['long_risk']),
+        'long_reward': float(params['long_reward']),
+        'short_risk': float(params['short_risk']),
+        'short_reward': float(params['short_reward']),
+        'position_size': float(params['position_size'])
     }
     
-    # Configure signal weights
-    signal_weights = SIGNAL_WEIGHTS.copy()
-    signal_weights.update({
-        'primary_trend': params['trend_primary'],
-        'trend_strength': params['trend_strength'],
-        'weekly_trend': params['weekly_trend'],
-        'rsi': params['rsi'],
-        'volume': params['volume'],
-        'bollinger': params['bollinger']
-    })
+    # Configure signal weights with validation
+    required_weights = ['trend_primary', 'trend_strength', 'weekly_trend', 
+                       'rsi', 'volume', 'bollinger']
+    
+    signal_weights = SIGNAL_WEIGHTS.copy()  # Start with default weights
+    for weight_name in required_weights:
+        if weight_name in params:
+            # Map Optuna parameter names to signal weight names
+            weight_map = {
+                'trend_primary': 'primary_trend',
+                'trend_strength': 'trend_strength',
+                'weekly_trend': 'weekly_trend',
+                'rsi': 'rsi',
+                'volume': 'volume',
+                'bollinger': 'bollinger'
+            }
+            signal_weights[weight_map[weight_name]] = float(params[weight_name])
 
-    # Configure technical parameters
+    # Configure technical parameters with validation and defaults
     tech_params = {
-        # Core parameters
-        'FAST': FAST, 
-        'SLOW': SLOW,
-        'WEEKLY_MA_PERIOD': WEEKLY_MA_PERIOD,
+        # Core parameters (use globals as defaults)
+        'FAST': params.get('fast_period', FAST),
+        'SLOW': params.get('slow_period', SLOW),
+        'WEEKLY_MA_PERIOD': params.get('weekly_ma_period', WEEKLY_MA_PERIOD),
         
         # RSI settings
-        'RSI_LENGTH': RSI_LENGTH,
-        'RSI_OVERSOLD': RSI_OVERSOLD, 
-        'RSI_OVERBOUGHT': RSI_OVERBOUGHT,
+        'RSI_LENGTH': params.get('rsi_length', RSI_LENGTH),
+        'RSI_OVERSOLD': params.get('rsi_oversold', RSI_OVERSOLD),
+        'RSI_OVERBOUGHT': params.get('rsi_overbought', RSI_OVERBOUGHT),
         
         # Volatility settings
-        'BB_LEN': BB_LEN,
-        'ST_DEV': ST_DEV,
+        'BB_LEN': params.get('bb_length', BB_LEN),
+        'ST_DEV': params.get('bb_std', ST_DEV),
         
-        # Signal generation parameters
-        'ADX_THRESHOLD': params['adx_threshold'],
-        'MIN_BUY_SCORE': params['min_buy_score'],
-        'MIN_SELL_SCORE': params['min_sell_score'],
+        # Signal generation parameters (required)
+        'ADX_THRESHOLD': float(params['adx_threshold']),
+        'MIN_BUY_SCORE': float(params['min_buy_score']),
+        'MIN_SELL_SCORE': float(params['min_sell_score']),
         'SIGNAL_WEIGHTS': signal_weights,
         
-        # Position management
-        'MAX_OPEN_POSITIONS': params['max_open_positions'],
+        # Position management (required)
+        'MAX_OPEN_POSITIONS': int(params['max_open_positions']),
     }
 
+    # Get performance metrics if they exist
+    performance_metrics = {
+        'win_rate': float(params.get('win_rate', 0.0)),
+        'return': float(params.get('return', 0.0)),
+        'max_drawdown': float(params.get('max_drawdown', 0.0)),
+        'sharpe': float(params.get('sharpe', 0.0)),
+        'profit_factor': float(params.get('profit_factor', 0.0)),
+        'num_trades': int(params.get('num_trades', 0))
+    }
+    
     # Combine all parameters into final result
     result = {
         **base_params,
         'tech_params': tech_params,
-        # Initialize performance metrics
-        'performance_metrics': {
-            'win_rate': 0.0,
-            'net_profit_pct': 0.0,
-            'max_drawdown': 0.0,
-            'sharpe': 0.0,
-            'profit_factor': 0.0,
-            'num_trades': 0
-        }
+        'performance_metrics': performance_metrics
     }
-    
     return result
 # -------------------------------------------------------------------------------------------------------------
 def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, short_risk=DEFAULT_SHORT_RISK, 
@@ -1428,7 +1347,7 @@ def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
      
     return None
 # -------------------------------------------------------------------------------------------------------------
-def monte_carlo_returns_test(data, params, num_simulations=5000):
+def monte_carlo_returns_test(data, params, num_simulations=None, progress_callback=None):
     # Run original strategy to get baseline performance
     trade_log, trade_stats, equity_curve, returns_series = momentum(
         data,
@@ -1448,7 +1367,7 @@ def monte_carlo_returns_test(data, params, num_simulations=5000):
     observed_sharpe = clean_returns.mean() / clean_returns.std() * np.sqrt(252)
 
     # Stationary bootstrap implementation
-    def stationary_bootstrap(series, block_size=7):
+    def stationary_bootstrap(series, block_size=1):
         n = len(series)
         indices = []
         current_idx = np.random.randint(0, n)
@@ -1469,8 +1388,7 @@ def monte_carlo_returns_test(data, params, num_simulations=5000):
         'profit_factors': []
     }
 
-    print("\nRunning Monte Carlo Simulations...")
-    for i in tqdm(range(num_simulations)):
+    for i in range(num_simulations):
         # Resample returns while preserving time series properties
         resampled_returns = stationary_bootstrap(clean_returns)
         
@@ -1488,6 +1406,9 @@ def monte_carlo_returns_test(data, params, num_simulations=5000):
         null_stats['sharpe_ratios'].append(sim_sharpe)
         null_stats['returns'].append(sim_return)
         null_stats['max_drawdowns'].append(max_drawdown)
+
+        if progress_callback:
+            progress_callback()
     
     # Calculate p-values and percentiles
     results = {
@@ -1516,21 +1437,69 @@ def monte_carlo_returns_test(data, params, num_simulations=5000):
             'max_drawdown': stats.percentileofscore(null_stats['max_drawdowns'], trade_stats['Max Drawdown (%)'])
         }
     }
-    
-    # Print summary
-    print("\n=== Monte Carlo Simulation Results ===")
-    print(f"Number of simulations: {num_simulations}")
-    print("\nObserved vs Simulated Metrics:")
-    print(f"Sharpe Ratio: {observed_sharpe:.2f} (p-value: {results['p_values']['sharpe']:.3f})")
-    print(f"Total Return: {clean_returns.sum()*100:.2f}% (p-value: {results['p_values']['return']:.3f})")
-    print(f"Max Drawdown: {trade_stats['Max Drawdown (%)']:.2f}% (p-value: {results['p_values']['max_drawdown']:.3f})")
-    
-    print("\nPercentile Rankings:")
-    print(f"Sharpe Ratio: {results['percentiles']['sharpe']:.1f}th percentile")
-    print(f"Total Return: {results['percentiles']['return']:.1f}th percentile")
-    print(f"Max Drawdown: {results['percentiles']['max_drawdown']:.1f}th percentile")
-    
     return results
+# -------------------------------------------------------------------------------------------------------------
+def monte_carlo(prepared_data, pareto_front):
+    
+    mc_results = []
+    num_simulations = 5000
+    total_iterations = len(pareto_front) * num_simulations
+    
+    print("\nRunning Monte Carlo Analysis across optimized parameter sets...")
+    # Create master progress bar
+    with tqdm(total=total_iterations, desc="Total Progress") as master_pbar:
+        for i, trial in enumerate(pareto_front):
+            params = params_to_result(trial.params)
+            master_pbar.set_description(f"Total Progress [Set {i+1}/{len(pareto_front)}]")
+            
+            # Run Monte Carlo simulation with progress update callback
+            def update_progress():
+                master_pbar.update(1)
+            
+            results = monte_carlo_returns_test(
+                prepared_data, 
+                params, 
+                num_simulations=num_simulations,
+                progress_callback=update_progress
+            )
+            
+            # Store results along with parameter set information
+            mc_results.append({
+                'parameter_set': i+1,
+                'params': params,
+                'p_value': results['p_values']['sharpe'],
+                'percentile': results['percentiles']['sharpe'],
+                'observed_sharpe': results['observed_metrics']['sharpe'],
+                'sim_sharpe_mean': results['simulation_metrics']['sharpe_mean'],
+                'sim_sharpe_std': results['simulation_metrics']['sharpe_std']
+            })
+    
+    # Convert results to DataFrame for analysis
+    results_df = pd.DataFrame(mc_results)
+    
+    # Print summary statistics
+    print("\n=== Monte Carlo Analysis Summary ===")
+    print(f"Total Parameter Sets Analyzed: {len(mc_results)}")
+    print(f"Significant Results (p < 0.05): {(results_df['p_value'] < 0.05).sum()}")
+    
+    print("\nTop 5 Parameter Sets by Statistical Significance:")
+    top_results = results_df.sort_values('p_value').head()
+    
+    headers = ["Set", "Sharpe", "p-value", "Percentile", "Mean", "Std"]
+    rows = []
+    for _, row in top_results.iterrows():
+        rows.append([
+            f"{row['parameter_set']}",
+            f"{row['observed_sharpe']:.2f}",
+            f"{row['p_value']:.3f}",
+            f"{row['percentile']:.1f}",
+            f"{row['sim_sharpe_mean']:.2f}",
+            f"{row['sim_sharpe_std']:.2f}"
+        ])
+    
+    print(tabulate(rows, headers=headers, tablefmt="grid"))
+    
+    return results_df
 # -------------------------------------------------------------------------------------------------------------
 def walk_forward_analysis(prepared_data, parameters, train_months=24, test_months=6, min_train=12, n_jobs=-1):
     """
@@ -1675,11 +1644,17 @@ def main():
 
         IS, OOS = get_data(ticker_str)
         df_prepared = prepare_data(IS)
-        best_params, study = optimize(df_prepared)
-        if best_params is None:
-            mc_results = monte_carlo_returns_test(df_prepared, best_params)
-            if mc_results['p_values']['sharpe'] < 0.05:
-                print("✓ Strategy shows statistical significance in Monte Carlo testing")
+        pareto_front = optimize(df_prepared)
+        if pareto_front is not None:
+            # Run Monte Carlo analysis on multiple parameter sets
+            mc_results_df = monte_carlo(df_prepared, pareto_front)
+            
+            # Find the most statistically significant parameter set
+            best_idx = mc_results_df['p_value'].idxmin()
+            best_params = mc_results_df.loc[best_idx, 'params'] if 'params' in mc_results_df.columns is not None else None
+            
+            if mc_results_df.loc[best_idx, 'p_value'] < 0.05:
+                print("\n✓ Found statistically significant parameter set")
                 print("\n=== Strategy Robustness Analysis ===")
                 oos_prepared = prepare_data(OOS)
                 wfa_results = walk_forward_analysis(
