@@ -4,9 +4,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 from tabulate import tabulate  
-import random
 import pandas_ta as ta 
-from datetime import datetime, timedelta
 import multiprocessing as mp 
 from collections import deque
 from numba import jit
@@ -15,7 +13,7 @@ import optuna
 from functools import partial  # Add missing import for partial
 import traceback
 from scipy import stats
-from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.stattools import adfuller, acf
 from joblib import Parallel, delayed
 #================== SCRIPT PARAMETERS =======================================================================================================================
 # Controls
@@ -25,38 +23,38 @@ TYPE = 4 # 1. Full run # 2. Monte Carlo # 3. Optimization # 4. Test
 OPTIMIZATION_DIRECTIONS = {
     'sharpe': 'maximize',
     'profit_factor': 'maximize',
-    'returns': 'maximize',
+    'win rate': 'maximize',
     'max_drawdown': 'minimize',
 }
 # Optimization objectives
 OBJECTIVE_WEIGHTS = {
     'sharpe': 0.30,        
     'profit_factor': 0.20, 
-    'returns': 0.20,     
-    'max_drawdown': 0.30   
+    'win rate': 0.30,     
+    'max_drawdown': 0.20   
 }
 
 # Optimization parameters
 THRESHOLD = {
-    'Entry': 0.5,
-    'Exit': 0.3,
-    'RSI_BUY': 32,
-    'RSI_EXIT': 62,
+    'Entry': 0.7,
+    'Exit': 0.4,
+    'RSI_BUY': 35,
+    'RSI_EXIT': 60,
 }
-ADX_THRESHOLD_DEFAULT = 25
-DEFAULT_LONG_RISK = 0.04 
-DEFAULT_LONG_REWARD = 0.14 
+ADX_THRESHOLD_DEFAULT = 30
+DEFAULT_LONG_RISK = 0.03 
+DEFAULT_LONG_REWARD = 0.08 
 DEFAULT_POSITION_SIZE = 0.05
-MAX_OPEN_POSITIONS = 100
+MAX_OPEN_POSITIONS = 25
 PERSISTENCE_DAYS = 3
-MAX_POSITION_DURATION = 15
+MAX_POSITION_DURATION = 10
 
 # Risk & Reward
 DEFAULT_SHORT_RISK = 0.01  
 DEFAULT_SHORT_REWARD = 0.03  
 
 # Base parameters
-TICKER = ['BTC-USD']
+TICKER = ['PEP']
 INITIAL_CAPITAL = 10000.0
 
 # Moving average strategy parameters
@@ -337,14 +335,14 @@ def signals(df, adx_threshold, threshold):
     # RSI component (25%)
     rsi_score = np.zeros_like(close_np, dtype=float)
     # RSI below 30 = strong buy signal, scales linearly up to 50
-    rsi_score = np.where(rsi_np < 30, 0.25,
-                         np.where(rsi_np < 50, 0.25 *(50 - rsi_np) / 20, 0))
-    
+    rsi_score = np.where(rsi_np < 30, 0.30,
+                         np.where(rsi_np < 50, 0.30 *(50 - rsi_np) / 20, 0))
+
     # Volume component (20%)
     volume_score = conditions['volume_ok'].astype(float) * 0.2
 
-    # Price action component (15%)
-    price_action_score = conditions['price_momentum_strong'].astype(float) * 0.15
+    # Price action component (10%)
+    price_action_score = conditions['price_momentum_strong'].astype(float) * 0.10
 
     # Combined scores
     momentum_score = trend_score + rsi_score + volume_score + price_action_score
@@ -416,6 +414,31 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
         'Sharpe Ratio': 0,
         'Sortino Ratio': 0
         }, pd.Series(dtype='float64'), pd.Series(dtype='float64')
+
+    # Initialize performance tracking structures
+    performance_log = {
+        'trades': [],
+        'daily_metrics': {
+            'dates': [],
+            'equity': [],
+            'returns': [],
+            'positions': [],
+            'realized_pnl': [],
+            'unrealized_pnl': [],
+            'win_count': 0,
+            'loss_count': 0,
+            'total_pnl': 0.0
+        },
+        'trade_metrics': {
+            'entry_prices': [],
+            'exit_prices': [],
+            'position_sizes': [],
+            'durations': [],
+            'pnls': [],
+            'running_win_rates': [],
+            'running_profit_factors': []
+        }
+    }
 
     # 1. Generate signals using the indicator-laden DataFrame
     signals_df = signals(df_with_indicators, adx_threshold=adx_threshold, threshold=threshold)
@@ -513,16 +536,58 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                             }
                 trade_manager.process_entry(current_date, entry_params, direction='Long')
 
-        # --- Portfolio Tracking ---
+        # Performance Tracking
         total_value = trade_manager.portfolio_value + trade_manager.unrealized_pnl(transaction_price)
         equity_curve.iloc[i] = total_value
         returns_series.iloc[i] = (total_value / equity_curve.iloc[i-1] - 1) if equity_curve.iloc[i-1] != 0 else 0.0
 
-    # Calculate statistics using the single trade manager's data
-    stats = trade_statistics(equity_curve, trade_manager.trade_log, trade_manager.wins, 
-                             trade_manager.losses, risk_free_rate)
+        # Log daily performance
+        performance_log['daily_metrics']['dates'].append(current_date)
+        performance_log['daily_metrics']['equity'].append(total_value)
+        performance_log['daily_metrics']['returns'].append(returns_series.iloc[i])
+        performance_log['daily_metrics']['positions'].append(trade_manager.position_count)
+        performance_log['daily_metrics']['realized_pnl'].append(trade_manager.portfolio_value - INITIAL_CAPITAL)
+        performance_log['daily_metrics']['unrealized_pnl'].append(trade_manager.unrealized_pnl(transaction_price))
 
-    return trade_manager.trade_log, stats, equity_curve, returns_series
+        # Update trade metrics if new trades completed
+        if trade_manager.trade_log:
+            latest_trade = trade_manager.trade_log[-1]
+            performance_log['trades'].append(latest_trade)
+            
+            # Update running statistics
+            performance_log['trade_metrics']['entry_prices'].append(latest_trade['Entry Price'])
+            performance_log['trade_metrics']['exit_prices'].append(latest_trade['Exit Price'])
+            performance_log['trade_metrics']['pnls'].append(latest_trade['PnL'])
+            performance_log['trade_metrics']['durations'].append(latest_trade['Duration'])
+            
+            if latest_trade['PnL'] > 0:
+                performance_log['daily_metrics']['win_count'] += 1
+            else:
+                performance_log['daily_metrics']['loss_count'] += 1
+
+            performance_log['daily_metrics']['total_pnl'] += latest_trade['PnL']
+
+            # Calculate running metrics
+            total_trades = len(performance_log['trades'])
+            current_win_rate = (performance_log['daily_metrics']['win_count'] / total_trades * 100)
+            
+            profits = sum(t['PnL'] for t in performance_log['trades'] if t['PnL'] > 0)
+            losses = abs(sum(t['PnL'] for t in performance_log['trades'] if t['PnL'] < 0))
+            current_profit_factor = profits / losses if losses != 0 else float('inf')
+            
+            performance_log['trade_metrics']['running_win_rates'].append(current_win_rate)
+            performance_log['trade_metrics']['running_profit_factors'].append(current_profit_factor)
+
+    # Calculate final statistics
+    stats = trade_statistics(
+        equity_curve, 
+        performance_log['trades'],
+        deque(t['PnL'] for t in performance_log['trades'] if t['PnL'] > 0),
+        deque(t['PnL'] for t in performance_log['trades'] if t['PnL'] < 0),
+        risk_free_rate
+    )
+
+    return performance_log, stats, equity_curve, returns_series
 # --------------------------------------------------------------------------------------------------------------------------
 class TradeManager:
     def __init__(self, initial_capital, max_positions):
@@ -994,13 +1059,293 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
         'Sharpe Ratio': sharpe_ratio,
         'Sortino Ratio': sortino_ratio
     }
+#================== OPTIMIZING STRATEGY =======================================================================================================================
+def parameter_test(df, long_risk, long_reward, position_size, tech_params, trial=None):
+    bad_metrics_template = []
+    for metric_name in OPTIMIZATION_DIRECTIONS:
+        if OPTIMIZATION_DIRECTIONS[metric_name] == 'maximize':
+            bad_metrics_template.append(-np.inf)
+        else: # minimize
+            bad_metrics_template.append(np.inf)
+    
+    # For debugging  
+    if trial:
+        trial_num = trial.number
+    else:
+        trial_num = "Unknown"
+        
+    try:
+        performance_log, stats, equity_curve, returns_series = momentum(
+            df,
+            long_risk=long_risk,
+            long_reward=long_reward,
+            position_size=position_size,
+            max_positions=tech_params.get('MAX_OPEN_POSITIONS', MAX_OPEN_POSITIONS),
+            adx_threshold=tech_params.get('ADX_THRESHOLD', ADX_THRESHOLD_DEFAULT),
+            persistence_days=tech_params.get('PERSISTENCE_DAYS', PERSISTENCE_DAYS),
+            max_position_duration=tech_params.get('MAX_POSITION_DURATION', MAX_POSITION_DURATION),
+            threshold=tech_params.get('THRESHOLD', THRESHOLD),
+        )
+        
+        # 5. Process metrics
+        required_metrics_keys = ['Sharpe Ratio', 'Profit Factor', 'Return (%)', 'Max Drawdown (%)']
+        if stats and all(metric in stats for metric in required_metrics_keys):
+            metrics = [
+                stats['Sharpe Ratio'],
+                stats['Profit Factor'],
+                stats['Win Rate'],
+                stats['Max Drawdown (%)']
+            ]
+            
+            if trial:
+                trial.set_user_attr('sharpe', metrics[0])
+                trial.set_user_attr('profit_factor', metrics[1])
+                trial.set_user_attr('win_rate', metrics[2])
+                trial.set_user_attr('max_drawdown', metrics[3])
+                trial.set_user_attr('num_trades', len(performance_log['trades']))
+                
+                # Store additional performance metrics
+                trial.set_user_attr('avg_trade_duration', 
+                    np.mean(performance_log['trade_metrics']['durations']) if performance_log['trade_metrics']['durations'] else 0)
+                trial.set_user_attr('total_pnl', 
+                    performance_log['daily_metrics']['total_pnl'])
+                
+            return metrics
+
+        return bad_metrics_template
+        
+    except optuna.exceptions.TrialPruned:
+        raise
+    except Exception as e:
+        print(f"Error in parameter evaluation for trial {trial_num}: {e}")
+        return bad_metrics_template
+# -------------------------------------------------------------------------------------------------------------
+def objectives(trial, base_df):
+    # Define parameter search spaces for both basic and technical parameters
+    bad_metrics_template = []
+    for metric_name in OPTIMIZATION_DIRECTIONS: # Ensure order matches OPTIMIZATION_DIRECTIONS
+        if OPTIMIZATION_DIRECTIONS[metric_name] == 'maximize':
+            bad_metrics_template.append(-np.inf)
+        else: # minimize
+            bad_metrics_template.append(np.inf)
+    params = {
+        # Basic parameters
+        'long_risk': trial.suggest_float('long_risk', 0.01, 0.10, step=0.01),
+        'long_reward': trial.suggest_float('long_reward', 0.02, 0.20, step=0.01),
+        'position_size': trial.suggest_float('position_size', 0.05, 0.50, step=0.05),
+
+        # Technical parameters
+        'max_open_positions': trial.suggest_int('max_open_positions', 5, 50,),
+        'adx_threshold': trial.suggest_float('adx_threshold', 20.0, 30.0, step=1.0),
+        'persistence_days': trial.suggest_int('persistence_days', 3,7),
+        'max_position_duration': trial.suggest_int('max_position_duration', 5, 30),
+
+        # Thresholds
+        'entry': trial.suggest_float('entry', 0.5, 0.7, step=0.05),
+        'exit': trial.suggest_float('exit', 0.3, 0.5, step=0.05),
+        'rsi_buy': trial.suggest_float('rsi_buy', 30, 35, step=0.5),
+        'rsi_exit': trial.suggest_float('rsi_exit', 60, 65, step=0.5),
+    }
+    
+    # 1. Risk/Reward Validation
+    if (params['long_risk'] >= params['long_reward']):
+        trial.set_user_attr("invalid_reason", "Risk >= Reward")
+        return bad_metrics_template
+
+    if (params['long_reward']/params['long_risk'] > 4.0):
+        trial.set_user_attr("invalid_reason", "High Reward/Risk Ratio")
+        return bad_metrics_template
+
+    # 2. Position Sizing Validation
+    max_position_risk = params['position_size'] * params['max_open_positions']
+    if max_position_risk > 2.0:  # >100% exposure
+        trial.set_user_attr("invalid_reason", "Excessive position risk")
+        return bad_metrics_template
+    
+    # Set up signal weights
+    threshold = THRESHOLD.copy()
+    threshold['Entry'] = params['entry']
+    threshold['Exit'] = params['exit']
+    threshold['RSI_BUY'] = params['rsi_buy']
+    threshold['RSI_EXIT'] = params['rsi_exit']
+
+    # Set up combined tech params
+    tech_params = { 
+        'MAX_OPEN_POSITIONS': params['max_open_positions'],
+        'ADX_THRESHOLD': params['adx_threshold'],
+        'PERSISTENCE_DAYS': params['persistence_days'],
+        'MAX_POSITION_DURATION': params['max_position_duration'],
+        'THRESHOLD': threshold,
+    }
+    # Evaluate this parameter set
+    return parameter_test(
+        base_df.copy(),
+        params['long_risk'],
+        params['long_reward'],
+        params['position_size'],
+        tech_params,
+        trial
+    )
+# --------------------------------------------------------------------------------------------------------------
+def optimize(prepared_data):
+    # Optimizing parameters for Optuna
+    target_metrics = list(OPTIMIZATION_DIRECTIONS.keys())
+    opt_directions = [OPTIMIZATION_DIRECTIONS[metric] for metric in target_metrics]
+    n_trials=50
+    min_completed_trials=20
+    timeout=3600
+
+    data = prepared_data.copy()
+    if data.empty:
+        print("Warning: Empty dataframe provided to optimize.")
+        return None
+    
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    base_pruner=optuna.pruners.HyperbandPruner(
+            min_resource=5, max_resource=n_trials, reduction_factor=3)
+    # Create Optuna study with pruning
+    study = optuna.create_study(
+        directions=opt_directions,  # Direction for each metric
+        study_name=f"strategy_optimization",
+        pruner=optuna.pruners.PatientPruner(base_pruner, patience=3),
+        sampler=optuna.samplers.NSGAIIISampler(seed=42, population_size=50)  # Use NSGA-III for multi-objective
+    )
+
+    # Define the objective function
+    objective_func = partial(objectives, base_df=data)
+        
+    # Run optimization with progress bar
+    completed_trials=0
+    print("\nOptimizing Parameters...")
+    try:
+        study.optimize(objective_func, n_trials=n_trials, timeout=timeout, 
+                n_jobs=max(1, mp.cpu_count() - 1),
+                show_progress_bar=True)
+        completed_trials = len(study.trials)
+    except Exception as e:
+        print(f"Optimization error: {e}")
+
+    # Ensure minimum number of trials are completed
+    if completed_trials < min_completed_trials:
+        print(f"Only {completed_trials}/{min_completed_trials} minimum trials completed. Running additional trials...")
+        additional_trials = min_completed_trials - completed_trials
+        study.optimize(objective_func, n_trials=additional_trials,
+                      n_jobs=1, show_progress_bar=True) 
+    
+    # Get Pareto front solutions
+    all_trials = study.trials
+    # Filter out failed trials and sort by custom criteria
+    filtered_trials = []
+    for trial in all_trials:
+        if trial.state == optuna.trial.TrialState.COMPLETE and trial.values is not None:
+            # Get trial metrics
+            metrics_dict = {
+                'sharpe': trial.values[0],
+                'profit_factor': trial.values[1],
+                'win rate': trial.values[2],
+                'max_drawdown': trial.values[3]
+            }
+            # Skip trials with invalid metrics (-inf/inf)
+            if any(np.isinf(v) for v in trial.values):
+                continue  
+            # Calculate combined score for ranking
+            combined_score = (
+                OBJECTIVE_WEIGHTS['sharpe'] * metrics_dict['sharpe'] +
+                OBJECTIVE_WEIGHTS['profit_factor'] * min(metrics_dict['profit_factor'], 100) +
+                OBJECTIVE_WEIGHTS['win rate'] * metrics_dict['win rate'] -
+                OBJECTIVE_WEIGHTS['max_drawdown'] * abs(metrics_dict['max_drawdown'])
+            )
+            filtered_trials.append((trial, combined_score))
+    # Sort trials by combined score
+    filtered_trials.sort(key=lambda x: x[1], reverse=True)
+    # Extract just the trials for display
+    pareto_front = [trial_tuple[0] for trial_tuple in filtered_trials]
+    return pareto_front[:15]
+# --------------------------------------------------------------------------------------------------------------------------
+def visualize(pareto_front, base_df):
+    while True:
+        # Extract trial metrics for display
+        trial_metrics = []
+        for i, trial in enumerate(pareto_front, 1):
+            metrics = {
+                'Trial': i,
+                'Sharpe': f"{trial.values[0]:.2f}",
+                'ProfitFactor': f"{trial.values[1]:.2f}",
+                'WinRate(%)': f"{trial.values[2]:.1f}",
+                'MaxDD(%)': f"{abs(trial.values[3]):.1f}",
+                'Trades': trial.user_attrs.get('num_trades', 0)
+            }
+            trial_metrics.append(metrics)
+
+        # Display trials table
+        print("\n=== Optimization Results ===")
+        print(tabulate(
+            trial_metrics,
+            headers='keys',
+            tablefmt='grid',
+            floatfmt='.2f'
+        ))
+
+        # Get user input
+        try:
+            choice = input("\nEnter trial number to test (or 'exit' to quit): ").strip().lower()
+            
+            if choice == 'exit':
+                break
+            
+            trial_num = int(choice) - 1
+            if 0 <= trial_num < len(pareto_front):
+                selected_trial = pareto_front[trial_num]
+                
+                # Extract parameters from selected trial
+                params = {
+                    'long_risk': float(selected_trial.params['long_risk']),
+                    'long_reward': float(selected_trial.params['long_reward']),
+                    'position_size': float(selected_trial.params['position_size']),
+                    'max_positions_param': int(selected_trial.params['max_open_positions']),
+                    'adx_thresh': float(selected_trial.params['adx_threshold']),
+                    'persistence_days': int(selected_trial.params['persistence_days']),
+                    'max_position_duration': int(selected_trial.params['max_position_duration']),
+                    'threshold': {
+                        'Entry': float(selected_trial.params['entry']),
+                        'Exit': float(selected_trial.params['exit']),
+                        'RSI_BUY': float(selected_trial.params['rsi_buy']),
+                        'RSI_EXIT': float(selected_trial.params['rsi_exit'])
+                    }
+                }
+
+                # Run test with selected parameters
+                print(f"\nTesting Trial {trial_num + 1} Parameters...")
+                test(
+                    base_df,
+                    long_risk=params['long_risk'],
+                    long_reward=params['long_reward'],
+                    position_size=params['position_size'],
+                    max_positions_param=params['max_positions_param'],
+                    adx_thresh=params['adx_thresh'],
+                    persistence_days=params['persistence_days'],
+                    max_position_duration=params['max_position_duration'],
+                    threshold=params['threshold']
+                )
+
+                input("\nPress Enter to return to trial selection...")
+                
+            else:
+                print(f"Invalid trial number. Please select 1-{len(pareto_front)}")
+                
+        except ValueError:
+            print("Invalid input. Please enter a number or 'exit'")
+        except Exception as e:
+            print(f"Error: {e}")
+
+    return None
 # --------------------------------------------------------------------------------------------------------------------------
 def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, position_size=DEFAULT_POSITION_SIZE, max_positions_param=MAX_OPEN_POSITIONS,
          adx_thresh=ADX_THRESHOLD_DEFAULT, persistence_days=PERSISTENCE_DAYS, max_position_duration=MAX_POSITION_DURATION, threshold=THRESHOLD): 
     
     df = df_input.copy()
     
-    trade_log, trade_stats, portfolio_equity, trade_returns = momentum(
+    performance_log, stats, equity_curve, returns_series = momentum(
         df_input, long_risk=long_risk, long_reward=long_reward, position_size=position_size, risk_free_rate=0.04, max_positions=max_positions_param,
         adx_threshold=adx_thresh, persistence_days=persistence_days, max_position_duration=max_position_duration, threshold=threshold)
 
@@ -1008,72 +1353,465 @@ def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
     df.loc[:, 'Asset_Returns'] = df['Close'].pct_change().fillna(0).cumsum()
     
     # Convert equity curve to returns for comparison
-    df.loc[:, 'Strategy_Returns'] = (portfolio_equity / portfolio_equity.iloc[0] - 1)
-    
-    first_close = df['Close'].iloc[0] 
+    df.loc[:, 'Strategy_Returns'] = returns_series.cumsum()
+
+    first_close = df['Close'].iloc[0]
     last_close = df['Close'].iloc[-1]
     buy_hold_return = ((last_close / first_close) - 1) * 100
-    
-    peak_equity = portfolio_equity.max()
-    exposure_time = ((df.index[-1] - df.index[0]).days)
-    
-    if trade_log:
-        best_trade_pct = max([t['PnL'] for t in trade_log if t['PnL'] is not None], default=0) / portfolio_equity.iloc[0] * 100 if portfolio_equity.iloc[0] !=0 else 0
-        worst_trade_pct = min([t['PnL'] for t in trade_log if t['PnL'] is not None], default=0) / portfolio_equity.iloc[0] * 100 if portfolio_equity.iloc[0] !=0 else 0
-        avg_trade_pnl_values = [t['PnL'] for t in trade_log if t['PnL'] is not None]
-        avg_trade_pct = (sum(avg_trade_pnl_values) / len(avg_trade_pnl_values) / portfolio_equity.iloc[0] * 100) if avg_trade_pnl_values and portfolio_equity.iloc[0] !=0 else 0
+
+    peak_equity = equity_curve.max()
+    exposure_time = (df.index[-1] - df.index[0]).days
+
+    # Extract trade metrics from performance log
+    if performance_log['trades']:
+        trade_pnls = [t['PnL'] for t in performance_log['trades']]
+        best_trade_pct = max(trade_pnls) / peak_equity * 100 if peak_equity != 0 else 0
+        worst_trade_pct = min(trade_pnls) / peak_equity * 100 if peak_equity != 0 else 0
+        avg_trade_pct = (sum(trade_pnls) / len(trade_pnls) / peak_equity * 100) if trade_pnls and peak_equity != 0 else 0
         
-        durations = [t['Duration'] for t in trade_log if t['Duration'] is not None]
+        durations = performance_log['trade_metrics']['durations']
         max_duration = max(durations) if durations else 0
         avg_duration = sum(durations) / len(durations) if durations else 0
     else:
         best_trade_pct = worst_trade_pct = avg_trade_pct = max_duration = avg_duration = 0
 
+    # Display results
     print(f"\n=== STRATEGY SUMMARY ===") 
     print(f"Long Risk: {long_risk*100:.1f}% | Long Reward: {long_reward*100:.1f}%")
-    # print(f"Short Risk: {short_risk*100:.1f}% | Short Reward: {short_reward*100:.1f}%")
     print(f"Position Size: {position_size*100:.1f}% | Max Open Positions: {max_positions_param}")
     print(f"ADX Threshold: {adx_thresh:.1f} | Persistence: {persistence_days} days | Max Duration: {max_position_duration} days")
     print(f"Signal Weights: {threshold}")
     
     metrics = [
-        ["Starting Capital [$]", f"{portfolio_equity.iloc[0]:,.2f}"],
-        ["Ending Capital [$]", f"{portfolio_equity.iloc[-1]:,.2f}"],
+        ["Starting Capital [$]", f"{equity_curve.iloc[0]:,.2f}"],
+        ["Ending Capital [$]", f"{equity_curve.iloc[-1]:,.2f}"],
         ["Start", f"{df.index[0].strftime('%Y-%m-%d')}"],
         ["End", f"{df.index[-1].strftime('%Y-%m-%d')}"],
         ["Duration [days]", f"{exposure_time}"],
-        ["Equity Final [$]", f"{portfolio_equity.iloc[-1]:,.2f}"],
+        ["Equity Final [$]", f"{equity_curve.iloc[-1]:,.2f}"],
         ["Equity Peak [$]", f"{peak_equity:,.2f}"],
-        ["Return [%]", f"{trade_stats['Return (%)']:.2f}"],
+        ["Return [%]", f"{stats['Return (%)']:.2f}"],
         ["Buy & Hold Return [%]", f"{buy_hold_return:.2f}"],
-        ["Annual Return [%]", f"{trade_stats['Annualized Return (%)']:.2f}"],
-        ["Sharpe Ratio", f"{trade_stats['Sharpe Ratio']:.2f}"],
-        ["Sortino Ratio", f"{trade_stats['Sortino Ratio']:.2f}"],
-        ["Max. Drawdown [%]", f"{trade_stats['Max Drawdown (%)']:.2f}"],
+        ["Annual Return [%]", f"{stats['Annualized Return (%)']:.2f}"],
+        ["Sharpe Ratio", f"{stats['Sharpe Ratio']:.2f}"],
+        ["Sortino Ratio", f"{stats['Sortino Ratio']:.2f}"],
+        ["Max. Drawdown [%]", f"{stats['Max Drawdown (%)']:.2f}"],
     ]
     print(tabulate(metrics, tablefmt="simple", colalign=("left", "right")))
     
     print(f"\n=== TRADE SUMMARY ===") 
     trade_metrics = [
-        ["Total Trades", f"{trade_stats['Total Trades']:.0f}"], 
-        ["Win Rate [%]", f"{trade_stats['Win Rate']:.2f}"],
+        ["Total Trades", f"{stats['Total Trades']:.0f}"], 
+        ["Win Rate [%]", f"{stats['Win Rate']:.2f}"],
         ["Best Trade [%]", f"{best_trade_pct:.2f}"],
         ["Worst Trade [%]", f"{worst_trade_pct:.2f}"],
         ["Avg. Trade [%]", f"{avg_trade_pct:.2f}"],
         ["Max. Trade Duration [days]", f"{max_duration}"],
         ["Avg. Trade Duration [days]", f"{avg_duration:.1f}"],
-        ["Profit Factor", f"{trade_stats['Profit Factor']:.2f}"],
-        ["Expectancy [%]", f"{trade_stats['Expectancy (%)']:.2f}"]
+        ["Profit Factor", f"{stats['Profit Factor']:.2f}"],
+        ["Expectancy [%]", f"{stats['Expectancy (%)']:.2f}"]
     ]
     print(tabulate(trade_metrics, tablefmt="simple", colalign=("left", "right")))
-
-def main():
-    IS_df, OOS_df = get_data(TICKER)
-    df_prepared = prepare_data(IS_df)
-    test(df_prepared, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, position_size=DEFAULT_POSITION_SIZE, max_positions_param=MAX_OPEN_POSITIONS,
-                adx_thresh=ADX_THRESHOLD_DEFAULT, persistence_days=PERSISTENCE_DAYS, max_position_duration=MAX_POSITION_DURATION, threshold=THRESHOLD)
+     
     return None
-
-if __name__ == "__main__":
-    main()     
+#================== STRATEGY SIGNIFICANCE TESTING ==============================================================================================================7
+def stationary_bootstrap(series, block_size):
+    n = len(series)
+    indices = []
+    current_idx = np.random.randint(0, n)
+    while len(indices) < n:
+        block_length = np.random.geometric(1/block_size)
+        # Circular indexing for the entire block
+        block_indices = [(current_idx + i) % n for i in range(block_length)]
+        indices.extend(block_indices)
+        current_idx = np.random.randint(0, n)
+    return series.iloc[indices[:n]]
+# --------------------------------------------------------------------------------------------------------------------------   
+def find_optimal_block_size(clean_returns, max_blocks=50):
+    """
+    Find optimal block size by comparing ACF of original and bootstrapped returns
+    """
+    from statsmodels.tsa.stattools import acf
+    import matplotlib.pyplot as plt
     
+    # Calculate original ACF
+    orig_acf = acf(clean_returns, nlags=10)
+    
+    # Test different block sizes
+    mse_scores = []
+    block_sizes = range(5, max_blocks, 5)
+    
+    for block_size in block_sizes:
+        # Generate bootstrapped returns and calculate ACF
+        bootstrap_acf = acf(stationary_bootstrap(clean_returns, block_size), nlags=10)
+        
+        # Calculate Mean Squared Error between original and bootstrapped ACF
+        mse = np.mean((orig_acf - bootstrap_acf) ** 2)
+        mse_scores.append(mse)
+    
+    # Find optimal block size
+    optimal_block_size = block_sizes[np.argmin(mse_scores)]
+    
+    # Plot comparison for optimal block size
+    plt.figure(figsize=(10, 6))
+    bootstrap_acf = acf(stationary_bootstrap(clean_returns, optimal_block_size), nlags=10)
+    
+    plt.plot(orig_acf, 'b-', label='Original Returns')
+    plt.plot(bootstrap_acf, 'r--', label='Bootstrapped Returns')
+    plt.title(f'ACF Comparison (Block Size = {optimal_block_size})')
+    plt.xlabel('Lag')
+    plt.ylabel('ACF')
+    plt.legend()
+    plt.grid(True)
+    # plt.show()
+    
+    return optimal_block_size
+# --------------------------------------------------------------------------------------------------------------------------
+def monte_carlo_returns_test(data, params, num_simulations=None, progress_callback=None):
+    """Run Monte Carlo simulation with enhanced return structure"""
+    
+    # Initialize null stats dictionary
+    null_stats = {
+        'profit_factor': np.zeros(num_simulations),  # Changed from profit_factors
+        'win_rate': np.zeros(num_simulations),       # Changed from win_rates
+        'sharpe': np.zeros(num_simulations),         # Changed from sharpe_ratios
+        'max_drawdown': np.zeros(num_simulations)    # Changed from max_drawdowns
+    }
+
+    # Run original strategy to get baseline performance
+    performance_log, stats, equity_curve, returns_series = momentum(
+        data,
+        long_risk=params['long_risk'],
+        long_reward=params['long_reward'],
+        position_size=params['position_size'],
+        max_positions=params['max_positions_param'],
+        adx_threshold=params['adx_thresh'],
+        persistence_days=params['persistence_days'],
+        max_position_duration=params['max_position_duration'],
+        threshold=params['threshold']
+    )
+    
+    # Get observed metrics with consistent naming
+    observed_metrics = {
+        'profit_factor': stats['Profit Factor'],
+        'win_rate': stats['Win Rate'],
+        'sharpe': stats['Sharpe Ratio'],
+        'max_drawdown': stats['Max Drawdown (%)']
+    }
+
+    # Clean returns and find optimal block size
+    clean_returns = returns_series.replace([np.inf, -np.inf], np.nan).dropna()
+    optimal_block_size = find_optimal_block_size(clean_returns)
+    
+    # Run simulations
+    for i in range(num_simulations):
+        if progress_callback:
+            progress_callback()
+            
+        # Bootstrap returns
+        resampled_returns = stationary_bootstrap(clean_returns, optimal_block_size)
+        
+        # Calculate metrics for this simulation
+        cum_returns = (1 + resampled_returns).cumprod()
+        
+        # Calculate metrics
+        pos_returns = resampled_returns[resampled_returns > 0]
+        neg_returns = resampled_returns[resampled_returns < 0]
+        
+        profit_factor = (pos_returns.sum() / abs(neg_returns.sum())) if len(neg_returns) > 0 else np.inf
+        win_rate = (len(pos_returns) / len(resampled_returns)) * 100
+        sharpe = (resampled_returns.mean() / resampled_returns.std()) * np.sqrt(252) if resampled_returns.std() != 0 else 0
+        
+        # Calculate drawdown
+        peak = cum_returns.expanding(min_periods=1).max()
+        drawdown = ((cum_returns - peak) / peak).min() * 100
+        
+        # Store results with consistent naming
+        null_stats['profit_factor'][i] = profit_factor
+        null_stats['win_rate'][i] = win_rate
+        null_stats['sharpe'][i] = sharpe
+        null_stats['max_drawdown'][i] = abs(drawdown)
+
+    # Calculate p-values correctly based on metric type
+    p_values = {}
+    for metric in observed_metrics.keys():
+        sim_values = null_stats[metric]
+        observed = observed_metrics[metric]
+        
+        if metric == 'max_drawdown':
+            # For drawdown, lower is better
+            p_values[metric] = np.mean(sim_values <= observed)
+        elif metric in ['profit_factor', 'win_rate', 'sharpe']:
+            # For these metrics, higher is better
+            p_values[metric] = np.mean(sim_values >= observed)
+        
+        # Handle inf values
+        if np.isinf(observed):
+            p_values[metric] = 1.0
+
+    return {
+        'observed_metrics': observed_metrics,
+        'simulation_metrics': {
+            metric: {
+                'mean': np.nanmean(values),
+                'std': np.nanstd(values)
+            }
+            for metric, values in null_stats.items()
+        },
+        'p_values': p_values
+    }
+# --------------------------------------------------------------------------------------------------------------------------
+def monte_carlo(prepared_data, pareto_front):
+    """Run Monte Carlo analysis on optimized parameter sets"""
+    
+    mc_results = []
+    num_simulations = 5000
+    total_iterations = len(pareto_front) * num_simulations
+    
+    print("\nRunning Monte Carlo Analysis across optimized parameter sets...")
+    with tqdm(total=total_iterations, desc="Total Progress") as master_pbar:
+        for i, trial in enumerate(pareto_front):
+            # Convert trial parameters to proper format
+            params = {
+                'long_risk': float(trial.params['long_risk']),
+                'long_reward': float(trial.params['long_reward']),
+                'position_size': float(trial.params['position_size']),
+                'max_positions_param': int(trial.params['max_open_positions']),
+                'adx_thresh': float(trial.params['adx_threshold']),
+                'persistence_days': int(trial.params['persistence_days']),
+                'max_position_duration': int(trial.params['max_position_duration']),
+                'threshold': {
+                    'Entry': float(trial.params['entry']),
+                    'Exit': float(trial.params['exit']),
+                    'RSI_BUY': float(trial.params['rsi_buy']),
+                    'RSI_EXIT': float(trial.params['rsi_exit'])
+                }
+            }
+            
+            # Run Monte Carlo simulation
+            results = monte_carlo_returns_test(
+                prepared_data,
+                params,
+                num_simulations=num_simulations,
+                progress_callback=lambda: master_pbar.update(1)
+            )
+            
+            # Store results
+            mc_results.append({
+                'parameter_set': i+1,
+                'params': params,
+                **{f'p_value_{k}': v for k, v in results['p_values'].items()},
+                **{f'observed_{k}': v for k, v in results['observed_metrics'].items()},
+                **{f'sim_{k}_mean': v['mean'] for k, v in results['simulation_metrics'].items()},
+                **{f'sim_{k}_std': v['std'] for k, v in results['simulation_metrics'].items()}
+            })
+    
+    return pd.DataFrame(mc_results)
+#================== STRATEGY ROBUSTNESS TESTING ==================================================================================================================
+def walk_forward_analysis(prepared_data, parameters, train_months=24, test_months=6, min_train=12, n_jobs=-1):
+    
+    def run_strategy_window(data_window):
+        """Run strategy on a specific data window"""
+        performance_log, stats, equity_curve, returns_series = momentum(
+            data_window,
+            long_risk=parameters['long_risk'],
+            long_reward=parameters['long_reward'],
+            position_size=parameters['position_size'],
+            max_positions=parameters['tech_params']['MAX_OPEN_POSITIONS'],
+            adx_threshold_sig=parameters['tech_params']['ADX_THRESHOLD'],
+            persistence_days=parameters['tech_params']['PERSISTENCE_DAYS'],
+            max_position_duration=parameters['tech_params']['MAX_POSITION_DURATION'],
+            threshold=parameters['tech_params']['THRESHOLD']
+        )
+        return {'stats': stats, 'returns_series': returns_series}
+
+    def process_window(train_start, train_end, test_end, data):
+        """Process individual walk-forward window"""
+        try:
+            # Split data into train and test periods
+            train = data.loc[train_start:train_end].copy()
+            test = data.loc[train_end:test_end].copy()
+            
+            if train.empty or test.empty:
+                return None
+            
+            # Run strategy on both periods
+            train_result = run_strategy_window(train)
+            test_result = run_strategy_window(test)
+            
+            # Calculate performance decay
+            train_sharpe = train_result['stats']['Sharpe Ratio']
+            test_sharpe = test_result['stats']['Sharpe Ratio']
+            decay = train_sharpe - test_sharpe
+            
+            # Check consistency
+            consistency = 1 if test_sharpe > 0 else 0
+            
+            # Test stationarity between periods
+            combined_returns = pd.concat([
+                pd.Series(train_result['returns_series']),
+                pd.Series(test_result['returns_series'])
+            ])
+            adf_p = adfuller(combined_returns.dropna())[1]
+            
+            return {
+                'train_period': (train_start, train_end),
+                'test_period': (train_end, test_end),
+                'train_sharpe': train_sharpe,
+                'test_sharpe': test_sharpe,
+                'decay_ratio': decay/max(0.01, abs(train_sharpe)),
+                'consistency': consistency,
+                'stationarity_p': adf_p
+            }
+            
+        except Exception as e:
+            print(f"Error processing window {train_start} to {test_end}: {e}")
+            return None
+
+    # Generate windows for analysis
+    dates = prepared_data.index.sort_values()
+    windows = []
+    train_start = dates[0]
+    
+    while train_start <= dates[-1] - pd.DateOffset(months=min_train+test_months):
+        train_end = train_start + pd.DateOffset(months=train_months)
+        test_end = train_end + pd.DateOffset(months=test_months)
+        
+        if test_end > dates[-1]:
+            break
+            
+        windows.append((train_start, train_end, test_end, prepared_data))
+        train_start += pd.DateOffset(months=test_months)
+
+    # Run parallel processing
+    print("\nRunning Walk-Forward Analysis...")
+    with tqdm(total=len(windows)) as pbar:
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(process_window)(*window) for window in windows
+        )
+        pbar.update()
+
+    # Filter out None results and create DataFrame
+    results = [r for r in results if r is not None]
+    if not results:
+        print("No valid results from walk-forward analysis")
+        return None
+        
+    df = pd.DataFrame(results)
+    
+    # Calculate aggregate metrics
+    decay_stats = {
+        'mean_decay': df['decay_ratio'].mean(),
+        'std_decay': df['decay_ratio'].std(),
+        'probability_positive': df['test_sharpe'].gt(0).mean(),
+        'stationary_fraction': df['stationarity_p'].lt(0.05).mean()
+    }
+    
+    # Print summary
+    print("\n=== Walk-Forward Analysis Results ===")
+    print(f"Number of windows analyzed: {len(results)}")
+    print(f"\nDecay Statistics:")
+    print(f"Mean Performance Decay: {decay_stats['mean_decay']:.2f}")
+    print(f"Decay Std Dev: {decay_stats['std_decay']:.2f}")
+    print(f"Probability of Positive Sharpe: {decay_stats['probability_positive']*100:.1f}%")
+    print(f"Fraction of Stationary Windows: {decay_stats['stationary_fraction']*100:.1f}%")
+    
+    print("\nWindow Details:")
+    window_stats = pd.DataFrame({
+        'Train Sharpe': df['train_sharpe'],
+        'Test Sharpe': df['test_sharpe'],
+        'Decay Ratio': df['decay_ratio']
+    })
+    print(tabulate(window_stats, headers='keys', tablefmt='grid'))
+    
+    return {'results': df, 'metrics': decay_stats}
+#================== MAIN PROGRAM EXECUTION =======================================================================================================================
+def main():
+    try:
+        if isinstance(TICKER, list):
+            ticker_str = TICKER[0]
+        else:
+            ticker_str = TICKER
+        IS, OOS = get_data(ticker_str)
+        df_prepared = prepare_data(IS)
+        if TYPE == 4:
+            test(df_prepared, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, position_size=DEFAULT_POSITION_SIZE, max_positions_param=MAX_OPEN_POSITIONS,
+                adx_thresh=ADX_THRESHOLD_DEFAULT, persistence_days=PERSISTENCE_DAYS, max_position_duration=MAX_POSITION_DURATION, threshold=THRESHOLD)
+        elif TYPE == 3:
+            # Run optimization on in-sample data
+            pareto_front = optimize(df_prepared)
+            visualize(pareto_front, df_prepared)
+        if TYPE == 2:  # Monte Carlo Testing
+            # First get optimized parameters
+            pareto_front = optimize(df_prepared)
+            if pareto_front is not None:
+                # Run Monte Carlo analysis
+                mc_results = monte_carlo(df_prepared, pareto_front)
+                
+                # Get best parameter set based on Monte Carlo results
+                # Fix: Use correct column name 'p_value_profit_factor'
+                best_set = mc_results.loc[mc_results['p_value_profit_factor'].idxmin()]
+                
+                if best_set['p_value_profit_factor'] < 0.05:
+                    print("\n✓ Found statistically significant parameter set")
+                    print("\nTesting best parameter set from Monte Carlo analysis...")
+                    test(
+                        df_prepared,
+                        long_risk=best_set['params']['long_risk'],
+                        long_reward=best_set['params']['long_reward'],
+                        position_size=best_set['params']['position_size'],
+                        max_positions_param=best_set['params']['max_positions_param'],
+                        adx_thresh=best_set['params']['adx_thresh'],
+                        persistence_days=best_set['params']['persistence_days'],
+                        max_position_duration=best_set['params']['max_position_duration'],
+                        threshold=best_set['params']['threshold']
+                    )
+                else:
+                    print("⚠ Strategy fails to show statistical significance in Monte Carlo testing")
+                    
+                # Print Monte Carlo results summary
+                print("\n=== Monte Carlo Analysis Results ===")
+                print("\nP-values:")
+                p_values = {k: v for k, v in best_set.items() if k.startswith('p_value_')}
+                for metric, p_value in p_values.items():
+                    print(f"{metric.replace('p_value_', '')}: {p_value:.4f}")
+                
+                print("\nObserved Metrics:")
+                observed = {k: v for k, v in best_set.items() if k.startswith('observed_')}
+                for metric, value in observed.items():
+                    print(f"{metric.replace('observed_', '')}: {value:.4f}")
+        elif TYPE == 1:
+            pareto_front = optimize(df_prepared)
+            if pareto_front is not None:
+                # Run Monte Carlo analysis on multiple parameter sets
+                mc_results_df = monte_carlo(df_prepared, pareto_front)
+                # Find the most statistically significant parameter set
+                best_idx = mc_results_df['p_value'].idxmin()
+                best_params = mc_results_df.loc[best_idx, 'params'] if 'params' in mc_results_df.columns is not None else None
+            if mc_results_df.loc[best_idx, 'p_value'] < 0.05:
+                print("\n✓ Found statistically significant parameter set")
+                print("\n=== Strategy Robustness Analysis ===")
+                oos_prepared = prepare_data(OOS)
+                wfa_results = walk_forward_analysis(
+                    oos_prepared, 
+                    best_params,
+                    train_months=12,  # 1 year training
+                    test_months=3,    # 3 months testing
+                    min_train=6       # Minimum 6 months required
+                )
+                if wfa_results and wfa_results['metrics']['probability_positive'] > 0.5:
+                    print("✓ Strategy shows consistency in walk-forward testing")
+                else:
+                    print("⚠ Strategy shows poor consistency in walk-forward testing")
+            else:
+                print("⚠ Strategy fails to show statistical significance in Monte Carlo testing")
+        else:
+            print("Invalid TYPE specified. Please set TYPE to 1, 2, 3, or 4.")
+            return None
+    except Exception as e:
+        print(f"Error in main function: {e}")
+        traceback.print_exc()
+        return None
+# -------------------------------------------------------------------------------------------------------------
+if __name__ == "__main__":
+    main()
