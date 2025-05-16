@@ -45,7 +45,7 @@ THRESHOLD = {
 }
 ADX_THRESHOLD_DEFAULT = 25
 DEFAULT_LONG_RISK = 0.04 
-DEFAULT_LONG_REWARD = 0.14 
+DEFAULT_LONG_REWARD = 0.12 
 DEFAULT_POSITION_SIZE = 0.05
 MAX_OPEN_POSITIONS = 100
 PERSISTENCE_DAYS = 3
@@ -56,7 +56,7 @@ DEFAULT_SHORT_RISK = 0.01
 DEFAULT_SHORT_REWARD = 0.03  
 
 # Base parameters
-TICKER = ['BTC-USD']
+TICKER = ['PEP']
 INITIAL_CAPITAL = 10000.0
 
 # Moving average strategy parameters
@@ -339,11 +339,11 @@ def signals(df, adx_threshold, threshold):
     # RSI below 30 = strong buy signal, scales linearly up to 50
     rsi_score = np.where(rsi_np < 30, 0.25,
                          np.where(rsi_np < 50, 0.25 *(50 - rsi_np) / 20, 0))
-    
+
     # Volume component (20%)
     volume_score = conditions['volume_ok'].astype(float) * 0.2
 
-    # Price action component (15%)
+    # Price action component (10%)
     price_action_score = conditions['price_momentum_strong'].astype(float) * 0.15
 
     # Combined scores
@@ -405,17 +405,7 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
 
     if df_with_indicators.empty and df_with_indicators.index.empty:
         print("Warning: Empty dataframe (df_with_indicators) provided to momentum.")
-        return [], {
-        'Total Trades': 0,
-        'Win Rate': 0,
-        'Return (%)': 0,
-        'Profit Factor': 0,
-        'Expectancy (%)': 0,
-        'Max Drawdown (%)': 0,
-        'Annualized Return (%)': 0,
-        'Sharpe Ratio': 0,
-        'Sortino Ratio': 0
-        }, pd.Series(dtype='float64'), pd.Series(dtype='float64')
+        return [], {}, pd.Series(dtype='float64'), pd.Series(dtype='float64')
 
     # 1. Generate signals using the indicator-laden DataFrame
     signals_df = signals(df_with_indicators, adx_threshold=adx_threshold, threshold=threshold)
@@ -444,6 +434,7 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
         momentum_score = signals_df['momentum_score'].iloc[i-1]
         momentum_decay = signals_df['momentum_decay'].iloc[i-1]
 
+
         # Check for momentum persistence
         momentum_persistence = False
         if i >= persistence_days:
@@ -462,7 +453,7 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                     # Determine if we should exit partially or fully
                     if momentum_score > 0.4:
                         # Partial exit if momentum is strong
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.5)
+                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.4)
                     else: 
                         # Momentum below threshold
                         trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.0)
@@ -472,10 +463,10 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                     unrealized_pnls = trade_manager.unrealized_pnl(transaction_price)
                     portfolio_value = trade_manager.portfolio_value + unrealized_pnls
                     if unrealized_pnls > (portfolio_value * 0.05):
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.5)
+                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.3)
 
             # Check position health
-            position_health = trade_manager.position_health(transaction_price, previous_day_atr, momentum_score)
+            position_health = trade_manager.position_health(transaction_price, previous_day_atr, current_date, momentum_score)
 
             # 2. Check trend validity  
             if trade_manager.position_count > 0 and not any_trailing_stop_hit:
@@ -490,7 +481,7 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                         trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.5)
                     elif position_health['strength'] in ['strong', 'very_strong'] and position_health['profit_factor'] > 3.0:
                         # Take some profits even with strong momentum
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.5)
+                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.3)
                 
                 # Check for position that have reached their time limit
                 for pos_idx, duration in position_health['position_duration'].items():
@@ -512,13 +503,13 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                                 'position_size': position_size,
                             }
                 trade_manager.process_entry(current_date, entry_params, direction='Long')
-
-        # --- Portfolio Tracking ---
+        
+        # Performance Tracking
         total_value = trade_manager.portfolio_value + trade_manager.unrealized_pnl(transaction_price)
         equity_curve.iloc[i] = total_value
         returns_series.iloc[i] = (total_value / equity_curve.iloc[i-1] - 1) if equity_curve.iloc[i-1] != 0 else 0.0
 
-    # Calculate statistics using the single trade manager's data
+    # Calculate final statistics
     stats = trade_statistics(equity_curve, trade_manager.trade_log, trade_manager.wins, 
                              trade_manager.losses, risk_free_rate)
 
@@ -530,7 +521,7 @@ class TradeManager:
         self.max_positions = max_positions
         self.position_count = 0
         self.allocated_capital = 0
-        self.last_exit_was_full = False
+        self.position_counter = 0
         self.trade_log = deque()
         self.wins = deque()
         self.losses = deque()
@@ -546,7 +537,9 @@ class TradeManager:
             'position_size': 'float32',
             'share_amount': 'int32',
             'highest_close_since_entry': 'float32',
-            'lowest_close_since_entry': 'float32'
+            'lowest_close_since_entry': 'float32',
+            'position_id': 'int32',
+            'remaining_shares': 'int32'
         }
         
         # Initialize active trades DataFrame with proper dtypes
@@ -556,12 +549,12 @@ class TradeManager:
     def unrealized_pnl(self, current_price):
         if self.active_trades.empty: return 0.0
         pnl_values = (current_price - self.active_trades['entry_price']) * \
-                     self.active_trades['share_amount'] * \
-                     self.active_trades['multiplier'] # Assuming 'multiplier' column exists and is correct
+                 self.active_trades['remaining_shares'] * \
+                 self.active_trades['multiplier']  # Assuming 'multiplier' column exists and is correct
         
         return pnl_values.sum()
     # ----------------------------------------------------------------------------------------------------------
-    def position_health(self, current_price, current_atr, current_score):
+    def position_health(self, current_price, current_atr, current_date, current_score):
         if self.active_trades.empty:
             return {'profit_factor': 0.0, 'score_strength': 'none', 'position_duration': {}, 'take_profit_levels': {}}
         current_price = np.float32(current_price)
@@ -580,7 +573,7 @@ class TradeManager:
                 total_risk += risk_per_trade
 
                 if isinstance(trade['entry_date'], pd.Timestamp):
-                    position_durations[trade['entry_date']] = (pd.Timestamp.now() - trade['entry_date']).days
+                    position_durations[trade['entry_date']] = (current_date - trade['entry_date']).days
 
                 current_profit = (current_price - trade['entry_price']) * trade['share_amount']
                 if current_profit > 0:
@@ -649,9 +642,9 @@ class TradeManager:
 
             for idx, trade in trades_that_hit_stop.iterrows():
                 pnl = self.exit_pnl(trade, current_date, current_price_f32, 
-                                trade['share_amount'], 'Trailing Stop')
+                                trade['remaining_shares'], 'Trailing Stop')
                 self.portfolio_value += pnl
-                self.allocated_capital -= (current_price_f32 * trade['share_amount'])
+                self.allocated_capital -= (current_price_f32 * trade['remaining_shares'])
                 self.position_count -= 1
                 indices_to_remove.append(idx)
             
@@ -677,7 +670,7 @@ class TradeManager:
         long_trades = self.active_trades[self.active_trades['direction'] == 'Long']
         
         for idx, trade in long_trades.iterrows():
-            current_shares = trade['share_amount']
+            current_shares = trade['remaining_shares']
             
             if current_shares <= 0:
                 indices_to_remove.append(idx)
@@ -733,7 +726,7 @@ class TradeManager:
                     
                     remaining_shares = current_shares - shares_to_exit
                     if remaining_shares > 0:
-                        self.active_trades.loc[idx, 'share_amount'] = remaining_shares
+                        self.active_trades.loc[idx, 'remaining_shares'] = remaining_shares
                     else:
                         indices_to_remove.append(idx)
                         self.position_count -= 1
@@ -765,7 +758,7 @@ class TradeManager:
         
         # 1. Calculate Initial Stop (ATR + ADX adjusted)
         adx_normalized = np.clip((entry_params['adx'] - 20) / 30, 0, 1)  # ADX=20→0, ADX=50→1
-        atr_multiplier = 1.5 + adx_normalized * 1.0 
+        atr_multiplier = 2 + adx_normalized * 1.0 
         risk_based_stop = entry_params['price'] * entry_params['risk']
         atr_based_stop = entry_params['atr'] * atr_multiplier
         stop_distance = max(atr_based_stop, risk_based_stop)
@@ -786,21 +779,34 @@ class TradeManager:
         position_dollar_amount = shares * entry_params['price']
         actual_position_size = position_dollar_amount / entry_params['portfolio_value']
 
+
         max_total_exposure = 0.95
         current_exposure = 0.0 
         if not self.active_trades.empty:
-            current_exposure = self.active_trades['position_size'].sum()
+            current_positions_value = (self.active_trades['share_amount'] * entry_params['price']).sum()
+            current_exposure = current_positions_value / entry_params['portfolio_value']
 
-        available_exposure = max_total_exposure - current_exposure
+        # Calculate new position exposure
+        position_dollar_amount = shares * entry_params['price']
+        new_exposure = position_dollar_amount / entry_params['portfolio_value']
+        total_exposure = current_exposure + new_exposure
         
         # 3. Check total portfolio exposure (add here)
-        if actual_position_size > available_exposure:
-            adjusted_shares = int(available_exposure * entry_params['portfolio_value'] / entry_params['price'])
-            shares = min(shares, adjusted_shares)
-            position_dollar_amount = shares * entry_params['price']
-            actual_position_size = position_dollar_amount / entry_params['portfolio_value']
+        if total_exposure > max_total_exposure:
+            # Try to adjust position size to fit within exposure limits
+            available_exposure = max_total_exposure - current_exposure
+            if available_exposure > 0:
+                adjusted_shares = int((available_exposure * entry_params['portfolio_value']) / entry_params['price'])
+                if adjusted_shares > 0:
+                    shares = min(shares, adjusted_shares)
+                    position_dollar_amount = shares * entry_params['price']
+                    actual_position_size = position_dollar_amount / entry_params['portfolio_value']
+                else:
+                    return False
+            else:
+                return False
 
-        # 4. Available Capital Check - FIX HERE
+        # 4. Available Capital Check 
         available_capital = self.portfolio_value - self.allocated_capital
         if position_dollar_amount > available_capital or shares <= 0:
             return False
@@ -813,6 +819,7 @@ class TradeManager:
         if position_dollar_amount < min_position_value:
             return False
         
+    
         # 4. Calculate Take-Profit Using Risk/Reward Ratio
         if 'reward' in entry_params:
             # Reward distance = (risk_per_share) * (reward/risk ratio)
@@ -821,20 +828,24 @@ class TradeManager:
             take_profit = entry_params['price'] + (reward_distance * direction_mult)
         else:
             take_profit = None
-        
+
+        self.position_count += 1
+
         # 5. Create Trade
         new_trade = pd.DataFrame([{
-        'entry_date': current_date,
-        'direction': direction,
-        'multiplier': direction_mult,
-        'entry_price': entry_params['price'],
-        'stop_loss': initial_stop,
-        'take_profit': take_profit,
-        'position_size': actual_position_size,
-        'share_amount': shares,
-        'commission': commission,
-        'highest_close_since_entry': entry_params['price'] if is_long else np.nan,
-        'lowest_close_since_entry': entry_params['price'] if not is_long else np.nan
+            'entry_date': current_date,
+            'direction': direction,
+            'multiplier': direction_mult,
+            'entry_price': entry_params['price'],
+            'stop_loss': initial_stop,
+            'take_profit': take_profit,
+            'position_size': actual_position_size,
+            'share_amount': shares,
+            'commission': commission,
+            'highest_close_since_entry': entry_params['price'] if is_long else np.nan,
+            'lowest_close_since_entry': entry_params['price'] if not is_long else np.nan,
+            'position_id': self.position_counter,  # Add position ID
+            'remaining_shares': shares  # Track initial shares
         }])
         
         # Apply dtypes after creating the DataFrame
@@ -850,7 +861,7 @@ class TradeManager:
         
         self.allocated_capital += position_dollar_amount
         self.portfolio_value -= commission
-        self.position_count += 1
+        self.position_counter += 1
         return True
     # ----------------------------------------------------------------------------------------------------------    
     def calculate_commission(self, shares, price):
@@ -882,6 +893,11 @@ class TradeManager:
         entry_price = trade_series['entry_price']
         entry_date = trade_series['entry_date']
         trade_direction = trade_series['direction']
+        position_id = trade_series['position_id']
+        original_shares = trade_series['share_amount']
+
+        # Calculate if this is a complete exit
+        is_complete_exit = (shares_to_exit >= trade_series['remaining_shares'])
 
         pnl = 0
         if trade_direction == 'Long':
@@ -912,13 +928,17 @@ class TradeManager:
             'Entry Price': entry_price,
             'Exit Price': exit_price,
             'Shares': shares_to_exit,
+            'Original Shares': original_shares,
             'PnL': pnl,
             'Duration': duration,
-            'Exit Reason': reason
+            'Exit Reason': reason,
+            'Position ID': position_id,
+            'Is Complete Exit': is_complete_exit,
+            'Remaining Shares': trade_series['remaining_shares'] - shares_to_exit if not is_complete_exit else 0
         })
         return pnl
     # ----------------------------------------------------------------------------------------------------------
-# --------------------------------------------------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------------------------
 @jit(nopython=True)
 def risk_metrics(returns_array, risk_free_daily):
     """Numba-optimized calculation of risk metrics"""
@@ -940,48 +960,73 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
     """Vectorized trade statistics calculation using NumPy and Numba"""
     
     # Convert lists to NumPy arrays
-    wins_array = np.array(wins) if wins else np.array([0.0])
-    losses_array = np.array(losses) if losses else np.array([0.0])
+    wins_array = np.array(wins, dtype=float) if wins else np.array([0.0], dtype=float)
+    losses_array = np.array(losses, dtype=float) if losses else np.array([0.0], dtype=float)
     
     # Basic trade statistics (vectorized)
     total_trades = len(trade_log)
-    win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
+    win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0.0
     
     # Profit metrics (vectorized)
     gross_profit = np.sum(wins_array)
-    gross_loss = np.sum(losses_array)
-    net_profit = gross_profit + gross_loss
+    gross_loss = np.sum(losses_array) # Note: losses_array contains non-positive PnL values
+    net_profit = gross_profit + gross_loss # gross_loss is typically negative or zero
     
     # Portfolio metrics (vectorized)
     initial_capital = equity.iloc[0]
     final_capital = equity.iloc[-1]
-    net_profit_pct = ((final_capital / initial_capital) - 1) * 100
+    net_profit_pct = ((final_capital / initial_capital) - 1) * 100 if initial_capital > 0 else 0.0
     
     # Risk metrics (vectorized)
-    profit_factor = abs(gross_profit / gross_loss) if gross_loss != 0 else np.inf
+    if gross_loss == 0:
+        # If there are no losses (or only zero-value losses)
+        profit_factor = np.inf if gross_profit > 0 else 1.0 
+        # If gross_profit is also 0 (e.g., no trades, or all trades PnL=0), PF is 1.0 (neutral)
+    else:
+        # gross_loss is negative, so abs() is important if not already handled by convention
+        profit_factor = abs(gross_profit / gross_loss) 
     
     # Expectancy calculation (vectorized)
-    avg_win = np.mean(wins_array) if len(wins) > 0 else 0
-    avg_loss = np.mean(losses_array) if len(losses) > 0 else 0
+    avg_win = np.mean(wins_array) if len(wins) > 0 else 0.0
+    avg_loss = np.mean(losses_array) if len(losses) > 0 else 0.0 # avg_loss will be <= 0
     win_prob = win_rate / 100
-    expectancy = (win_prob * avg_win) + ((1 - win_prob) * avg_loss)
-    expectancy_pct = (expectancy / initial_capital) * 100 if initial_capital > 0 else 0
+    expectancy = (win_prob * avg_win) + ((1 - win_prob) * avg_loss) # avg_loss is non-positive
+    expectancy_pct = (expectancy / initial_capital) * 100 if initial_capital > 0 else 0.0
+
+    # Average Win/Loss Ratio
+    if avg_loss == 0:
+        # If average loss is zero (no losing trades or all losses were PnL=0)
+        avg_win_loss_ratio = np.inf if avg_win > 0 else 1.0
+        # If avg_win is also 0, ratio is 1.0 (neutral)
+    else:
+        # avg_loss is non-positive. abs() ensures positive ratio.
+        avg_win_loss_ratio = abs(avg_win / avg_loss) 
     
     # Drawdown calculation (vectorized)
     equity_values = equity.values
     running_max = np.maximum.accumulate(equity_values)
     drawdowns = ((equity_values - running_max) / running_max) * 100
-    max_drawdown = abs(np.min(drawdowns))
+    # Handle cases where running_max could be zero if initial capital is zero and first trades are losses
+    drawdowns = np.nan_to_num(drawdowns, nan=0.0, posinf=0.0, neginf=0.0)
+    max_drawdown = abs(np.min(drawdowns)) if len(drawdowns) > 0 else 0.0
     
     # Time-based metrics
-    days = (equity.index[-1] - equity.index[0]).days
-    years = days / 365.25
-    annualized_return = ((final_capital / initial_capital) ** (1/years) - 1) * 100 if years > 0 else 0
-    
+    if len(equity.index) > 1:
+        days = (equity.index[-1] - equity.index[0]).days
+        years = days / 365.25
+        annualized_return = ((final_capital / initial_capital) ** (1/years) - 1) * 100 if years > 0 and initial_capital > 0 else 0.0
+    else:
+        days = 0
+        years = 0
+        annualized_return = 0.0
+
     # Calculate risk ratios using Numba-optimized function
-    daily_returns = np.diff(np.log(equity_values))
-    daily_rf_rate = risk_free_rate / 252
-    sharpe_ratio, sortino_ratio = risk_metrics(daily_returns, daily_rf_rate)
+    if len(equity_values) > 1:
+        daily_returns = np.diff(np.log(np.maximum(equity_values, 1e-9))) # Add epsilon to avoid log(0)
+        daily_rf_rate = risk_free_rate / 252.0 # Ensure float division
+        sharpe_ratio, sortino_ratio = risk_metrics(daily_returns, daily_rf_rate)
+    else:
+        sharpe_ratio, sortino_ratio = 0.0, 0.0
     
     return {
         'Total Trades': total_trades,
@@ -992,7 +1037,8 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
         'Max Drawdown (%)': max_drawdown,
         'Annualized Return (%)': annualized_return,
         'Sharpe Ratio': sharpe_ratio,
-        'Sortino Ratio': sortino_ratio
+        'Sortino Ratio': sortino_ratio,
+        'Avg Win/Loss Ratio': avg_win_loss_ratio
     }
 # --------------------------------------------------------------------------------------------------------------------------
 def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, position_size=DEFAULT_POSITION_SIZE, max_positions_param=MAX_OPEN_POSITIONS,
@@ -1050,6 +1096,7 @@ def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
         ["Sharpe Ratio", f"{trade_stats['Sharpe Ratio']:.2f}"],
         ["Sortino Ratio", f"{trade_stats['Sortino Ratio']:.2f}"],
         ["Max. Drawdown [%]", f"{trade_stats['Max Drawdown (%)']:.2f}"],
+        ["Avg. Win/Loss Ratio", f"{trade_stats['Avg Win/Loss Ratio']:.2f}"],
     ]
     print(tabulate(metrics, tablefmt="simple", colalign=("left", "right")))
     
