@@ -8,6 +8,7 @@ import pandas_ta as ta
 import multiprocessing as mp 
 from collections import deque
 from numba import jit
+import time
 from tqdm import tqdm
 import optuna
 from functools import partial  # Add missing import for partial
@@ -17,7 +18,7 @@ from statsmodels.tsa.stattools import adfuller, acf
 from joblib import Parallel, delayed
 #================== SCRIPT PARAMETERS =======================================================================================================================
 # Controls
-TYPE = 4 # 1. Full run # 2. Monte Carlo # 3. Optimization # 4. Test
+TYPE = 2 # 1. Full run # 2. Monte Carlo # 3. Optimization # 4. Test
 
 # Optimization directions
 OPTIMIZATION_DIRECTIONS = {
@@ -335,14 +336,14 @@ def signals(df, adx_threshold, threshold):
     # RSI component (25%)
     rsi_score = np.zeros_like(close_np, dtype=float)
     # RSI below 30 = strong buy signal, scales linearly up to 50
-    rsi_score = np.where(rsi_np < 30, 0.30,
-                         np.where(rsi_np < 50, 0.30 *(50 - rsi_np) / 20, 0))
+    rsi_score = np.where(rsi_np < 30, 0.25,
+                         np.where(rsi_np < 50, 0.25 *(50 - rsi_np) / 20, 0))
 
     # Volume component (20%)
     volume_score = conditions['volume_ok'].astype(float) * 0.2
 
     # Price action component (10%)
-    price_action_score = conditions['price_momentum_strong'].astype(float) * 0.10
+    price_action_score = conditions['price_momentum_strong'].astype(float) * 0.15
 
     # Combined scores
     momentum_score = trend_score + rsi_score + volume_score + price_action_score
@@ -403,17 +404,7 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
 
     if df_with_indicators.empty and df_with_indicators.index.empty:
         print("Warning: Empty dataframe (df_with_indicators) provided to momentum.")
-        return [], {
-        'Total Trades': 0,
-        'Win Rate': 0,
-        'Return (%)': 0,
-        'Profit Factor': 0,
-        'Expectancy (%)': 0,
-        'Max Drawdown (%)': 0,
-        'Annualized Return (%)': 0,
-        'Sharpe Ratio': 0,
-        'Sortino Ratio': 0
-        }, pd.Series(dtype='float64'), pd.Series(dtype='float64')
+        return [], {}, pd.Series(dtype='float64'), pd.Series(dtype='float64')
 
     # Initialize performance tracking structures
     performance_log = {
@@ -485,7 +476,7 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                     # Determine if we should exit partially or fully
                     if momentum_score > 0.4:
                         # Partial exit if momentum is strong
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.5)
+                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.4)
                     else: 
                         # Momentum below threshold
                         trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.0)
@@ -495,7 +486,7 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                     unrealized_pnls = trade_manager.unrealized_pnl(transaction_price)
                     portfolio_value = trade_manager.portfolio_value + unrealized_pnls
                     if unrealized_pnls > (portfolio_value * 0.05):
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.5)
+                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.3)
 
             # Check position health
             position_health = trade_manager.position_health(transaction_price, previous_day_atr, momentum_score)
@@ -513,7 +504,7 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                         trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.5)
                     elif position_health['strength'] in ['strong', 'very_strong'] and position_health['profit_factor'] > 3.0:
                         # Take some profits even with strong momentum
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.5)
+                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.3)
                 
                 # Check for position that have reached their time limit
                 for pos_idx, duration in position_health['position_duration'].items():
@@ -830,7 +821,7 @@ class TradeManager:
         
         # 1. Calculate Initial Stop (ATR + ADX adjusted)
         adx_normalized = np.clip((entry_params['adx'] - 20) / 30, 0, 1)  # ADX=20→0, ADX=50→1
-        atr_multiplier = 1.5 + adx_normalized * 1.0 
+        atr_multiplier = 2 + adx_normalized * 1.0 
         risk_based_stop = entry_params['price'] * entry_params['risk']
         atr_based_stop = entry_params['atr'] * atr_multiplier
         stop_distance = max(atr_based_stop, risk_based_stop)
@@ -1191,7 +1182,7 @@ def optimize(prepared_data):
     # Optimizing parameters for Optuna
     target_metrics = list(OPTIMIZATION_DIRECTIONS.keys())
     opt_directions = [OPTIMIZATION_DIRECTIONS[metric] for metric in target_metrics]
-    n_trials=50
+    n_trials=150
     min_completed_trials=20
     timeout=3600
 
@@ -1415,198 +1406,200 @@ def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
      
     return None
 #================== STRATEGY SIGNIFICANCE TESTING ==============================================================================================================7
-def stationary_bootstrap(series, block_size):
-    n = len(series)
-    indices = []
-    current_idx = np.random.randint(0, n)
-    while len(indices) < n:
-        block_length = np.random.geometric(1/block_size)
-        # Circular indexing for the entire block
-        block_indices = [(current_idx + i) % n for i in range(block_length)]
-        indices.extend(block_indices)
-        current_idx = np.random.randint(0, n)
-    return series.iloc[indices[:n]]
-# --------------------------------------------------------------------------------------------------------------------------   
-def find_optimal_block_size(clean_returns, max_blocks=50):
-    """
-    Find optimal block size by comparing ACF of original and bootstrapped returns
-    """
-    from statsmodels.tsa.stattools import acf
-    import matplotlib.pyplot as plt
+def stationary_bootstrap(data, block_size = 10.0, num_samples= 1000, sample_length = None, seed = None):
+    if seed is not None:
+        np.random.seed(seed)
     
-    # Calculate original ACF
-    orig_acf = acf(clean_returns, nlags=10)
+    n = len(data)
+    if sample_length is None:
+        sample_length = n
     
-    # Test different block sizes
-    mse_scores = []
-    block_sizes = range(5, max_blocks, 5)
+    # Probability parameter for geometric distribution
+    p = 1.0 / block_size
     
-    for block_size in block_sizes:
-        # Generate bootstrapped returns and calculate ACF
-        bootstrap_acf = acf(stationary_bootstrap(clean_returns, block_size), nlags=10)
+    # Store bootstrapped samples
+    bootstrap_samples = []
+    
+    for _ in range(num_samples):
+        # Initialize indices array for this bootstrap sample
+        indices = np.zeros(sample_length, dtype=int)
         
-        # Calculate Mean Squared Error between original and bootstrapped ACF
-        mse = np.mean((orig_acf - bootstrap_acf) ** 2)
-        mse_scores.append(mse)
-    
-    # Find optimal block size
-    optimal_block_size = block_sizes[np.argmin(mse_scores)]
-    
-    # Plot comparison for optimal block size
-    plt.figure(figsize=(10, 6))
-    bootstrap_acf = acf(stationary_bootstrap(clean_returns, optimal_block_size), nlags=10)
-    
-    plt.plot(orig_acf, 'b-', label='Original Returns')
-    plt.plot(bootstrap_acf, 'r--', label='Bootstrapped Returns')
-    plt.title(f'ACF Comparison (Block Size = {optimal_block_size})')
-    plt.xlabel('Lag')
-    plt.ylabel('ACF')
-    plt.legend()
-    plt.grid(True)
-    # plt.show()
-    
-    return optimal_block_size
-# --------------------------------------------------------------------------------------------------------------------------
-def monte_carlo_returns_test(data, params, num_simulations=None, progress_callback=None):
-    """Run Monte Carlo simulation with enhanced return structure"""
-    
-    # Initialize null stats dictionary
-    null_stats = {
-        'profit_factor': np.zeros(num_simulations),  # Changed from profit_factors
-        'win_rate': np.zeros(num_simulations),       # Changed from win_rates
-        'sharpe': np.zeros(num_simulations),         # Changed from sharpe_ratios
-        'max_drawdown': np.zeros(num_simulations)    # Changed from max_drawdowns
-    }
-
-    # Run original strategy to get baseline performance
-    performance_log, stats, equity_curve, returns_series = momentum(
-        data,
-        long_risk=params['long_risk'],
-        long_reward=params['long_reward'],
-        position_size=params['position_size'],
-        max_positions=params['max_positions_param'],
-        adx_threshold=params['adx_thresh'],
-        persistence_days=params['persistence_days'],
-        max_position_duration=params['max_position_duration'],
-        threshold=params['threshold']
-    )
-    
-    # Get observed metrics with consistent naming
-    observed_metrics = {
-        'profit_factor': stats['Profit Factor'],
-        'win_rate': stats['Win Rate'],
-        'sharpe': stats['Sharpe Ratio'],
-        'max_drawdown': stats['Max Drawdown (%)']
-    }
-
-    # Clean returns and find optimal block size
-    clean_returns = returns_series.replace([np.inf, -np.inf], np.nan).dropna()
-    optimal_block_size = find_optimal_block_size(clean_returns)
-    
-    # Run simulations
-    for i in range(num_simulations):
-        if progress_callback:
-            progress_callback()
+        # Generate the first index randomly
+        t = np.random.randint(0, n)
+        
+        # Fill the bootstrap indices
+        for i in range(sample_length):
+            indices[i] = t
             
-        # Bootstrap returns
-        resampled_returns = stationary_bootstrap(clean_returns, optimal_block_size)
+            # With probability p, start a new block
+            if np.random.random() < p:
+                t = np.random.randint(0, n)
+            else:
+                # Continue the block, handling the case where we reach the end
+                t = (t + 1) % n
         
-        # Calculate metrics for this simulation
-        cum_returns = (1 + resampled_returns).cumprod()
+        # Create the bootstrapped sample with proper index
+        bootstrap_sample = data.iloc[indices].copy()
         
-        # Calculate metrics
-        pos_returns = resampled_returns[resampled_returns > 0]
-        neg_returns = resampled_returns[resampled_returns < 0]
+        # Reset the index to maintain the same date structure as original
+        # This is important for strategy testing - maintaining continuous time
+        bootstrap_sample.index = data.index[:len(bootstrap_sample)]
         
-        profit_factor = (pos_returns.sum() / abs(neg_returns.sum())) if len(neg_returns) > 0 else np.inf
-        win_rate = (len(pos_returns) / len(resampled_returns)) * 100
-        sharpe = (resampled_returns.mean() / resampled_returns.std()) * np.sqrt(252) if resampled_returns.std() != 0 else 0
-        
-        # Calculate drawdown
-        peak = cum_returns.expanding(min_periods=1).max()
-        drawdown = ((cum_returns - peak) / peak).min() * 100
-        
-        # Store results with consistent naming
-        null_stats['profit_factor'][i] = profit_factor
-        null_stats['win_rate'][i] = win_rate
-        null_stats['sharpe'][i] = sharpe
-        null_stats['max_drawdown'][i] = abs(drawdown)
-
-    # Calculate p-values correctly based on metric type
-    p_values = {}
-    for metric in observed_metrics.keys():
-        sim_values = null_stats[metric]
-        observed = observed_metrics[metric]
-        
-        if metric == 'max_drawdown':
-            # For drawdown, lower is better
-            p_values[metric] = np.mean(sim_values <= observed)
-        elif metric in ['profit_factor', 'win_rate', 'sharpe']:
-            # For these metrics, higher is better
-            p_values[metric] = np.mean(sim_values >= observed)
-        
-        # Handle inf values
-        if np.isinf(observed):
-            p_values[metric] = 1.0
-
-    return {
-        'observed_metrics': observed_metrics,
-        'simulation_metrics': {
-            metric: {
-                'mean': np.nanmean(values),
-                'std': np.nanstd(values)
-            }
-            for metric, values in null_stats.items()
-        },
-        'p_values': p_values
-    }
-# --------------------------------------------------------------------------------------------------------------------------
-def monte_carlo(prepared_data, pareto_front):
-    """Run Monte Carlo analysis on optimized parameter sets"""
+        bootstrap_samples.append(bootstrap_sample)
+    
+    return bootstrap_samples
+# --------------------------------------------------------------------------------------------------------------------------  
+def monte_carlo(prepared_data, pareto_front, num_simulations=1000):
     
     mc_results = []
-    num_simulations = 5000
-    total_iterations = len(pareto_front) * num_simulations
+    total_iterations = len(pareto_front)
     
-    print("\nRunning Monte Carlo Analysis across optimized parameter sets...")
-    with tqdm(total=total_iterations, desc="Total Progress") as master_pbar:
-        for i, trial in enumerate(pareto_front):
-            # Convert trial parameters to proper format
-            params = {
-                'long_risk': float(trial.params['long_risk']),
-                'long_reward': float(trial.params['long_reward']),
-                'position_size': float(trial.params['position_size']),
-                'max_positions_param': int(trial.params['max_open_positions']),
-                'adx_thresh': float(trial.params['adx_threshold']),
-                'persistence_days': int(trial.params['persistence_days']),
-                'max_position_duration': int(trial.params['max_position_duration']),
-                'threshold': {
-                    'Entry': float(trial.params['entry']),
-                    'Exit': float(trial.params['exit']),
-                    'RSI_BUY': float(trial.params['rsi_buy']),
-                    'RSI_EXIT': float(trial.params['rsi_exit'])
-                }
+    # Convert trial parameters to proper format once
+    param_sets = []
+    for trial in pareto_front:
+        params = {
+            'long_risk': float(trial.params['long_risk']),
+            'long_reward': float(trial.params['long_reward']),
+            'position_size': float(trial.params['position_size']),
+            'max_positions': int(trial.params['max_open_positions']),
+            'adx_threshold': float(trial.params['adx_threshold']),
+            'persistence_days': int(trial.params['persistence_days']),
+            'max_position_duration': int(trial.params['max_position_duration']),
+            'threshold': {
+                'Entry': float(trial.params['entry']),
+                'Exit': float(trial.params['exit']),
+                'RSI_BUY': float(trial.params['rsi_buy']),
+                'RSI_EXIT': float(trial.params['rsi_exit'])
             }
-            
-            # Run Monte Carlo simulation
-            results = monte_carlo_returns_test(
-                prepared_data,
-                params,
-                num_simulations=num_simulations,
-                progress_callback=lambda: master_pbar.update(1)
-            )
-            
-            # Store results
-            mc_results.append({
-                'parameter_set': i+1,
-                'params': params,
-                **{f'p_value_{k}': v for k, v in results['p_values'].items()},
-                **{f'observed_{k}': v for k, v in results['observed_metrics'].items()},
-                **{f'sim_{k}_mean': v['mean'] for k, v in results['simulation_metrics'].items()},
-                **{f'sim_{k}_std': v['std'] for k, v in results['simulation_metrics'].items()}
-            })
+        }
+        param_sets.append(params)
     
-    return pd.DataFrame(mc_results)
+    # Generate bootstrap samples once
+    print("\nGenerating bootstrap samples...")
+    bootstrap_samples = stationary_bootstrap(
+        data=prepared_data,
+        block_size=10.0,
+        num_samples=num_simulations,
+        sample_length=None,
+        seed=42
+    )
+
+    def process_parameter_set(param_idx):
+        """Process a single parameter set"""
+        params = param_sets[param_idx]
+        
+        # Run original strategy to get baseline performance
+        performance_log, stats, _, _ = momentum(
+            prepared_data,
+            long_risk=params['long_risk'],
+            long_reward=params['long_reward'],
+            position_size=params['position_size'],
+            max_positions=params['max_positions'],
+            adx_threshold=params['adx_threshold'],
+            persistence_days=params['persistence_days'],
+            max_position_duration=params['max_position_duration'],
+            threshold=params['threshold']
+        )
+        
+        # Get observed metrics
+        observed_metrics = {
+            'sharpe': stats['Sharpe Ratio'],
+            'profit_factor': stats['Profit Factor'],
+            'win_rate': stats['Win Rate'],
+            'max_drawdown': stats['Max Drawdown (%)']
+        }
+        
+        # Initialize arrays for simulation metrics
+        sim_metrics = {metric: [] for metric in observed_metrics.keys()}
+        
+        # Run strategy on each bootstrap sample
+        for sample in bootstrap_samples:
+            _, sim_stats, _, _ = momentum(sample, **params)
+            
+            for metric in sim_metrics:
+                sim_metrics[metric].append(sim_stats[metric])
+        
+        # Calculate p-values and simulation statistics
+        results = {
+            'parameter_set': param_idx + 1,
+            'params': params,
+            'p_values': {},
+            'percentiles': {},
+            'observed_metrics': observed_metrics,
+            'simulation_metrics': {}
+        }
+        
+        for metric in sim_metrics:
+            sim_array = np.array(sim_metrics[metric])
+            observed_value = observed_metrics[metric]
+            
+            # Calculate p-value (proportion of simulations better than observed)
+            if metric in ['sharpe', 'profit_factor', 'win_rate']:
+                p_value = np.mean(sim_array >= observed_value)
+            else:  # max_drawdown - lower is better
+                p_value = np.mean(sim_array <= observed_value)
+            
+            # Calculate percentile of observed value
+            percentile = stats.percentileofscore(sim_array, observed_value)
+            
+            results['p_values'][metric] = p_value
+            results['percentiles'][metric] = percentile
+            results['simulation_metrics'][metric] = {
+                'mean': np.mean(sim_array),
+                'std': np.std(sim_array),
+                'skew': stats.skew(sim_array),
+                'kurtosis': stats.kurtosis(sim_array)
+            }
+        
+        return results
+    
+    # Run parallel processing with progress bar
+    print(f"\nRunning Monte Carlo Analysis across {len(param_sets)} parameter sets...")
+    print(f"Total parameter sets: {total_iterations}")
+    print(f"Simulations per set: {num_simulations}")
+    
+    with tqdm(total=total_iterations, desc="Total Progress") as pbar:
+        mc_results = Parallel(n_jobs=-1)(
+            delayed(process_parameter_set)(i) 
+            for i in range(len(param_sets))
+        )
+        pbar.update(1)  # Update progress after each parameter set
+    
+    # Convert results to DataFrame for analysis
+    results_df = pd.DataFrame(mc_results)
+    
+    # Print summary statistics
+    print("\n=== Monte Carlo Analysis Summary ===")
+    print(f"Total Parameter Sets Analyzed: {len(mc_results)}")
+    print(f"Significant Results (p < 0.05):")
+    
+    for metric in ['sharpe', 'profit_factor', 'win_rate', 'max_drawdown']:
+        sig_count = sum(1 for result in mc_results if result['p_values'][metric] < 0.05)
+        print(f"{metric}: {sig_count}/{len(mc_results)}")
+    
+    print("\nTop 5 Parameter Sets by Statistical Significance:")
+    headers = ["Set", "Metric", "Observed", "Sim Mean", "Sim Std", "p-value", "Percentile"]
+    rows = []
+    
+    # Sort by combined significance
+    sorted_results = sorted(mc_results, 
+                          key=lambda x: sum(x['p_values'].values()))[:5]
+    
+    for result in sorted_results:
+        for metric in ['sharpe', 'profit_factor', 'win_rate', 'max_drawdown']:
+            rows.append([
+                f"{result['parameter_set']}",
+                metric,
+                f"{result['observed_metrics'][metric]:.2f}",
+                f"{result['simulation_metrics'][metric]['mean']:.2f}",
+                f"{result['simulation_metrics'][metric]['std']:.2f}",
+                f"{result['p_values'][metric]:.3f}",
+                f"{result['percentiles'][metric]:.1f}"
+            ])
+    
+    print(tabulate(rows, headers=headers, tablefmt="grid"))
+    
+    return results_df
 #================== STRATEGY ROBUSTNESS TESTING ==================================================================================================================
 def walk_forward_analysis(prepared_data, parameters, train_months=24, test_months=6, min_train=12, n_jobs=-1):
     
@@ -1742,44 +1735,21 @@ def main():
             pareto_front = optimize(df_prepared)
             visualize(pareto_front, df_prepared)
         if TYPE == 2:  # Monte Carlo Testing
-            # First get optimized parameters
             pareto_front = optimize(df_prepared)
             if pareto_front is not None:
-                # Run Monte Carlo analysis
-                mc_results = monte_carlo(df_prepared, pareto_front)
-                
-                # Get best parameter set based on Monte Carlo results
-                # Fix: Use correct column name 'p_value_profit_factor'
-                best_set = mc_results.loc[mc_results['p_value_profit_factor'].idxmin()]
-                
-                if best_set['p_value_profit_factor'] < 0.05:
+                mc_results_df = monte_carlo(df_prepared, pareto_front)
+                # Find best parameter set (lowest combined p-value)
+                best_idx = mc_results_df['parameter_set'].iloc[
+                    mc_results_df.apply(
+                        lambda x: sum(x['p_values'].values()), axis=1
+                    ).idxmin()
+                ]
+                best_params = mc_results_df.loc[best_idx, 'params']
+                if any(p < 0.05 for p in mc_results_df.loc[best_idx, 'p_values'].values()):
                     print("\n✓ Found statistically significant parameter set")
-                    print("\nTesting best parameter set from Monte Carlo analysis...")
-                    test(
-                        df_prepared,
-                        long_risk=best_set['params']['long_risk'],
-                        long_reward=best_set['params']['long_reward'],
-                        position_size=best_set['params']['position_size'],
-                        max_positions_param=best_set['params']['max_positions_param'],
-                        adx_thresh=best_set['params']['adx_thresh'],
-                        persistence_days=best_set['params']['persistence_days'],
-                        max_position_duration=best_set['params']['max_position_duration'],
-                        threshold=best_set['params']['threshold']
-                    )
+                    test(df_prepared, **best_params)
                 else:
-                    print("⚠ Strategy fails to show statistical significance in Monte Carlo testing")
-                    
-                # Print Monte Carlo results summary
-                print("\n=== Monte Carlo Analysis Results ===")
-                print("\nP-values:")
-                p_values = {k: v for k, v in best_set.items() if k.startswith('p_value_')}
-                for metric, p_value in p_values.items():
-                    print(f"{metric.replace('p_value_', '')}: {p_value:.4f}")
-                
-                print("\nObserved Metrics:")
-                observed = {k: v for k, v in best_set.items() if k.startswith('observed_')}
-                for metric, value in observed.items():
-                    print(f"{metric.replace('observed_', '')}: {value:.4f}")
+                    print("⚠ No statistically significant parameter sets found")
         elif TYPE == 1:
             pareto_front = optimize(df_prepared)
             if pareto_front is not None:
