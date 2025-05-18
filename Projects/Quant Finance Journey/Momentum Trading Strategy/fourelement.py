@@ -19,6 +19,10 @@ from joblib import Parallel, delayed
 #================== SCRIPT PARAMETERS =======================================================================================================================
 # Controls
 TYPE = 2 # 1. Full run # 2. Monte Carlo # 3. Optimization # 4. Test
+TICKER = ['PEP']
+INITIAL_CAPITAL = 10000000.0
+TRIALS = 30
+COMMISION = False
 
 # Optimization directions
 OPTIMIZATION_DIRECTIONS = {
@@ -29,10 +33,10 @@ OPTIMIZATION_DIRECTIONS = {
 }
 # Optimization objectives
 OBJECTIVE_WEIGHTS = {
-    'sharpe': 0.30,        
-    'profit_factor': 0.20, 
-    'avg_win_loss_ratio': 0.30,     
-    'max_drawdown': 0.20   
+    'sharpe': 0.40,        
+    'profit_factor': 0.10, 
+    'avg_win_loss_ratio': 0.25,     
+    'max_drawdown': 0.15   
 }
 
 # Optimization parameters
@@ -54,10 +58,6 @@ MAX_POSITION_DURATION = 10
 DEFAULT_SHORT_RISK = 0.01  
 DEFAULT_SHORT_REWARD = 0.03  
 
-# Base parameters
-TICKER = ['PEP']
-INITIAL_CAPITAL = 100000.0
-
 # Moving average strategy parameters
 FAST = 20
 SLOW = 50
@@ -69,7 +69,7 @@ RSI_LENGTH = 14
 # Bollinger Bands strategy parameters
 BB_LEN = 20
 ST_DEV = 2
-#================== DATA RETRIEVAL & HANDLING ===============================================================================================================
+#================== DATA RETRIEVAL & HANDLING =================================================================================================================
 def get_data(ticker):
     data_start_year = 2013
     print('\nDownloading data....')
@@ -340,10 +340,10 @@ def signals(df, adx_threshold, threshold):
                          np.where(rsi_np < 50, 0.25 *(50 - rsi_np) / 20, 0))
 
     # Volume component (20%)
-    volume_score = conditions['volume_ok'].astype(float) * 0.2
+    volume_score = conditions['volume_ok'].astype(float) * 0.25
 
     # Price action component (10%)
-    price_action_score = conditions['price_momentum_strong'].astype(float) * 0.15
+    price_action_score = conditions['price_momentum_strong'].astype(float) * 0.10
 
     # Combined scores
     momentum_score = trend_score + rsi_score + volume_score + price_action_score
@@ -398,7 +398,7 @@ def signals(df, adx_threshold, threshold):
     signals_df['signal_changed'] = signal_changed_np
     
     return signals_df
-#================== MOMENTUM STRATEGY =======================================================================================================================
+#================== MOMENTUM STRATEGY =========================================================================================================================
 def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, position_size=DEFAULT_POSITION_SIZE, risk_free_rate=0.04, 
              max_positions=MAX_OPEN_POSITIONS, adx_threshold=ADX_THRESHOLD_DEFAULT, persistence_days=PERSISTENCE_DAYS, max_position_duration=MAX_POSITION_DURATION, threshold=THRESHOLD):
 
@@ -452,7 +452,7 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                     # Determine if we should exit partially or fully
                     if momentum_score > 0.4:
                         # Partial exit if momentum is strong
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.4)
+                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.45)
                     else: 
                         # Momentum below threshold
                         trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.0)
@@ -462,7 +462,7 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                     unrealized_pnls = trade_manager.unrealized_pnl(transaction_price)
                     portfolio_value = trade_manager.portfolio_value + unrealized_pnls
                     if unrealized_pnls > (portfolio_value * 0.05):
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.3)
+                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.2)
 
             # Check position health
             position_health = trade_manager.position_health(transaction_price, previous_day_atr, current_date, momentum_score)
@@ -488,7 +488,7 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                         # Reduce exposure for time-based risk management
                         if pos_idx in trade_manager.active_trades.index:  # Ensure position still exists
                             # Exit partially for old positions regardless of performance
-                            trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.5)
+                            trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.8)
 
         # --- Entry Conditions ---
         if buy_signal and trade_manager.position_count < max_positions:
@@ -508,9 +508,17 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
         equity_curve.iloc[i] = total_value
         returns_series.iloc[i] = (total_value / equity_curve.iloc[i-1] - 1) if equity_curve.iloc[i-1] != 0 else 0.0
 
-    # Calculate final statistics
+    final_unrealized_pnl = trade_manager.unrealized_pnl(df_with_indicators['Close'].iloc[-1])
+    final_stats = {
+        'Equity Final': equity_curve.iloc[-1],
+        'Open Position Value': final_unrealized_pnl,
+        'Total Portfolio Value': equity_curve.iloc[-1] + final_unrealized_pnl
+    }
+    
+    # Update stats dictionary with the additional values
     stats = trade_statistics(equity_curve, trade_manager.trade_log, trade_manager.wins, 
-                             trade_manager.losses, risk_free_rate)
+                           trade_manager.losses, risk_free_rate)
+    stats.update(final_stats)
 
     return trade_manager.trade_log, stats, equity_curve, returns_series
 # --------------------------------------------------------------------------------------------------------------------------
@@ -757,7 +765,7 @@ class TradeManager:
         
         # 1. Calculate Initial Stop (ATR + ADX adjusted)
         adx_normalized = np.clip((entry_params['adx'] - 20) / 30, 0, 1)  # ADX=20→0, ADX=50→1
-        atr_multiplier = 2 + adx_normalized * 1.0 
+        atr_multiplier = 1.5 + adx_normalized * 1.0 
         risk_based_stop = entry_params['price'] * entry_params['risk']
         atr_based_stop = entry_params['atr'] * atr_multiplier
         stop_distance = max(atr_based_stop, risk_based_stop)
@@ -778,7 +786,7 @@ class TradeManager:
         position_dollar_amount = shares * entry_params['price']
         actual_position_size = position_dollar_amount / entry_params['portfolio_value']
 
-        max_total_exposure = 0.95
+        max_total_exposure = 1.0
         current_exposure = 0.0 
         if not self.active_trades.empty:
             current_positions_value = (self.active_trades['share_amount'] * entry_params['price']).sum()
@@ -863,28 +871,31 @@ class TradeManager:
         return True
     # ----------------------------------------------------------------------------------------------------------    
     def calculate_commission(self, shares, price):
-        # Fixed commission model
-        fixed_fee = 5.00  # $5 per trade
-        
-        # Per-share commission model
-        per_share_fee = 0.005 * shares  # 0.5 cents per share
-        
-        # Percentage-based model
-        percentage_fee = shares * price * 0.001  # 0.1% of trade value
-        
-        # Tiered model example
-        if shares * price < 5000:
-            tiered_fee = 5.00
-        elif shares * price < 10000:
-            tiered_fee = 7.50
+        if COMMISION:
+            # Fixed commission model
+            fixed_fee = 5.00  # $5 per trade
+            
+            # Per-share commission model
+            per_share_fee = 0.005 * shares  # 0.5 cents per share
+            
+            # Percentage-based model
+            percentage_fee = shares * price * 0.001  # 0.1% of trade value
+            
+            # Tiered model example
+            if shares * price < 5000:
+                tiered_fee = 5.00
+            elif shares * price < 10000:
+                tiered_fee = 7.50
+            else:
+                tiered_fee = 10.00
+            
+            # Choose your model
+            commission = fixed_fee  # or per_share_fee, percentage_fee, tiered_fee
+            
+            # Add minimum commission if needed
+            return max(commission, 1.00)  # Minimum $1.00 commission
         else:
-            tiered_fee = 10.00
-        
-        # Choose your model
-        commission = per_share_fee  # or per_share_fee, percentage_fee, tiered_fee
-        
-        # Add minimum commission if needed
-        return max(commission, 1.00)  # Minimum $1.00 commission
+            return 0.0
     # ----------------------------------------------------------------------------------------------------------
     def exit_pnl(self, trade_series, exit_date, exit_price, shares_to_exit, reason):
         
@@ -900,9 +911,9 @@ class TradeManager:
 
         gross_pnl = 0
         if trade_direction == 'Long':
-            gross_pnl = (exit_price - entry_price) * shares_to_exit
+            gross_pnl = (exit_price*(1-0.003) - entry_price) * shares_to_exit
         else:  # Short
-            gross_pnl = (entry_price - exit_price) * shares_to_exit
+            gross_pnl = (entry_price - exit_price(1-0.003)) * shares_to_exit
 
         duration = 0
         # Ensure entry_date is a Timestamp if it's not already
@@ -944,7 +955,7 @@ class TradeManager:
         })
         return pnl_net
     # ----------------------------------------------------------------------------------------------------------
-# ----------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------
 @jit(nopython=True)
 def risk_metrics(returns_array, risk_free_daily):
     """Numba-optimized calculation of risk metrics"""
@@ -999,6 +1010,17 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
     expectancy = (win_prob * avg_win) + ((1 - win_prob) * avg_loss) # avg_loss is non-positive
     expectancy_pct = (expectancy / initial_capital) * 100 if initial_capital > 0 else 0.0
 
+    hit_count = 0
+    total_trades_with_target = 0
+    # Hit Rate calculation
+    if trade_log:
+        for trade in trade_log:
+            if 'Exit Reason' in trade:
+                if trade['Exit Reason'] == 'Take Profit':
+                    hit_count += 1
+    
+    hit_rate = (hit_count / total_trades * 100)
+
     # Average Win/Loss Ratio
     if avg_loss == 0:
         # If average loss is zero (no losing trades or all losses were PnL=0)
@@ -1037,6 +1059,7 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
     return {
         'Total Trades': total_trades,
         'Win Rate': win_rate,
+        'Hit Rate': hit_rate,
         'Return (%)': net_profit_pct,
         'Profit Factor': profit_factor,
         'Expectancy (%)': expectancy_pct,
@@ -1074,7 +1097,7 @@ def parameter_test(df, long_risk, long_reward, position_size, tech_params, trial
             threshold=tech_params.get('THRESHOLD', THRESHOLD),
         )
         
-        # 5. Process metrics
+        # Process metrics
         required_metrics_keys = ['Sharpe Ratio', 'Profit Factor', 'Return (%)', 'Max Drawdown (%)']
         if stats and all(metric in stats for metric in required_metrics_keys):
             metrics = [
@@ -1083,7 +1106,6 @@ def parameter_test(df, long_risk, long_reward, position_size, tech_params, trial
                 stats['Avg Win/Loss Ratio'],
                 stats['Max Drawdown (%)']
             ]
-            
             if trial:
                 trial.set_user_attr('sharpe', metrics[0])
                 trial.set_user_attr('profit_factor', metrics[1])
@@ -1106,7 +1128,7 @@ def parameter_test(df, long_risk, long_reward, position_size, tech_params, trial
     except Exception as e:
         print(f"Error in parameter evaluation for trial {trial_num}: {e}")
         return bad_metrics_template
-# -------------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------
 def objectives(trial, base_df):
     # Define parameter search spaces for both basic and technical parameters
     bad_metrics_template = []
@@ -1117,37 +1139,23 @@ def objectives(trial, base_df):
             bad_metrics_template.append(np.inf)
     params = {
         # Basic parameters
-        'long_risk': trial.suggest_float('long_risk', 0.01, 0.10, step=0.01),
+        'long_risk': trial.suggest_float('long_risk', 0.01, 0.15, step=0.01),
         'long_reward': trial.suggest_float('long_reward', 0.02, 0.20, step=0.01),
         'position_size': trial.suggest_float('position_size', 0.05, 0.50, step=0.05),
 
         # Technical parameters
-        'max_open_positions': trial.suggest_int('max_open_positions', 5, 50,),
-        'adx_threshold': trial.suggest_float('adx_threshold', 20.0, 30.0, step=1.0),
+        'max_open_positions': trial.suggest_int('max_open_positions', 5, 50),
+        'adx_threshold': trial.suggest_float('adx_threshold', 20.0, 30.0, step=0.5),
         'persistence_days': trial.suggest_int('persistence_days', 3,7),
         'max_position_duration': trial.suggest_int('max_position_duration', 5, 30),
 
         # Thresholds
-        'entry': trial.suggest_float('entry', 0.5, 0.7, step=0.05),
-        'exit': trial.suggest_float('exit', 0.3, 0.5, step=0.05),
-        'rsi_buy': trial.suggest_float('rsi_buy', 30, 35, step=0.5),
-        'rsi_exit': trial.suggest_float('rsi_exit', 60, 65, step=0.5),
+        'entry': trial.suggest_float('entry', 0.5, 0.7, step=0.025),
+        'exit': trial.suggest_float('exit', 0.3, 0.5, step=0.025),
+        'rsi_buy': trial.suggest_float('rsi_buy', 30, 35, step=0.25),
+        'rsi_exit': trial.suggest_float('rsi_exit', 60, 65, step=0.25),
     }
     
-    # 1. Risk/Reward Validation
-    if (params['long_risk'] >= params['long_reward']):
-        trial.set_user_attr("invalid_reason", "Risk >= Reward")
-        return bad_metrics_template
-
-    if (params['long_reward']/params['long_risk'] > 4.0):
-        trial.set_user_attr("invalid_reason", "High Reward/Risk Ratio")
-        return bad_metrics_template
-
-    # 2. Position Sizing Validation
-    max_position_risk = params['position_size'] * params['max_open_positions']
-    if max_position_risk > 2.5:  # >100% exposure
-        trial.set_user_attr("invalid_reason", "Excessive position risk")
-        return bad_metrics_template
     
     # Set up signal weights
     threshold = THRESHOLD.copy()
@@ -1173,12 +1181,12 @@ def objectives(trial, base_df):
         tech_params,
         trial
     )
-# --------------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------
 def optimize(prepared_data):
     # Optimizing parameters for Optuna
     target_metrics = list(OPTIMIZATION_DIRECTIONS.keys())
     opt_directions = [OPTIMIZATION_DIRECTIONS[metric] for metric in target_metrics]
-    n_trials=300
+    n_trials=TRIALS
     min_completed_trials=20
     timeout=3600
 
@@ -1194,8 +1202,9 @@ def optimize(prepared_data):
     study = optuna.create_study(
         directions=opt_directions,  # Direction for each metric
         study_name=f"strategy_optimization",
-        pruner=optuna.pruners.PatientPruner(base_pruner, patience=3),
-        sampler=optuna.samplers.NSGAIIISampler(seed=42, population_size=50)  # Use NSGA-III for multi-objective
+        pruner=optuna.pruners.HyperbandPruner(
+            min_resource=5, max_resource=n_trials, reduction_factor=3),
+        sampler=optuna.samplers.NSGAIIISampler(seed=42, population_size=60)  # Use NSGA-III for multi-objective
     )
 
     # Define the objective function
@@ -1247,7 +1256,7 @@ def optimize(prepared_data):
     filtered_trials.sort(key=lambda x: x[1], reverse=True)
     # Extract just the trials for display
     pareto_front = [trial_tuple[0] for trial_tuple in filtered_trials]
-    return pareto_front[:15]
+    return pareto_front[:10]  # Return top 10 trialscl
 # --------------------------------------------------------------------------------------------------------------------------
 def visualize(pareto_front, base_df):
     while True:
@@ -1380,12 +1389,13 @@ def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
     print(f"Signal Weights: {threshold}")
     
     metrics = [
-        ["Starting Capital [$]", f"{equity_curve.iloc[0]:,.2f}"],
-        ["Ending Capital [$]", f"{equity_curve.iloc[-1]:,.2f}"],
         ["Start", f"{df.index[0].strftime('%Y-%m-%d')}"],
         ["End", f"{df.index[-1].strftime('%Y-%m-%d')}"],
         ["Duration [days]", f"{exposure_time}"],
-        ["Equity Final [$]", f"{equity_curve.iloc[-1]:,.2f}"],
+        ["Starting Capital [$]", f"{equity_curve.iloc[0]:,.2f}"],
+        ["Ending Cash [$]", f"{stats['Equity Final']:,.2f}"],
+        ["Open Position Value [$]", f"{stats['Open Position Value']:,.2f}"],
+        ["Total Portfolio Value [$]", f"{stats['Total Portfolio Value']:,.2f}"],
         ["Equity Peak [$]", f"{peak_equity:,.2f}"],
         ["Return [%]", f"{stats['Return (%)']:.2f}"],
         ["Buy & Hold Return [%]", f"{buy_hold_return:.2f}"],
@@ -1401,6 +1411,7 @@ def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
     trade_metrics = [
         ["Total Trades", f"{stats['Total Trades']:.0f}"], 
         ["Win Rate [%]", f"{stats['Win Rate']:.2f}"],
+        ["Hit Rate [%]", f"{stats['Hit Rate']:.2f}"],
         ["Best Trade [%]", f"{best_trade_pct:.2f}"],
         ["Worst Trade [%]", f"{worst_trade_pct:.2f}"],
         ["Avg. Trade [%]", f"{avg_trade_pct:.2f}"],
@@ -1413,7 +1424,7 @@ def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
     print(tabulate(trade_metrics, tablefmt="simple", colalign=("left", "right")))
      
     return None
-#================== STRATEGY SIGNIFICANCE TESTING ==============================================================================================================7
+#================== STRATEGY SIGNIFICANCE TESTING ==============================================================================================================
 def stationary_bootstrap(data, block_size = 10.0, num_samples= 1000, sample_length = None, seed = None):
     if seed is not None:
         np.random.seed(seed)
@@ -1629,7 +1640,7 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1000):
     print(tabulate(rows, headers=headers, tablefmt="grid"))
     
     return results_df
-#================== STRATEGY ROBUSTNESS TESTING ==================================================================================================================
+#================== STRATEGY ROBUSTNESS TESTING ================================================================================================================
 def walk_forward_analysis(prepared_data, parameters, train_months=24, test_months=6, min_train=12, n_jobs=-1):
     
     def run_strategy_window(data_window):
@@ -1747,7 +1758,7 @@ def walk_forward_analysis(prepared_data, parameters, train_months=24, test_month
     print(tabulate(window_stats, headers='keys', tablefmt='grid'))
     
     return {'results': df, 'metrics': decay_stats}
-#================== MAIN PROGRAM EXECUTION =======================================================================================================================
+#================== MAIN PROGRAM EXECUTION =====================================================================================================================
 def main():
     try:
         if isinstance(TICKER, list):
@@ -1808,6 +1819,6 @@ def main():
         print(f"Error in main function: {e}")
         traceback.print_exc()
         return None
-# -------------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------------------------
 if __name__ == "__main__":
     main()
