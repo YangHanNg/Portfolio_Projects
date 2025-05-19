@@ -8,7 +8,7 @@ import pandas_ta as ta
 import multiprocessing as mp 
 from collections import deque
 from numba import jit
-import time
+from datetime import datetime
 from tqdm import tqdm
 import optuna
 from functools import partial  # Add missing import for partial
@@ -18,11 +18,15 @@ from statsmodels.tsa.stattools import adfuller, acf
 from joblib import Parallel, delayed
 #================== SCRIPT PARAMETERS =======================================================================================================================
 # Controls
-TYPE = 2 # 1. Full run # 2. Monte Carlo # 3. Optimization # 4. Test
+TYPE = 2 # 1. Full run # 2. Walk-Forward # 3. Monte Carlo # 4. Optimization # 5. Test
 TICKER = ['PEP']
 INITIAL_CAPITAL = 10000000.0
 TRIALS = 30
 COMMISION = False
+BLOCK_SIZE = 15
+OPTIMIZATION_FREQUENCY = 63
+OOS_WINDOW = 21
+FINAL_OOS_YEARS = 3
 
 # Optimization directions
 OPTIMIZATION_DIRECTIONS = {
@@ -71,7 +75,11 @@ BB_LEN = 20
 ST_DEV = 2
 #================== DATA RETRIEVAL & HANDLING =================================================================================================================
 def get_data(ticker):
-    data_start_year = 2013
+    trading_days_per_year = 252
+    oos_period = 252 * FINAL_OOS_YEARS
+    is_period = oos_period + 252 * 5
+
+    data_start_year = 2015
     print('\nDownloading data....')
     data = yf.download(ticker, start=f"{data_start_year}-01-01", auto_adjust=True)
 
@@ -79,30 +87,19 @@ def get_data(ticker):
         print(f"No data available for {ticker}")
         return None, None, None
 
-    # Fix index access - oldest is first, latest is last
-    data_oldest = data.index[0]
-    data_latest = data.index[-1]
-    
-    # Calculate data range in years
-    data_year_range = (data_latest - data_oldest).days / 365.25
-    
-    # Determine periods based on data range
-    if data_year_range > 8:
-        start_date = pd.Timestamp(f"{data_start_year}-01-01")
-        in_sample_period = start_date + pd.DateOffset(years=5)
-        out_of_sample_period = in_sample_period + pd.DateOffset(years=1)
-    else:
-        in_sample_period = data_oldest + pd.DateOffset(years=3)
-        out_of_sample_period = in_sample_period + pd.DateOffset(years=1)
-    
-    # Split data into IS and OOS DataFrames
-    in_sample_df = data[data_oldest:in_sample_period].copy()
-    out_of_sample_df = data[out_of_sample_period:data_latest].copy()
+    # Get Out of Sample data
+    oos_df = data.iloc[-oos_period:].copy()
 
-    if in_sample_df.empty or out_of_sample_df.empty:
+    # Check if the data is sufficient for the specified periods
+    if len(data) < is_period + oos_period:
+        is_df = data.iloc[:-oos_period].copy()
+    else:
+        is_df = data.iloc[-is_period:-oos_period].copy()
+
+    if is_df.empty or oos_df.empty:
             raise ValueError(f"No data downloaded for {ticker}")
-    print(f"Data split: In-Sample from {data_oldest.year} to {in_sample_period.year}, Out-of-Sample from {out_of_sample_period.year} to {data_latest.year}")
-    return in_sample_df, out_of_sample_df
+    print(f"Data split: In-Sample from {is_df.index[0].year} to {is_df.index[-1].year}, Out-of-Sample from {oos_df.index[0].year} to {oos_df.index[-1].year}")
+    return is_df, oos_df
 # --------------------------------------------------------------------------------------------------------------------------
 def prepare_data(df_IS):
 
@@ -188,7 +185,11 @@ def prepare_data(df_IS):
             .mean().reindex(df.index, method='ffill'))
         
         # Relative Strength Index - Measures pct change in price
-        df['RSI'] = ta.rsi(df['Close'], length=RSI_LENGTH).fillna(50.0)
+        rsi_series = ta.rsi(df['Close'], length=RSI_LENGTH)
+        if rsi_series is not None:
+            df['RSI'] = rsi_series.fillna(50.0)
+        else:
+            df['RSI'] = pd.Series(50.0, index=df.index) # Default if ta.rsi returns None
         
         # Bollinger Bands - Measures volatility
         bb = ta.bbands(df['Close'], length=BB_LEN, std=ST_DEV)
@@ -201,7 +202,11 @@ def prepare_data(df_IS):
 
         # Secondary Indicators
         # Average True Range - Measures volatility
-        df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14).fillna(df['Close'] * 0.02)
+        atr_series = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+        if atr_series is not None:
+            df['ATR'] = atr_series.fillna(df['Close'] * 0.02)
+        else:
+            df['ATR'] = pd.Series(df['Close'] * 0.02, index=df.index) # Default if ta.atr returns None
 
         # Close price 26 periods ago
         df['Close_26_ago'] = df['Close'].shift(26).ffill().fillna(df['Close'])
@@ -214,10 +219,18 @@ def prepare_data(df_IS):
             df['ADX'] = pd.Series(25.0, index=df.index)
 
         # Volume and Weekly Trend Confirmations
-        df['volume_confirmed'] = df['Volume'] > df['Volume_MA20']
-        df['weekly_uptrend'] = (df['Close'] > df[f'Weekly_MA{WEEKLY_MA_PERIOD}']) & \
-                       (df[f'Weekly_MA{WEEKLY_MA_PERIOD}'].shift(1).ffill() < \
-                        df[f'Weekly_MA{WEEKLY_MA_PERIOD}'])
+        # Ensure dependencies are present before calculating these
+        if 'Volume' in df.columns and 'Volume_MA20' in df.columns:
+            df['volume_confirmed'] = df['Volume'] > df['Volume_MA20']
+        else:
+            df['volume_confirmed'] = pd.Series(False, index=df.index)
+
+        if 'Close' in df.columns and f'Weekly_MA{WEEKLY_MA_PERIOD}' in df.columns:
+            df['weekly_uptrend'] = (df['Close'] > df[f'Weekly_MA{WEEKLY_MA_PERIOD}']) & \
+                                   (df[f'Weekly_MA{WEEKLY_MA_PERIOD}'].shift(1).ffill() < \
+                                    df[f'Weekly_MA{WEEKLY_MA_PERIOD}'])
+        else:
+            df['weekly_uptrend'] = pd.Series(False, index=df.index)
         
     except Exception as e:
         print(f"Error calculating indicators: {e}. Applying defaults.")
@@ -272,9 +285,29 @@ def signals(df, adx_threshold, threshold):
                                 'High', 'Low','volume_confirmed', 'weekly_uptrend']
     missing_cols = [col for col in required_indicator_cols if col not in df.columns]
     if missing_cols:
-        print(f"Warning: Missing columns for signals: {missing_cols}. Returning empty signals.")
-        for col_name in ['buy_signal', 'sell_signal', 'buy_score', 'sell_score', 'signal_changed']:
-            signals_df[col_name] = False if 'signal' in col_name or 'changed' in col_name else 0.0
+        print(f"Warning: Missing columns for signals: {missing_cols}. Returning default signals.")
+        # Ensure signals_df is initialized with the DataFrame's index if df is not empty
+        if not df.empty:
+            signals_df = pd.DataFrame(index=df.index)
+        else: # df is empty, create an empty signals_df with correct columns
+            # This path should ideally not be hit if prepare_data ensures df is not empty
+            signals_df = pd.DataFrame(columns=['momentum_score', 'momentum_decay', 'buy_signal', 'exit_signal', 'immediate_exit', 'signal_changed'])
+            # Populate with default values if df was empty
+            signals_df['momentum_score'] = 0.0
+            signals_df['momentum_decay'] = False
+            signals_df['buy_signal'] = False
+            signals_df['exit_signal'] = False 
+            signals_df['immediate_exit'] = False 
+            signals_df['signal_changed'] = False
+            return signals_df
+            
+        # If df is not empty but columns are missing, populate with default values
+        signals_df['momentum_score'] = 0.0
+        signals_df['momentum_decay'] = False
+        signals_df['buy_signal'] = False
+        signals_df['exit_signal'] = False 
+        signals_df['immediate_exit'] = False 
+        signals_df['signal_changed'] = False
         return signals_df
 
     # 1. Performance Optimizations: Use NumPy arrays
@@ -384,20 +417,15 @@ def signals(df, adx_threshold, threshold):
     # Immediate exit: Extreme RSI or dramatic trend breakdown
     immediate_exit = conditions['rsi_extreme_exit'] | (adx_np < adx_threshold/2)
     
-    # 6. Store results in DataFrame
-    signals_df = pd.DataFrame(index=df.index)
+   # Assign calculated signals to the DataFrame
     signals_df['momentum_score'] = momentum_score
     signals_df['momentum_decay'] = momentum_decay
     signals_df['buy_signal'] = buy_signal
     signals_df['exit_signal'] = exit_signal
     signals_df['immediate_exit'] = immediate_exit
-    
-    # Calculate signal_changed flag
-    last_buy_signal = buy_signal.astype(int)
-    signal_changed_np = np.diff(last_buy_signal, prepend=0) != 0
-    signals_df['signal_changed'] = signal_changed_np
-    
-    return signals_df
+    signals_df['signal_changed'] = False # Default value, can be calculated if needed
+
+    return signals_df # Ensure this is the final return for the normal execution path
 #================== MOMENTUM STRATEGY =========================================================================================================================
 def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, position_size=DEFAULT_POSITION_SIZE, risk_free_rate=0.04, 
              max_positions=MAX_OPEN_POSITIONS, adx_threshold=ADX_THRESHOLD_DEFAULT, persistence_days=PERSISTENCE_DAYS, max_position_duration=MAX_POSITION_DURATION, threshold=THRESHOLD):
@@ -1019,7 +1047,7 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
                 if trade['Exit Reason'] == 'Take Profit':
                     hit_count += 1
     
-    hit_rate = (hit_count / total_trades * 100)
+    hit_rate = (hit_count / total_trades * 100) if total_trades > 0 else 0.0
 
     # Average Win/Loss Ratio
     if avg_loss == 0:
@@ -1425,7 +1453,7 @@ def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
      
     return None
 #================== STRATEGY SIGNIFICANCE TESTING ==============================================================================================================
-def stationary_bootstrap(data, block_size = 10.0, num_samples= 1000, sample_length = None, seed = None):
+def stationary_bootstrap(data, block_size = BLOCK_SIZE, num_samples= 1000, sample_length = None, seed = None):
     if seed is not None:
         np.random.seed(seed)
     
@@ -1497,7 +1525,7 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1000):
     print("\nGenerating bootstrap samples...")
     bootstrap_samples = stationary_bootstrap(
         data=prepared_data,
-        block_size=10.0,
+        block_size=BLOCK_SIZE,
         num_samples=num_simulations,
         sample_length=None,
         seed=42
@@ -1641,123 +1669,228 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1000):
     
     return results_df
 #================== STRATEGY ROBUSTNESS TESTING ================================================================================================================
-def walk_forward_analysis(prepared_data, parameters, train_months=24, test_months=6, min_train=12, n_jobs=-1):
+def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parameters):
+    """
+    Performs anchored walk-forward analysis with periodic re-optimization.
+
+    1. Starts with initial_is_data_raw as training data.
+    2. Tests on OOS_WINDOW chunks from full_oos_data_raw.
+    3. Appends tested OOS_WINDOW to training data (anchoring).
+    4. Re-optimizes parameters using optimize() when OPTIMIZATION_FREQUENCY days
+       of OOS data have been processed and added to training.
+    """
     
-    def run_strategy_window(data_window):
-        """Run strategy on a specific data window"""
-        performance_log, stats, equity_curve, returns_series = momentum(
-            data_window,
-            long_risk=parameters['long_risk'],
-            long_reward=parameters['long_reward'],
-            position_size=parameters['position_size'],
-            max_positions=parameters['tech_params']['MAX_OPEN_POSITIONS'],
-            adx_threshold_sig=parameters['tech_params']['ADX_THRESHOLD'],
-            persistence_days=parameters['tech_params']['PERSISTENCE_DAYS'],
-            max_position_duration=parameters['tech_params']['MAX_POSITION_DURATION'],
-            threshold=parameters['tech_params']['THRESHOLD']
-        )
-        return {'stats': stats, 'returns_series': returns_series}
+    # Global constants from your script parameters
+    oos_window_size = OOS_WINDOW  # e.g., 10 (days/periods in raw data)
+    opt_frequency_days = OPTIMIZATION_FREQUENCY # e.g., 42 (days/periods in raw data)
 
-    def process_window(train_start, train_end, test_end, data):
-        """Process individual walk-forward window"""
-        try:
-            # Split data into train and test periods
-            train = data.loc[train_start:train_end].copy()
-            test = data.loc[train_end:test_end].copy()
-            
-            if train.empty or test.empty:
-                return None
-            
-            # Run strategy on both periods
-            train_result = run_strategy_window(train)
-            test_result = run_strategy_window(test)
-            
-            # Calculate performance decay
-            train_sharpe = train_result['stats']['Sharpe Ratio']
-            test_sharpe = test_result['stats']['Sharpe Ratio']
-            decay = train_sharpe - test_sharpe
-            
-            # Check consistency
-            consistency = 1 if test_sharpe > 0 else 0
-            
-            # Test stationarity between periods
-            combined_returns = pd.concat([
-                pd.Series(train_result['returns_series']),
-                pd.Series(test_result['returns_series'])
-            ])
-            adf_p = adfuller(combined_returns.dropna())[1]
-            
-            return {
-                'train_period': (train_start, train_end),
-                'test_period': (train_end, test_end),
-                'train_sharpe': train_sharpe,
-                'test_sharpe': test_sharpe,
-                'decay_ratio': decay/max(0.01, abs(train_sharpe)),
-                'consistency': consistency,
-                'stationarity_p': adf_p
-            }
-            
-        except Exception as e:
-            print(f"Error processing window {train_start} to {test_end}: {e}")
-            return None
-
-    # Generate windows for analysis
-    dates = prepared_data.index.sort_values()
-    windows = []
-    train_start = dates[0]
+    # Make copies to avoid modifying originals passed to the function
+    current_train_raw = initial_is_data_raw.copy()
+    remaining_oos_raw = full_oos_data_raw.copy()
     
-    while train_start <= dates[-1] - pd.DateOffset(months=min_train+test_months):
-        train_end = train_start + pd.DateOffset(months=train_months)
-        test_end = train_end + pd.DateOffset(months=test_months)
-        
-        if test_end > dates[-1]:
-            break
-            
-        windows.append((train_start, train_end, test_end, prepared_data))
-        train_start += pd.DateOffset(months=test_months)
+    active_parameters = initial_parameters.copy() # Current parameters for the strategy
 
-    # Run parallel processing
-    print("\nRunning Walk-Forward Analysis...")
-    with tqdm(total=len(windows)) as pbar:
-        results = Parallel(n_jobs=n_jobs)(
-            delayed(process_window)(*window) for window in windows
-        )
-        pbar.update()
-
-    # Filter out None results and create DataFrame
-    results = [r for r in results if r is not None]
-    if not results:
-        print("No valid results from walk-forward analysis")
+    all_step_results = []
+    
+    # For re-optimization tracking
+    # This tracks raw OOS days processed and added to training since last optimization
+    days_processed_since_last_opt = 0 
+    
+    # Initial preparation of the first training set
+    # This prepared data will be used for the first training run (reference)
+    # and potentially the first optimization if opt_frequency_days is small or zero.
+    prepared_current_train = prepare_data(current_train_raw.copy())
+    if prepared_current_train.empty:
+        print("Initial training data (is_data) is empty after preparation. Aborting WFA.")
         return None
+
+    step_number = 0
+    print(f"\nStarting Anchored Walk-Forward Analysis...")
+    print(f"Initial training data: {current_train_raw.index[0].date()} to {current_train_raw.index[-1].date()} ({len(current_train_raw)} days)")
+    print(f"Total OOS data available: {len(remaining_oos_raw)} days")
+    print(f"OOS Window Size: {oos_window_size} days, Optimization Frequency: {opt_frequency_days} days of new OOS data.")
+
+    while len(remaining_oos_raw) >= oos_window_size:
+        step_number += 1
+        print(f"\n--- WFA Step {step_number} ---")
+
+        # 1. Re-optimization Check
+        # Re-optimize if enough new OOS data has been processed and added to training
+        # and it's not the very first step (unless opt_frequency_days is 0, which means optimize always)
+        if days_processed_since_last_opt >= opt_frequency_days and step_number > 0 : # step_number > 0 ensures it can run on first step if needed
+            print(f"Attempting re-optimization. Days processed since last opt: {days_processed_since_last_opt} >= {opt_frequency_days}")
+            
+            # The `prepared_current_train` for optimization is the one derived from `current_train_raw`
+            # which now includes previously processed OOS chunks.
+            if prepared_current_train.empty:
+                print("Cannot optimize: Current accumulated training data is empty after preparation.")
+            else:
+                print(f"Optimizing with training data ending on {prepared_current_train.index[-1].date()} ({len(prepared_current_train)} days)")
+                pareto_front = optimize(prepared_current_train) 
+                
+                if pareto_front and len(pareto_front) > 0:
+                    best_trial = pareto_front[0] # Assuming optimize sorts/selects the best
+                    
+                    # Map Optuna trial params to the flat structure expected by momentum
+                    active_parameters = {
+                        'long_risk': float(best_trial.params['long_risk']),
+                        'long_reward': float(best_trial.params['long_reward']),
+                        'position_size': float(best_trial.params['position_size']),
+                        'max_positions_param': int(best_trial.params['max_open_positions']),
+                        'adx_thresh': float(best_trial.params['adx_threshold']),
+                        'persistence_days': int(best_trial.params['persistence_days']),
+                        'max_position_duration': int(best_trial.params['max_position_duration']),
+                        'threshold': {
+                            'Entry': float(best_trial.params['entry']),
+                            'Exit': float(best_trial.params['exit']),
+                            'RSI_BUY': float(best_trial.params['rsi_buy']),
+                            'RSI_EXIT': float(best_trial.params['rsi_exit'])
+                        }
+                    }
+                    print(f"Parameters updated from optimization. New Sharpe from trial: {best_trial.values[0]:.2f}")
+                else:
+                    print("Optimization did not yield new parameters. Continuing with existing ones.")
+            days_processed_since_last_opt = 0 # Reset counter regardless of optimization success
         
-    df = pd.DataFrame(results)
+        # 2. Define and Prepare Current Test Window (OOS Chunk)
+        current_oos_chunk_raw = remaining_oos_raw.iloc[:oos_window_size].copy()
+        prepared_oos_chunk = prepare_data(current_oos_chunk_raw.copy())
+
+        if prepared_oos_chunk.empty:
+            print(f"OOS chunk for step {step_number} ({current_oos_chunk_raw.index[0].date()} to {current_oos_chunk_raw.index[-1].date()}) is empty after preparation. Skipping this OOS chunk.")
+            remaining_oos_raw = remaining_oos_raw.iloc[oos_window_size:].copy()
+            # Still count these raw days towards optimization frequency
+            days_processed_since_last_opt += len(current_oos_chunk_raw) 
+            continue
+
+        # Ensure prepared_current_train is valid for the training run part of this step
+        if prepared_current_train.empty:
+            print(f"Training data for step {step_number} is empty. Cannot proceed with this step.")
+            # This might indicate a problem with data or preparation logic if it happens mid-WFA
+            break 
+
+        print(f"Training data for this step: {prepared_current_train.index[0].date()} to {prepared_current_train.index[-1].date()} ({len(prepared_current_train)} days)")
+        print(f"Testing with OOS data: {prepared_oos_chunk.index[0].date()} to {prepared_oos_chunk.index[-1].date()} ({len(prepared_oos_chunk)} days)")
+
+        # 3. Run strategy on the current prepared training data (for reference)
+        # This uses `active_parameters` which might have been just re-optimized (or are initial/previous)
+        train_log, train_stats, train_equity, train_returns = momentum(
+            prepared_current_train, # This is the growing training set
+            long_risk=active_parameters['long_risk'],
+            long_reward=active_parameters['long_reward'],
+            position_size=active_parameters['position_size'],
+            max_positions=active_parameters['max_positions_param'], 
+            adx_threshold=active_parameters['adx_thresh'],        
+            persistence_days=active_parameters['persistence_days'],
+            max_position_duration=active_parameters['max_position_duration'],
+            threshold=active_parameters['threshold']
+        )
+
+        # 4. Run strategy on the prepared OOS chunk (current test window)
+        oos_log, oos_stats, oos_equity, oos_returns = momentum(
+            prepared_oos_chunk,
+            long_risk=active_parameters['long_risk'],
+            long_reward=active_parameters['long_reward'],
+            position_size=active_parameters['position_size'],
+            max_positions=active_parameters['max_positions_param'],
+            adx_threshold=active_parameters['adx_thresh'],
+            persistence_days=active_parameters['persistence_days'],
+            max_position_duration=active_parameters['max_position_duration'],
+            threshold=active_parameters['threshold']
+        )
+        
+        # 5. Record results for this step
+        train_sharpe = train_stats.get('Sharpe Ratio', np.nan)
+        oos_sharpe = oos_stats.get('Sharpe Ratio', np.nan)
+        decay_val = train_sharpe - oos_sharpe
+        decay_ratio_val = decay_val / max(0.01, abs(train_sharpe)) if pd.notna(train_sharpe) and train_sharpe != 0 else np.nan
+        
+        step_result_data = {
+            'step': step_number,
+            'train_start_date': prepared_current_train.index[0].date(),
+            'train_end_date': prepared_current_train.index[-1].date(),
+            'train_days': len(prepared_current_train),
+            'test_start_date': prepared_oos_chunk.index[0].date(),
+            'test_end_date': prepared_oos_chunk.index[-1].date(),
+            'test_days': len(prepared_oos_chunk),
+            'train_sharpe': train_sharpe,
+            'test_sharpe': oos_sharpe,
+            'decay_ratio': decay_ratio_val,
+            'train_trades': train_stats.get('Total Trades', 0),
+            'test_trades': oos_stats.get('Total Trades', 0),
+            'parameters_used_snapshot': active_parameters.copy(), 
+            'oos_returns_series': oos_returns,
+            'train_return_pct': train_stats.get('Return (%)', np.nan),
+            'test_return_pct': oos_stats.get('Return (%)', np.nan),
+        }
+        all_step_results.append(step_result_data)
+        
+        print(f"  Step {step_number} Results: Train Sharpe: {train_sharpe:.2f}, Test Sharpe: {oos_sharpe:.2f}, Decay Ratio: {decay_ratio_val:.2f}")
+
+        # 6. Update data for the next iteration (Anchoring)
+        # Append the raw OOS chunk that was just processed to the raw training data
+        current_train_raw = pd.concat([current_train_raw, current_oos_chunk_raw])
+        # Prepare this new, larger training set for the *next* step's training run / optimization
+        prepared_current_train = prepare_data(current_train_raw.copy())
+        if prepared_current_train.empty:
+            print(f"CRITICAL: Accumulated training data became empty after preparing for next step (after step {step_number}). Aborting WFA.")
+            break 
+        
+        # Advance the remaining OOS data
+        remaining_oos_raw = remaining_oos_raw.iloc[oos_window_size:].copy()
+        
+        # 7. Increment days processed for re-optimization tracking
+        # Add the length of the raw OOS chunk that was processed
+        days_processed_since_last_opt += len(current_oos_chunk_raw) 
+
+    # --- Post-Loop Processing ---
+    if not all_step_results:
+        print("No walk-forward steps were completed.")
+        return None
+
+    results_df = pd.DataFrame(all_step_results)
     
-    # Calculate aggregate metrics
-    decay_stats = {
-        'mean_decay': df['decay_ratio'].mean(),
-        'std_decay': df['decay_ratio'].std(),
-        'probability_positive': df['test_sharpe'].gt(0).mean(),
-        'stationary_fraction': df['stationarity_p'].lt(0.05).mean()
+    all_oos_returns_list = [res['oos_returns_series'] for res in all_step_results if isinstance(res['oos_returns_series'], pd.Series) and not res['oos_returns_series'].empty]
+    
+    concatenated_oos_returns = pd.Series(dtype=float)
+    overall_oos_sharpe = np.nan
+    overall_oos_return_pct = np.nan
+
+    if all_oos_returns_list:
+        concatenated_oos_returns = pd.concat(all_oos_returns_list).sort_index()
+        # Remove duplicate index entries if any, keep first (shouldn't happen if OOS chunks are sequential)
+        concatenated_oos_returns = concatenated_oos_returns[~concatenated_oos_returns.index.duplicated(keep='first')]
+
+        if len(concatenated_oos_returns) > 1:
+            if concatenated_oos_returns.std() != 0 and pd.notna(concatenated_oos_returns.std()):
+                overall_oos_sharpe = (concatenated_oos_returns.mean() / concatenated_oos_returns.std()) * np.sqrt(252) # Assuming daily returns
+            
+            # Calculate overall cumulative return for concatenated OOS periods
+            # (1 + r1) * (1 + r2) * ... * (1 + rn) - 1
+            overall_oos_return_pct = (np.prod(1 + concatenated_oos_returns) - 1) * 100
+
+    print("\n=== Anchored Walk-Forward Analysis Final Summary ===")
+    print(f"Total WFA Steps Completed: {len(results_df)}")
+    if not results_df.empty:
+        print(f"Mean Test Sharpe (across steps): {results_df['test_sharpe'].mean():.2f}")
+        print(f"Mean Test Return (%) (across steps): {results_df['test_return_pct'].mean():.2f}")
+        print(f"Mean Decay Ratio (across steps): {results_df['decay_ratio'].mean():.2f}")
+    print(f"Overall Concatenated OOS Sharpe Ratio: {overall_oos_sharpe:.2f}")
+    print(f"Overall Concatenated OOS Total Return (%): {overall_oos_return_pct:.2f}")
+    
+    # Display detailed step results
+    if not results_df.empty:
+        print("\n--- Detailed Step Results ---")
+        display_cols = ['step', 'train_start_date', 'train_end_date', 'test_start_date', 'test_end_date', 
+                        'train_sharpe', 'test_sharpe', 'decay_ratio', 'train_trades', 'test_trades', 'test_return_pct']
+        print(tabulate(results_df[display_cols], headers='keys', tablefmt='grid', floatfmt=".2f"))
+
+    return {
+        'step_results_df': results_df, 
+        'concatenated_oos_returns': concatenated_oos_returns,
+        'overall_oos_sharpe': overall_oos_sharpe,
+        'overall_oos_return_pct': overall_oos_return_pct
     }
-    
-    # Print summary
-    print("\n=== Walk-Forward Analysis Results ===")
-    print(f"Number of windows analyzed: {len(results)}")
-    print(f"\nDecay Statistics:")
-    print(f"Mean Performance Decay: {decay_stats['mean_decay']:.2f}")
-    print(f"Decay Std Dev: {decay_stats['std_decay']:.2f}")
-    print(f"Probability of Positive Sharpe: {decay_stats['probability_positive']*100:.1f}%")
-    print(f"Fraction of Stationary Windows: {decay_stats['stationary_fraction']*100:.1f}%")
-    
-    print("\nWindow Details:")
-    window_stats = pd.DataFrame({
-        'Train Sharpe': df['train_sharpe'],
-        'Test Sharpe': df['test_sharpe'],
-        'Decay Ratio': df['decay_ratio']
-    })
-    print(tabulate(window_stats, headers='keys', tablefmt='grid'))
-    
-    return {'results': df, 'metrics': decay_stats}
 #================== MAIN PROGRAM EXECUTION =====================================================================================================================
 def main():
     try:
@@ -1766,45 +1899,55 @@ def main():
         else:
             ticker_str = TICKER
         IS, OOS = get_data(ticker_str)
-        df_prepared = prepare_data(IS)
-        if TYPE == 4:
-            test(df_prepared, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, position_size=DEFAULT_POSITION_SIZE, max_positions_param=MAX_OPEN_POSITIONS,
+        if TYPE == 5:
+            df_prepared_for_test = prepare_data(IS.copy())
+            if df_prepared_for_test is None or df_prepared_for_test.empty:
+                print("Data for test is empty after preparation. Aborting.")
+                return
+            test(df_prepared_for_test, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, position_size=DEFAULT_POSITION_SIZE, max_positions_param=MAX_OPEN_POSITIONS,
                 adx_thresh=ADX_THRESHOLD_DEFAULT, persistence_days=PERSISTENCE_DAYS, max_position_duration=MAX_POSITION_DURATION, threshold=THRESHOLD)
-        elif TYPE == 3:
+        elif TYPE == 4:
+            df_prepared_for_opt = prepare_data(IS.copy())
+            if df_prepared_for_opt is None or df_prepared_for_opt.empty:
+                print("Data for optimization is empty after preparation. Aborting.")
+                return
             # Run optimization on in-sample data
-            pareto_front = optimize(df_prepared)
+            pareto_front = optimize(df_prepared_for_opt)
             if pareto_front:
-                visualize(pareto_front, df_prepared)
+                visualize(pareto_front, df_prepared_for_opt)
             else:
                 print("Optimization did not yield any results.")
-        elif TYPE == 2:  # Monte Carlo Testing
-            pareto_front = optimize(df_prepared)[:3]
-            if pareto_front and len(pareto_front) > 0:
-                mc_results_df = monte_carlo(df_prepared, pareto_front)
-                if not mc_results_df.empty:
+        elif TYPE == 3:  # Monte Carlo Testing
+            df_prepared_for_mc = prepare_data(IS.copy())
+            if df_prepared_for_mc is None or df_prepared_for_mc.empty:
+                print("Data for Monte Carlo is empty after preparation. Aborting.")
+                return
+            pareto_front_mc = optimize(df_prepared_for_mc)[:3] # Optimize first
+            if pareto_front_mc and len(pareto_front_mc) > 0:
+                mc_results_df = monte_carlo(df_prepared_for_mc, pareto_front_mc)
+                if mc_results_df is not None and not mc_results_df.empty:
                     # Find best parameter set (lowest combined p-value)
-                    # Ensure 'p_values' column exists and contains dictionaries
                     if 'p_values' in mc_results_df.columns and mc_results_df['p_values'].apply(lambda x: isinstance(x, dict)).all():
                         best_idx_loc = mc_results_df.apply(
                             lambda x: sum(val for val in x['p_values'].values() if pd.notna(val)), axis=1
                         ).idxmin()
                         best_row = mc_results_df.loc[best_idx_loc]
-                        best_params = best_row['params']
+                        best_params_mc = best_row['params'] # These are already in the correct flat structure from MC
                         
                         if any(p < 0.05 for p in best_row['p_values'].values() if pd.notna(p)):
                             print("\n✓ Found statistically significant parameter set from Monte Carlo.")
-                            # Reconstruct the 'threshold' sub-dictionary for the test function
-                            test_params = {
-                                'long_risk': best_params['long_risk'],
-                                'long_reward': best_params['long_reward'],
-                                'position_size': best_params['position_size'],
-                                'max_positions_param': best_params['max_positions'],
-                                'adx_thresh': best_params['adx_threshold'],
-                                'persistence_days': best_params['persistence_days'],
-                                'max_position_duration': best_params['max_position_duration'],
-                                'threshold': best_params['threshold'] # Pass the threshold dict directly
+                            # Parameters from mc_results_df['params'] are already structured for momentum
+                            test_params_from_mc = {
+                                'long_risk': best_params_mc['long_risk'],
+                                'long_reward': best_params_mc['long_reward'],
+                                'position_size': best_params_mc['position_size'],
+                                'max_positions_param': best_params_mc['max_positions'], # Key from MC
+                                'adx_thresh': best_params_mc['adx_threshold'],       # Key from MC
+                                'persistence_days': best_params_mc['persistence_days'],
+                                'max_position_duration': best_params_mc['max_position_duration'],
+                                'threshold': best_params_mc['threshold'] 
                             }
-                            test(df_prepared, **test_params)
+                            test(df_prepared_for_mc, **test_params_from_mc)
                         else:
                             print("⚠ No statistically significant parameter sets found after Monte Carlo.")
                     else:
@@ -1813,8 +1956,162 @@ def main():
                     print("Monte Carlo analysis did not yield any results.")
             else:
                 print("Optimization did not yield any Pareto front for Monte Carlo.")
-        elif TYPE == 1:
-            return None
+        elif TYPE == 2: # Walk-Forward Analysis
+            df_prepared_is_for_wfa_opt = prepare_data(IS.copy()) # Prepare IS data for initial optimization
+            if df_prepared_is_for_wfa_opt is None or df_prepared_is_for_wfa_opt.empty:
+                print("In-sample data for WFA initial optimization is empty after preparation. Aborting.")
+                return
+
+            pareto_front_wfa = optimize(df_prepared_is_for_wfa_opt)
+            
+            # Initialize current_wfa_parameters with defaults
+            current_wfa_parameters = {
+                'long_risk': DEFAULT_LONG_RISK,
+                'long_reward': DEFAULT_LONG_REWARD,
+                'position_size': DEFAULT_POSITION_SIZE,
+                'max_positions_param': MAX_OPEN_POSITIONS,
+                'adx_thresh': ADX_THRESHOLD_DEFAULT,
+                'persistence_days': PERSISTENCE_DAYS,
+                'max_position_duration': MAX_POSITION_DURATION,
+                'threshold': THRESHOLD.copy()
+            }
+
+            if pareto_front_wfa and len(pareto_front_wfa) > 0:
+                best_trial = pareto_front_wfa[0]  # Assuming the first trial is the best
+                
+                # Correctly access parameters from the Optuna FrozenTrial object's .params attribute
+                current_wfa_parameters = {
+                    'long_risk': float(best_trial.params['long_risk']),
+                    'long_reward': float(best_trial.params['long_reward']),
+                    'position_size': float(best_trial.params['position_size']),
+                    'max_positions_param': int(best_trial.params['max_open_positions']), # Key from Optuna trial
+                    'adx_thresh': float(best_trial.params['adx_threshold']),         # Key from Optuna trial
+                    'persistence_days': int(best_trial.params['persistence_days']),
+                    'max_position_duration': int(best_trial.params['max_position_duration']),
+                    'threshold': { # Reconstruct threshold dict from Optuna trial params
+                        'Entry': float(best_trial.params['entry']),
+                        'Exit': float(best_trial.params['exit']),
+                        'RSI_BUY': float(best_trial.params['rsi_buy']),
+                        'RSI_EXIT': float(best_trial.params['rsi_exit'])
+                    }
+                }
+                print(f"Using optimized parameters from initial IS for WFA start. Sharpe: {best_trial.values[0]:.2f}")
+            else:
+                print("Initial optimization for WFA failed or yielded no results. Using default parameters for WFA start.")
+            
+            # walk_forward_analysis expects raw IS and OOS data
+            wfa_summary = walk_forward_analysis(IS, OOS, current_wfa_parameters) 
+            
+            if wfa_summary:
+                print("\nAnchored Walk-Forward Analysis completed.")
+            else:
+                print("Anchored Walk-Forward Analysis failed or produced no results.")
+        elif TYPE == 1: # Full Run (Opt -> MC -> WFA)
+            df_prepared_full_run = prepare_data(IS.copy())
+            if df_prepared_full_run is None or df_prepared_full_run.empty:
+                print("Data for Full Run (Type 1) is empty after preparation. Aborting.")
+                return
+
+            pareto_front_full_run_opt = optimize(df_prepared_full_run) 
+            
+            initial_params_for_wfa = { # Default parameters
+                'long_risk': DEFAULT_LONG_RISK, 'long_reward': DEFAULT_LONG_REWARD,
+                'position_size': DEFAULT_POSITION_SIZE, 'max_positions_param': MAX_OPEN_POSITIONS,
+                'adx_thresh': ADX_THRESHOLD_DEFAULT, 'persistence_days': PERSISTENCE_DAYS,
+                'max_position_duration': MAX_POSITION_DURATION, 'threshold': THRESHOLD.copy()
+            }
+
+            if pareto_front_full_run_opt and len(pareto_front_full_run_opt) > 0:
+                mc_candidate_trials = pareto_front_full_run_opt[:3]
+                mc_results_df_full_run = monte_carlo(df_prepared_full_run, mc_candidate_trials)
+                
+                if mc_results_df_full_run is not None and not mc_results_df_full_run.empty:
+                    if 'p_values' in mc_results_df_full_run.columns and mc_results_df_full_run['p_values'].apply(lambda x: isinstance(x, dict)).all():
+                        best_idx_loc_mc = mc_results_df_full_run.apply(
+                            lambda x: sum(val for val in x['p_values'].values() if pd.notna(val)), axis=1
+                        ).idxmin()
+                        best_row_mc = mc_results_df_full_run.loc[best_idx_loc_mc]
+                        best_params_from_mc = best_row_mc['params'] # Params from MC are already structured
+                        
+                        if any(p < 0.05 for p in best_row_mc['p_values'].values() if pd.notna(p)):
+                            print("\n✓ Found statistically significant parameter set from Monte Carlo for Full Run.")
+                            initial_params_for_wfa = {
+                                'long_risk': best_params_from_mc['long_risk'],
+                                'long_reward': best_params_from_mc['long_reward'],
+                                'position_size': best_params_from_mc['position_size'],
+                                'max_positions_param': best_params_from_mc['max_positions'],
+                                'adx_thresh': best_params_from_mc['adx_threshold'],
+                                'persistence_days': best_params_from_mc['persistence_days'],
+                                'max_position_duration': best_params_from_mc['max_position_duration'],
+                                'threshold': best_params_from_mc['threshold']
+                            }
+                            print("\nRunning final test with MC parameters before WFA...")
+                            test(df_prepared_full_run, **initial_params_for_wfa)
+                        else:
+                            print("⚠ No statistically significant parameters from MC. Using best from initial Opt for WFA.")
+                            # Fallback to best from initial optimization if MC not significant
+                            best_opt_trial = pareto_front_full_run_opt[0]
+                            initial_params_for_wfa = {
+                                'long_risk': float(best_opt_trial.params['long_risk']),
+                                'long_reward': float(best_opt_trial.params['long_reward']),
+                                'position_size': float(best_opt_trial.params['position_size']),
+                                'max_positions_param': int(best_opt_trial.params['max_open_positions']),
+                                'adx_thresh': float(best_opt_trial.params['adx_threshold']),
+                                'persistence_days': int(best_opt_trial.params['persistence_days']),
+                                'max_position_duration': int(best_opt_trial.params['max_position_duration']),
+                                'threshold': {
+                                    'Entry': float(best_opt_trial.params['entry']),
+                                    'Exit': float(best_opt_trial.params['exit']),
+                                    'RSI_BUY': float(best_opt_trial.params['rsi_buy']),
+                                    'RSI_EXIT': float(best_opt_trial.params['rsi_exit'])
+                                }
+                            }
+                    else:
+                        print("Error in MC results format for Full Run. Using best from initial Opt for WFA.")
+                        best_opt_trial = pareto_front_full_run_opt[0]
+                        initial_params_for_wfa = {
+                            'long_risk': float(best_opt_trial.params['long_risk']),
+                            'long_reward': float(best_opt_trial.params['long_reward']),
+                            'position_size': float(best_opt_trial.params['position_size']),
+                            'max_positions_param': int(best_opt_trial.params['max_open_positions']),
+                            'adx_thresh': float(best_opt_trial.params['adx_threshold']),
+                            'persistence_days': int(best_opt_trial.params['persistence_days']),
+                            'max_position_duration': int(best_opt_trial.params['max_position_duration']),
+                            'threshold': {
+                                'Entry': float(best_opt_trial.params['entry']),
+                                'Exit': float(best_opt_trial.params['exit']),
+                                'RSI_BUY': float(best_opt_trial.params['rsi_buy']),
+                                'RSI_EXIT': float(best_opt_trial.params['rsi_exit'])
+                            }
+                        }
+                else:
+                    print("Monte Carlo analysis for Full Run did not yield results. Using best from initial Opt for WFA.")
+                    best_opt_trial = pareto_front_full_run_opt[0]
+                    initial_params_for_wfa = {
+                        'long_risk': float(best_opt_trial.params['long_risk']),
+                        'long_reward': float(best_opt_trial.params['long_reward']),
+                        'position_size': float(best_opt_trial.params['position_size']),
+                        'max_positions_param': int(best_opt_trial.params['max_open_positions']),
+                        'adx_thresh': float(best_opt_trial.params['adx_threshold']),
+                        'persistence_days': int(best_opt_trial.params['persistence_days']),
+                        'max_position_duration': int(best_opt_trial.params['max_position_duration']),
+                        'threshold': {
+                            'Entry': float(best_opt_trial.params['entry']),
+                            'Exit': float(best_opt_trial.params['exit']),
+                            'RSI_BUY': float(best_opt_trial.params['rsi_buy']),
+                            'RSI_EXIT': float(best_opt_trial.params['rsi_exit'])
+                        }
+                    }
+            else:
+                print("Initial optimization for Full Run did not yield results. Using default parameters for WFA.")
+
+            print("\nProceeding to Walk-Forward Analysis for Full Run...")
+            wfa_summary_full_run = walk_forward_analysis(IS, OOS, initial_params_for_wfa)
+            if wfa_summary_full_run:
+                print("\nAnchored Walk-Forward Analysis for Full Run completed.")
+            else:
+                print("Anchored Walk-Forward Analysis for Full Run failed or produced no results.")
+            return None # End of TYPE 1
     except Exception as e:
         print(f"Error in main function: {e}")
         traceback.print_exc()
