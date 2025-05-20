@@ -18,15 +18,16 @@ from statsmodels.tsa.stattools import adfuller, acf
 from joblib import Parallel, delayed
 #================== SCRIPT PARAMETERS =======================================================================================================================
 # Controls
-TYPE = 2 # 1. Full run # 2. Walk-Forward # 3. Monte Carlo # 4. Optimization # 5. Test
-TICKER = ['PEP']
-INITIAL_CAPITAL = 10000000.0
-TRIALS = 30
-COMMISION = False
+TYPE = 4 # 1. Full run # 2. Walk-Forward # 3. Monte Carlo # 4. Optimization # 5. Test
+TICKER = ['SPY']
+INITIAL_CAPITAL = 25000.0
+TRIALS = 75
+COMMISION = True
 BLOCK_SIZE = 15
-OPTIMIZATION_FREQUENCY = 63
-OOS_WINDOW = 21
+OPTIMIZATION_FREQUENCY = 126
+OOS_WINDOW = 42
 FINAL_OOS_YEARS = 3
+RISK_FREE_RATE_ANNUAL = 0.04
 
 # Optimization directions
 OPTIMIZATION_DIRECTIONS = {
@@ -38,9 +39,9 @@ OPTIMIZATION_DIRECTIONS = {
 # Optimization objectives
 OBJECTIVE_WEIGHTS = {
     'sharpe': 0.40,        
-    'profit_factor': 0.10, 
-    'avg_win_loss_ratio': 0.25,     
-    'max_drawdown': 0.15   
+    'profit_factor': 0.25, 
+    'avg_win_loss_ratio': 0.15,     
+    'max_drawdown': 0.10   
 }
 
 # Optimization parameters
@@ -63,7 +64,7 @@ DEFAULT_SHORT_RISK = 0.01
 DEFAULT_SHORT_REWARD = 0.03  
 
 # Moving average strategy parameters
-FAST = 20
+FAST = 25
 SLOW = 50
 WEEKLY_MA_PERIOD = 50
 
@@ -176,6 +177,8 @@ def prepare_data(df_IS):
         df[f'{FAST}_ma'] = df['Close'].rolling(window=FAST, min_periods=1).mean()
         df[f'{SLOW}_ma'] = df['Close'].rolling(window=SLOW, min_periods=1).mean()
         df['Volume_MA20'] = df['Volume'].rolling(window=20, min_periods=1).mean()
+        vix = yf.download("^VIX", start=df.index[0], end=df.index[-1])['Close']  
+        df['VIX'] = vix
         
         # Weekly Moving Average
         if not isinstance(df.index, pd.DatetimeIndex):
@@ -275,10 +278,16 @@ def signals(df, adx_threshold, threshold):
         else:
             print(f"Warning: {param} not found in threshold. Using default value.")
     
+    # Keep the optimized parameters
     rsi_buy_threshold = threshold.get('RSI_BUY', 40)
     rsi_exit_threshold = threshold.get('RSI_EXIT', 60)
     buy_threshold = threshold.get('Entry', 0.6)
     exit_threshold = threshold.get('Exit', 0.4)
+    VIX_HIGH = 35  # Exit momentum trades above this
+    
+    # Add new parameter for entry weighting
+    ENTRY_WEIGHT_PRIMARY = 0.65    # Weight of primary conditions (trend, volume)
+    ENTRY_WEIGHT_SECONDARY = 0.35  # Weight of secondary conditions (rsi, price action)
 
     required_indicator_cols = [fast_ma_col, slow_ma_col, 'RSI', 'Close',
                                 'Lower_Band', 'Upper_Band', 'ATR', 'ADX', 'Volume', 'Volume_MA20', 'Open', 
@@ -290,7 +299,6 @@ def signals(df, adx_threshold, threshold):
         if not df.empty:
             signals_df = pd.DataFrame(index=df.index)
         else: # df is empty, create an empty signals_df with correct columns
-            # This path should ideally not be hit if prepare_data ensures df is not empty
             signals_df = pd.DataFrame(columns=['momentum_score', 'momentum_decay', 'buy_signal', 'exit_signal', 'immediate_exit', 'signal_changed'])
             # Populate with default values if df was empty
             signals_df['momentum_score'] = 0.0
@@ -321,113 +329,208 @@ def signals(df, adx_threshold, threshold):
     upper_band_np = df['Upper_Band'].values
     high_np = df['High'].values
     lower_np = df['Low'].values
+    rsi_series = df['RSI'] # Keep as Series
+    vix_series = df['VIX'] # Keep as Series
+    vix_np = vix_series.values
+
+    regime_conditions = [
+        vix_np < 15,
+        vix_np > 25
+    ]
+    regime_choices = [
+        "low_vol",
+        "high_vol"
+    ]
+    market_regime_series = np.select(regime_conditions, regime_choices, default="normal")
     
     # Calculate ATR ratio for volatility normalization
     atr_ratio_np = np.full_like(close_np, 0.02, dtype=float) # Ensure float
     valid_close_mask = close_np != 0
     safe_close_np = np.where(valid_close_mask, close_np, 1e-9) # Avoid division by zero
     atr_ratio_np[valid_close_mask] = atr_np[valid_close_mask] / safe_close_np[valid_close_mask]
-    atr_ratio_np = np.nan_to_num(atr_ratio_np, nan=0.02, posinf=0.02, neginf=0.02)
+    atr_ratio_np = np.nan_to_num(atr_ratio_np, nan=0.03, posinf=0.03, neginf=0.03)
 
     # 2. Calculate Primary and Secondary Conditions
     
-    # Momentum persistence check
-    roll_window = 5
+    # Momentum persistence check - IMPROVED with smoother detection
+    roll_window = 7  # Keep as is since it's optimized
     higher_highs = np.zeros_like(high_np, dtype=bool)
     higher_lows = np.zeros_like(lower_np, dtype=bool)
 
     for i in range(roll_window, len(high_np)):
         # Check if current high is higher than previous N-day high
         higher_highs[i] = high_np[i] > np.max(high_np[i-roll_window:i])
-        # Check if current low is higher than previous N-day low
-        higher_lows[i] = lower_np[i] > np.max(lower_np[i-roll_window:i])
+        # FIXED: Correct logic for higher_lows
+        higher_lows[i] = lower_np[i] > np.min(lower_np[i-roll_window:i])
+
+    # Improved VIX conditions - with smoother transitions
+    vix_rolling_mean_5 = vix_series.rolling(window=5, min_periods=1).mean()
+    vix_pct_change_3 = vix_series.pct_change(periods=3).fillna(0)
+    rsi_pct_change_3 = rsi_series.pct_change(periods=3).fillna(0)
+    
+    # NEW: Exponential smoothing for VIX series to reduce noise
+    vix_ema_5 = vix_series.ewm(span=5, adjust=False).mean()
+    
+    # NEW: Rate of change for trend measure
+    close_series = pd.Series(close_np)
+    close_roc_5 = close_series.pct_change(periods=5).fillna(0)
+    close_roc_10 = close_series.pct_change(periods=10).fillna(0)
 
     conditions = {
+        # Primary trend conditions
         'primary_trend_long': (close_np > fast_ma_np) & (close_np > slow_ma_np),
         'trend_strength_ok': adx_np > adx_threshold,
-        'rsi_buy_zone': rsi_np < rsi_buy_threshold,
-        'rsi_exit_zone': rsi_np > rsi_exit_threshold,
-        'rsi_extreme_exit': rsi_np > 80,
+        'relative_trend_strength': adx_np > (adx_np.mean() * 0.8),  # NEW: Relative ADX strength
         'volume_ok': df['volume_confirmed'].values.astype(bool),
         'weekly_uptrend': df['weekly_uptrend'].values.astype(bool),
+        
+        # Secondary conditions
+        'rsi_buy_zone': (rsi_np > rsi_buy_threshold) & (rsi_pct_change_3.values > 0),
+        'rsi_exit_zone': rsi_np > rsi_exit_threshold,
+        'rsi_extreme_exit': rsi_np > 90,
         'bb_buy': close_np < lower_band_np,
         'bb_exit': close_np > upper_band_np,
-        'price_momentum_strong': higher_highs | higher_lows
+        'price_momentum_strong': higher_highs | higher_lows,
+        'close_uptrend': close_roc_5.values > 0,  # NEW: Simple trend check
+        
+        # VIX conditions
+        'vix_ok_for_entry': (vix_np < VIX_HIGH) & (vix_ema_5.values < 25),  # MODIFIED: Using EMA instead
+        'vix_forced_exit': (vix_np > VIX_HIGH) & (vix_pct_change_3.values > 0.45)
     }
     
     # Convert all conditions to boolean arrays
     for key in conditions:
         conditions[key] = np.array(conditions[key], dtype=bool)
 
-    # 3. Calculate Momentum Score - single score reflecting long momentum strength
+    # 3. Calculate Momentum Score - with improved weighting
     momentum_score = np.zeros_like(close_np, dtype=float)
 
-    # Trend component (40%)
-    trend_score = ((close_np > fast_ma_np).astype(float) * 0.2 +
-                   (fast_ma_np > slow_ma_np).astype(float) * 0.2)
+    # MODIFIED: Enhanced trend component with multiple factors
+    trend_score = (
+        (close_np > fast_ma_np).astype(float) * 0.10 +
+        (fast_ma_np > slow_ma_np).astype(float) * 0.10 +
+        (close_roc_5.values > 0).astype(float) * 0.05  # Positive short-term momentum
+    )
     
-    # RSI component (25%)
+    # RSI component - MODIFIED: More nuanced approach
+    rsi_strength_threshold = 45
+    above_threshold_condition = rsi_np > rsi_strength_threshold
+    rsi_rising_condition = rsi_pct_change_3.values > 0
+    rsi_score_contribution = 0.25
+    rsi_scaling_range_top = 70
     rsi_score = np.zeros_like(close_np, dtype=float)
-    # RSI below 30 = strong buy signal, scales linearly up to 50
-    rsi_score = np.where(rsi_np < 30, 0.25,
-                         np.where(rsi_np < 50, 0.25 *(50 - rsi_np) / 20, 0))
+    
+    # Enhanced RSI score calculation
+    rsi_score = np.where(
+        above_threshold_condition,
+        np.clip((rsi_np - rsi_strength_threshold) / 
+                (rsi_scaling_range_top - rsi_strength_threshold), 0, 1) * rsi_score_contribution,
+        0
+    )
+    
+    # Additional boost for rising RSI
+    rsi_score = np.where(
+        rsi_rising_condition,
+        rsi_score * 1.15,  # 15% boost for rising RSI
+        rsi_score
+    )
 
-    # Volume component (20%)
+    # Volume component - MODIFIED: More nuanced with relative volume
     volume_score = conditions['volume_ok'].astype(float) * 0.25
-
-    # Price action component (10%)
-    price_action_score = conditions['price_momentum_strong'].astype(float) * 0.10
-
-    # Combined scores
+    
+    # NEW: Enhanced price action scoring
+    price_action_score = np.zeros_like(close_np, dtype=float)
+    price_action_score += conditions['price_momentum_strong'].astype(float) * 0.15
+    price_action_score += conditions['close_uptrend'].astype(float) * 0.10
+    
+    # Combined scores with improved weighting
     momentum_score = trend_score + rsi_score + volume_score + price_action_score
 
-    # Normalize to 0-1 range and apply volatility adjustment
-    momentum_score *= (1+np.log1p(atr_ratio_np)) # Higher volatility = amplified score
+    # MODIFIED: More balanced volatility adjustment
+    # Reduce the impact of volatility on the momentum score
+    atr_impact_factor = 0.7  # Reduced from 1.0
+    momentum_score *= (1 + np.log1p(atr_ratio_np) * atr_impact_factor)
     momentum_score = np.clip(momentum_score, 0, 1)
 
-    # 4. Calculate Momentum Decay
+    # 4. Calculate Momentum Decay - IMPROVED: More flexible detection
     momentum_decay = np.zeros_like(close_np, dtype=bool)
     buy_signal = np.zeros_like(close_np, dtype=bool)
     exit_signal = np.zeros_like(close_np, dtype=bool)
     immediate_exit = np.zeros_like(close_np, dtype=bool)
-    decay_window = 3
-
+    
+    # MODIFIED: More flexible decay detection
+    decay_window = 8  # Reduced from 10
+    decay_threshold = 0.7  # NEW: How many days must show decay
+    
     for i in range(decay_window, len(momentum_score)):
-        if all(momentum_score[i-j] < momentum_score[i-j-1] for j in range(1, decay_window)):
+        # Count how many days in the window show declining momentum
+        declining_days = sum(momentum_score[i-j] < momentum_score[i-j-1] for j in range(1, decay_window))
+        # If more than decay_threshold of days show decline, mark as decay
+        if declining_days >= int(decay_window * decay_threshold):
             momentum_decay[i] = True
 
-    # 5. Generate Buy and Exit Signals
-    # Buy signal: Strong momentum + trend confirmation + not in decay
+    # 5. Generate Buy and Exit Signals - IMPROVED: Weighted approach
+    
+    # NEW: Calculate entry condition score instead of strict AND requirements
+    primary_entry_conditions = np.zeros_like(close_np, dtype=float)
+    secondary_entry_conditions = np.zeros_like(close_np, dtype=float)
+    
+    # Primary conditions (must-have)
+    primary_entry_conditions += conditions['trend_strength_ok'].astype(float) * 0.4
+    primary_entry_conditions += conditions['primary_trend_long'].astype(float) * 0.3
+    primary_entry_conditions += conditions['weekly_uptrend'].astype(float) * 0.3
+    
+    # Secondary conditions (nice-to-have)
+    secondary_entry_conditions += conditions['rsi_buy_zone'].astype(float) * 0.3
+    secondary_entry_conditions += conditions['price_momentum_strong'].astype(float) * 0.4
+    secondary_entry_conditions += conditions['volume_ok'].astype(float) * 0.3
+    
+    # Combined weighted entry score
+    entry_score = (primary_entry_conditions * ENTRY_WEIGHT_PRIMARY) + (
+        secondary_entry_conditions * ENTRY_WEIGHT_SECONDARY)
+    
+    # Buy signal: Score-based approach instead of strict conditions
     buy_signal = (
-        conditions['trend_strength_ok'] & 
-        conditions['primary_trend_long'] & 
-        conditions['volume_ok'] & 
-        ~momentum_decay &
-        (momentum_score > buy_threshold)  # Threshold for entry
+        (entry_score >= 0.6) &  # At least 60% of our conditions met
+        ~momentum_decay &       # Still no decay
+        (momentum_score > buy_threshold) &  # Keep optimized threshold
+        conditions['vix_ok_for_entry']      # VIX condition maintained
     )
     
-    # Exit signal: Momentum decay OR overbought OR trend broken
+    # Exit signal: Keep mostly the same with optimized parameters
     exit_signal = (
         momentum_decay | 
         conditions['rsi_exit_zone'] |
-        conditions['bb_exit'] |
-        (~conditions['primary_trend_long'] & (momentum_score < exit_threshold))
+        (~conditions['primary_trend_long'] & (momentum_score < exit_threshold)) |
+        conditions['vix_forced_exit'] |
+        conditions['bb_exit']
     )
 
-    # Immediate exit: Extreme RSI or dramatic trend breakdown
-    immediate_exit = conditions['rsi_extreme_exit'] | (adx_np < adx_threshold/2)
+    # Immediate exit: Keep as is - these are critical risk management signals
+    immediate_exit = conditions['rsi_extreme_exit'] | (adx_np < adx_threshold/3) | (vix_np > 40)
     
-   # Assign calculated signals to the DataFrame
+    # NEW: Add signal strength indicators
+    signal_strength = np.zeros_like(close_np, dtype=float)
+    signal_strength = np.where(
+        buy_signal,
+        entry_score * momentum_score,  # Higher score = stronger entry signal
+        0
+    )
+    
+    # Assign calculated signals to the DataFrame
     signals_df['momentum_score'] = momentum_score
     signals_df['momentum_decay'] = momentum_decay
+    signals_df['market_regime'] = market_regime_series
     signals_df['buy_signal'] = buy_signal
     signals_df['exit_signal'] = exit_signal
     signals_df['immediate_exit'] = immediate_exit
-    signals_df['signal_changed'] = False # Default value, can be calculated if needed
+    signals_df['signal_changed'] = False
+    signals_df['entry_score'] = entry_score  # NEW: Added for transparency
+    signals_df['signal_strength'] = signal_strength  # NEW: Signal conviction level
 
-    return signals_df # Ensure this is the final return for the normal execution path
+    return signals_df
 #================== MOMENTUM STRATEGY =========================================================================================================================
-def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, position_size=DEFAULT_POSITION_SIZE, risk_free_rate=0.04, 
+def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, position_size=DEFAULT_POSITION_SIZE, risk_free_rate=RISK_FREE_RATE_ANNUAL, 
              max_positions=MAX_OPEN_POSITIONS, adx_threshold=ADX_THRESHOLD_DEFAULT, persistence_days=PERSISTENCE_DAYS, max_position_duration=MAX_POSITION_DURATION, threshold=THRESHOLD):
 
     if df_with_indicators.empty and df_with_indicators.index.empty:
@@ -453,6 +556,8 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
         previous_day_data_row = df_with_indicators.iloc[i-1]
         previous_day_atr = previous_day_data_row['ATR']
         previous_day_adx = previous_day_data_row['ADX']
+        previous_day_vix = previous_day_data_row['VIX']
+    
 
         # Get signals for the previous day
         buy_signal = signals_df['buy_signal'].iloc[i-1]
@@ -460,6 +565,7 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
         immediate_exit = signals_df['immediate_exit'].iloc[i-1]
         momentum_score = signals_df['momentum_score'].iloc[i-1]
         momentum_decay = signals_df['momentum_decay'].iloc[i-1]
+        previous_day_market_regime = signals_df['market_regime'].iloc[i-1]
 
 
         # Check for momentum persistence
@@ -470,27 +576,28 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
         # --- Exit Conditions (Priority Order) ---
         if trade_manager.position_count > 0:
             # 1. Check trailing stop first (highest priority)
-            any_trailing_stop_hit = trade_manager.trailing_stops(transaction_price, current_date, previous_day_atr, previous_day_adx)
+            any_trailing_stop_hit = trade_manager.trailing_stops(transaction_price, current_date, previous_day_atr, 
+                                                                 previous_day_adx, previous_day_market_regime)
             if not any_trailing_stop_hit:
                 # Check for immediate exit signal
                 if immediate_exit:
-                    trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.0)
+                    trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.0, reason_override="Immediate Exit")
                 # Normal exit with tiered approach
                 elif exit_signal:
                     # Determine if we should exit partially or fully
-                    if momentum_score > 0.4:
-                        # Partial exit if momentum is strong
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.45)
-                    else: 
-                        # Momentum below threshold
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.0)
+                    if momentum_score < threshold.get('Exit', 0.4): # For this run, threshold.get('Exit', 0.4) is 0.38
+                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.05) # Existing small trim
+                    else: # This means exit_signal is TRUE, and momentum_score >= 0.38
+                        # Previously: pass
+                        # Now: A very small trim to acknowledge the exit_signal.
+                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.02)
                 
-                elif momentum_persistence and trade_manager.position_count > 0:
+                #elif momentum_persistence and trade_manager.position_count > 0:
                     # Take partial profits if we had strong momentum for a while
-                    unrealized_pnls = trade_manager.unrealized_pnl(transaction_price)
-                    portfolio_value = trade_manager.portfolio_value + unrealized_pnls
-                    if unrealized_pnls > (portfolio_value * 0.05):
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.2)
+                    #unrealized_pnls = trade_manager.unrealized_pnl(transaction_price)
+                    #portfolio_value = trade_manager.portfolio_value + unrealized_pnls
+                    #if unrealized_pnls > (portfolio_value * 0.05):
+                        #trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.03)
 
             # Check position health
             position_health = trade_manager.position_health(transaction_price, previous_day_atr, current_date, momentum_score)
@@ -498,57 +605,67 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
             # 2. Check trend validity  
             if trade_manager.position_count > 0 and not any_trailing_stop_hit:
                 # Check if we have position with substantial profits
-                if position_health['profit_factor'] > 1.5:
+                if position_health['profit_factor'] > 3.0:
+                    trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.03)
                     # Scale exit size based on momentum score
-                    if position_health['strength'] in ['weak', 'very_weak']:
+                    #if position_health['strength'] in ['weak', 'very_weak']:
                         # Exit full position if momentum is weak
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.0)
-                    elif position_health['strength'] == 'moderate':
+                        #trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.10)
+                    #elif position_health['strength'] == 'moderate':
                         # Partial exit (50%) if momentum is moderate
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.5)
-                    elif position_health['strength'] in ['strong', 'very_strong'] and position_health['profit_factor'] > 3.0:
+                        #trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.07)
+                    #elif position_health['strength'] in ['strong', 'very_strong'] and position_health['profit_factor'] > 3.0:
                         # Take some profits even with strong momentum
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.3)
+                        #trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.03)
                 
                 # Check for position that have reached their time limit
-                for pos_idx, duration in position_health['position_duration'].items():
+                for trade_df_index, duration in position_health['position_duration'].items(): # trade_df_index is now the correct DataFrame index
                     if duration > max_position_duration:
                         # Reduce exposure for time-based risk management
-                        if pos_idx in trade_manager.active_trades.index:  # Ensure position still exists
+                        if trade_df_index in trade_manager.active_trades.index:  # Ensure position still exists
                             # Exit partially for old positions regardless of performance
-                            trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.8)
+                            trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.0, reason_override="Max Duration")
 
         # --- Entry Conditions ---
         if buy_signal and trade_manager.position_count < max_positions:
             # Only enter if not in decay and ADX shows sufficient trend strength
             if not momentum_decay and previous_day_adx > adx_threshold:
-                entry_params = {'price': transaction_price*(1 + 0.003),
+                entry_params = {'price': transaction_price*(1 + 0.001),
                                 'portfolio_value': trade_manager.portfolio_value,
                                 'risk': long_risk, 'reward': long_reward,
                                 'atr': previous_day_atr,
                                 'adx': previous_day_adx,
                                 'position_size': position_size,
+                                'vix': previous_day_vix
                             }
                 trade_manager.process_entry(current_date, entry_params, direction='Long')
         
         # Performance Tracking
         total_value = trade_manager.portfolio_value + trade_manager.unrealized_pnl(transaction_price)
-        equity_curve.iloc[i] = total_value
-        returns_series.iloc[i] = (total_value / equity_curve.iloc[i-1] - 1) if equity_curve.iloc[i-1] != 0 else 0.0
+        equity_curve.iloc[i] = max(total_value, 1e-9) # Ensure positive for log
 
-    final_unrealized_pnl = trade_manager.unrealized_pnl(df_with_indicators['Close'].iloc[-1])
+        # Calculate periodic log returns
+        prev_equity_val = equity_curve.iloc[i-1] # Already max( , 1e-9) from previous iteration or init
+        current_equity_val = equity_curve.iloc[i] 
+        
+        # Both prev_equity_val and current_equity_val are guaranteed > 0 due to max( , 1e-9)
+        returns_series.iloc[i] = np.log(current_equity_val / prev_equity_val)
+
+
+    final_unrealized_pnl = trade_manager.unrealized_pnl(df_with_indicators['Close'].iloc[-1] if not df_with_indicators.empty else INITIAL_CAPITAL)
+    final_equity_value = equity_curve.iloc[-1] if not equity_curve.empty else INITIAL_CAPITAL
     final_stats = {
-        'Equity Final': equity_curve.iloc[-1],
+        'Equity Final': final_equity_value,
         'Open Position Value': final_unrealized_pnl,
-        'Total Portfolio Value': equity_curve.iloc[-1] + final_unrealized_pnl
+        'Total Portfolio Value': final_equity_value + final_unrealized_pnl # Recalculate based on final equity
     }
     
     # Update stats dictionary with the additional values
-    stats = trade_statistics(equity_curve, trade_manager.trade_log, trade_manager.wins, 
-                           trade_manager.losses, risk_free_rate)
-    stats.update(final_stats)
+    stats_dict = trade_statistics(equity_curve, trade_manager.trade_log, trade_manager.wins, 
+                           trade_manager.losses, risk_free_rate) # risk_free_rate is annual
+    stats_dict.update(final_stats)
 
-    return trade_manager.trade_log, stats, equity_curve, returns_series
+    return trade_manager.trade_log, stats_dict, equity_curve, returns_series
 # --------------------------------------------------------------------------------------------------------------------------
 class TradeManager:
     def __init__(self, initial_capital, max_positions):
@@ -591,95 +708,163 @@ class TradeManager:
     # ----------------------------------------------------------------------------------------------------------
     def position_health(self, current_price, current_atr, current_date, current_score):
         if self.active_trades.empty:
-            return {'profit_factor': 0.0, 'score_strength': 'none', 'position_duration': {}, 'take_profit_levels': {}}
+            # Ensure 'strength' key is present for consistency with usage in momentum()
+            return {'profit_factor': 0.0, 'strength': 'none', 'position_duration': {}, 'take_profit_levels': {}}
         current_price = np.float32(current_price)
         current_atr = np.float32(current_atr)
         current_score = np.float32(current_score)
 
-        unrealized_pnls = self.unrealized_pnl(current_price)
+        # Calculate unrealized PnL for all active trades
+        unrealized_pnls_series = (current_price - self.active_trades['entry_price']) * \
+                                 self.active_trades['remaining_shares'] * \
+                                 self.active_trades['multiplier']
+        unrealized_pnls_sum = unrealized_pnls_series.sum()
 
-        total_risk = 0.0
-        position_durations = {}
-        take_profit_levels = {}
+        total_risk_for_all_trades = 0.0
+        position_durations = {} # Keyed by active_trades DataFrame index
+        take_profit_levels = {} # Keyed by active_trades DataFrame index
 
-        for idx, trade in self.active_trades.iterrows():
-            if trade['direction']  == 'long':
-                risk_per_trade = abs(trade['entry_price'] - trade['stop_loss']) * trade['share_amount']
-                total_risk += risk_per_trade
+        for idx, trade in self.active_trades.iterrows(): # idx is the DataFrame index
+            if trade['direction'] == 'Long': # Assuming only long for now
+                # Calculate risk for this specific trade based on remaining shares
+                risk_per_trade = abs(trade['entry_price'] - float(trade['stop_loss'])) * trade['remaining_shares']
+                total_risk_for_all_trades += risk_per_trade
 
                 if isinstance(trade['entry_date'], pd.Timestamp):
-                    position_durations[trade['entry_date']] = (current_date - trade['entry_date']).days
+                    # Store duration keyed by the DataFrame index 'idx'
+                    position_durations[idx] = (current_date - trade['entry_date']).days
+                else:
+                    position_durations[idx] = np.nan # Handle potential non-Timestamp entry_date
 
-                current_profit = (current_price - trade['entry_price']) * trade['share_amount']
-                if current_profit > 0:
-                    r_multiple = current_profit / risk_per_trade if risk_per_trade > 0 else 0
+                # Calculate current profit and R-multiple for this trade
+                current_profit_per_trade = (current_price - trade['entry_price']) * trade['remaining_shares']
+                r_multiple = 0.0
+                if risk_per_trade > 0 and current_profit_per_trade > 0 : # Check current_profit_per_trade > 0
+                    r_multiple = current_profit_per_trade / risk_per_trade
+                
+                # Store take profit levels keyed by DataFrame index 'idx'
+                take_profit_levels[idx] = {
+                    '1R': trade['entry_price'] + 1 * abs(trade['entry_price'] - float(trade['stop_loss'])),
+                    '2R': trade['entry_price'] + 2 * abs(trade['entry_price'] - float(trade['stop_loss'])),
+                    '3R': trade['entry_price'] + 3 * abs(trade['entry_price'] - float(trade['stop_loss'])),
+                    'current_r': r_multiple
+                }
+        
+        # Overall profit factor based on sum of PnLs and sum of risks
+        profit_factor_overall = unrealized_pnls_sum / total_risk_for_all_trades if total_risk_for_all_trades > 0 else 0.0
 
-                    take_profit_levels[idx] = {
-                        '1R': trade['entry_price'] + 1 * abs(trade['entry_price'] - trade['stop_loss']),
-                        '2R': trade['entry_price'] + 2 * abs(trade['entry_price'] - trade['stop_loss']),
-                        '3R': trade['entry_price'] + 3 * abs(trade['entry_price'] - trade['stop_loss']),
-                        'current_r': r_multiple
-                    }
-        profit_factor = unrealized_pnls / total_risk if total_risk > 0 else 0.0
-
-        score_strength = 'none'
+        # Determine momentum strength based on current_score
+        strength_label = 'none' # Use 'strength' as the key
         if current_score > 0.8:
-            score_strength = 'very_strong'
+            strength_label = 'very_strong'
         elif current_score > 0.6:
-            score_strength = 'strong'
+            strength_label = 'strong'
         elif current_score > 0.4:
-            score_strength = 'moderate'
+            strength_label = 'moderate'
         elif current_score > 0.2:
-            score_strength = 'weak'
+            strength_label = 'weak'
         else:
-            score_strength = 'very_weak'
+            strength_label = 'very_weak'
+            
         return {
-            'profit_factor': profit_factor,
-            'score_strength': score_strength,
-            'position_duration': position_durations,
-            'take_profit_levels': take_profit_levels
+            'profit_factor': profit_factor_overall,
+            'strength': strength_label, # Consistent key 'strength'
+            'position_duration': position_durations, # Now correctly keyed by DataFrame index
+            'take_profit_levels': take_profit_levels # Now correctly keyed by DataFrame index
         }
     # ----------------------------------------------------------------------------------------------------------
-    def trailing_stops(self, current_price, current_date, current_atr, adx_value):
+    def trailing_stops(self, current_price, current_date, current_atr, adx_value, market_regime="normal"): # Added market_regime
         if self.active_trades.empty:
             return False
 
-        current_price_f32 = np.float32(current_price)
+        current_price_f32 = np.float32(current_price) * (1 - 0.001) # Apply a small slippage/spread
         current_atr_f32 = np.float32(current_atr)
-        atr_multiplier = np.float32(2.5 if adx_value > 30 else 1.5)
 
-        # Initialize stops_hit flags
-        stops_hit_flags = pd.Series([False] * len(self.active_trades), index=self.active_trades.index)
+        # --- Parameters for new features (can be optimized or passed as arguments later) ---
+        # 1. Increase base_atr_multiplier for wider stops
+        base_atr_multiplier = 4.0  # Example: Increased from 3.5 to 4.0
 
-        # Process Long Positions (since we only have longs now)
-        # Update highest prices for all active trades
+        # 2. Time-Decay Parameters
+        enable_time_decay = True
+        time_decay_start_day = 5    # Start tightening after 5 days
+        time_decay_max_days = 60    # Max duration over which decay occurs
+        time_decay_min_factor = 0.6 # Stop can tighten up to 60% of its ATR component (e.g., 1.0 -> 0.6)
+
+        # 3. Market Regime Parameters
+        enable_regime_filter = True
+        regime_vol_factors = {
+            "low_vol": 0.85,  # Tighter stop in low volatility
+            "normal": 1.0,
+            "high_vol": 1.15  # Wider stop in high volatility
+        }
+
+        # --- Apply Market Regime Adjustment ---
+        effective_base_atr_multiplier = base_atr_multiplier
+        if enable_regime_filter:
+            regime_factor = regime_vol_factors.get(market_regime, 1.0)
+            effective_base_atr_multiplier *= regime_factor
+
+        # ADX component for dynamic ATR multiplier (as in your existing code)
+        adx_component = np.clip(adx_value / 50, 0, 0.5) 
+        
+        # Vectorized update of highest prices for all active trades (remains efficient)
         self.active_trades['highest_close_since_entry'] = np.maximum(
             self.active_trades['highest_close_since_entry'],
             current_price_f32
         )
         
-        # Calculate new stop-loss levels
-        new_stops = self.active_trades['highest_close_since_entry'] - (atr_multiplier * current_atr_f32)
+        # Prepare a Series to store newly calculated stop-loss levels for each trade
+        new_calculated_stops = pd.Series(index=self.active_trades.index, dtype=float)
+
+        for idx, trade in self.active_trades.iterrows():
+            # --- Calculate Time-Decay Factor for the current trade ---
+            current_time_decay_factor = 1.0
+            if enable_time_decay:
+                trade_duration_days = (current_date - trade['entry_date']).days
+                if trade_duration_days > time_decay_start_day:
+                    # Calculate how far into the decay period the trade is
+                    decay_period_duration = max(1, time_decay_max_days - time_decay_start_day)
+                    days_into_decay = max(0, trade_duration_days - time_decay_start_day)
+                    decay_progress = min(1.0, days_into_decay / decay_period_duration)
+                    
+                    # Apply decay: factor goes from 1.0 down to time_decay_min_factor
+                    current_time_decay_factor = 1.0 - (decay_progress * (1.0 - time_decay_min_factor))
+                    current_time_decay_factor = max(current_time_decay_factor, time_decay_min_factor) # Ensure it doesn't go below min
+
+            # Combine base (regime-adjusted), ADX, and time decay for this trade's ATR multiplier
+            final_atr_multiplier_for_trade = (effective_base_atr_multiplier + adx_component) * current_time_decay_factor
+            
+            # Calculate new stop-loss for this specific trade
+            highest_close_for_trade = trade['highest_close_since_entry'] # Use the updated highest close
+            new_stop_for_trade = highest_close_for_trade - (final_atr_multiplier_for_trade * current_atr_f32)
+            new_calculated_stops.loc[idx] = new_stop_for_trade
         
-        # Update stop-loss (only if new stop is higher)
+        # Update stop-loss for all trades: only if the new calculated stop is higher than the current one
         self.active_trades['stop_loss'] = np.maximum(
-            self.active_trades['stop_loss'],
-            new_stops
+            self.active_trades['stop_loss'], # Current stop-loss
+            new_calculated_stops            # Newly calculated potential stop-loss
         )
         
-        # Check if current price hits the stop-loss
+        # Check if current price hits the (potentially updated) stop-loss
         stops_hit_flags = current_price_f32 <= self.active_trades['stop_loss']
 
-        # Process Exits for Hit Stops
+        # Process Exits for Hit Stops (your existing logic for this part is fine)
         if stops_hit_flags.any():
             indices_to_remove = []
             trades_that_hit_stop = self.active_trades[stops_hit_flags]
 
             for idx, trade in trades_that_hit_stop.iterrows():
+                # Ensure exit_price for trailing stop is the stop_loss level it hit, or current_price if lower
+                # This is a common convention, though exiting at current_price (as you do) is also valid.
+                # For simplicity, sticking to your current_price_f32 for exit.
                 pnl = self.exit_pnl(trade, current_date, current_price_f32, 
                                 trade['remaining_shares'], 'Trailing Stop')
                 self.portfolio_value += pnl
-                self.allocated_capital -= (current_price_f32 * trade['remaining_shares'])
+                # self.allocated_capital -= (trade['entry_price'] * trade['remaining_shares']) # Original cost
+                # Correctly, it should be the value at exit if you are tracking allocated capital precisely
+                # However, your current code uses current_price_f32 for this, which is also a way to do it.
+                # For consistency with your existing code:
+                self.allocated_capital -= (current_price_f32 * trade['remaining_shares']) 
                 self.position_count -= 1
                 indices_to_remove.append(idx)
             
@@ -689,13 +874,13 @@ class TradeManager:
 
         return False # No trailing stops were hit
     # ----------------------------------------------------------------------------------------------------------
-    def process_exits(self, current_date, current_price, direction_to_exit, Trim=0.0): 
+    def process_exits(self, current_date, current_price, direction_to_exit, Trim=0.0, reason_override=None): 
 
         if self.active_trades.empty:
             return 0.0
 
         # Convert inputs to proper types
-        current_price = np.float32(current_price)
+        current_price = np.float32(current_price)*(1 - 0.001)
         total_pnl = 0.0
         
         # Initialize removal mask
@@ -744,6 +929,12 @@ class TradeManager:
                 continue
 
             # Priority 3: Signal-based Exits (Full or Partial)
+            base_signal_exit_reason = 'Full Signal Exit'
+            if Trim > 0.0:
+                base_signal_exit_reason = 'Partial Signal Exit'
+            
+            # Use override if provided, otherwise use base
+            final_exit_reason = reason_override if reason_override else base_signal_exit_reason
             if Trim > 0.0:
                 # Partial exit
                 shares_to_exit = int(current_shares * Trim)
@@ -753,7 +944,7 @@ class TradeManager:
                         current_date, 
                         current_price,
                         shares_to_exit, 
-                        'Partial Signal Exit'
+                        final_exit_reason
                     )
                     total_pnl += pnl
                     self.portfolio_value += pnl
@@ -772,7 +963,7 @@ class TradeManager:
                     current_date, 
                     current_price,
                     current_shares, 
-                    'Full Signal Exit'
+                    final_exit_reason
                 )
                 total_pnl += pnl
                 self.portfolio_value += pnl
@@ -787,13 +978,13 @@ class TradeManager:
         return total_pnl
     # ----------------------------------------------------------------------------------------------------------
     def process_entry(self, current_date, entry_params, direction=None):
-        
+        VIX_LOW = 12   
+        VIX_HIGH = 25
         is_long = direction == 'Long'
         direction_mult = 1 if is_long else -1
         
         # 1. Calculate Initial Stop (ATR + ADX adjusted)
-        adx_normalized = np.clip((entry_params['adx'] - 20) / 30, 0, 1)  # ADX=20→0, ADX=50→1
-        atr_multiplier = 1.5 + adx_normalized * 1.0 
+        atr_multiplier = np.clip(1.0 + (entry_params['adx'] / 50), 1.0, 3.0)
         risk_based_stop = entry_params['price'] * entry_params['risk']
         atr_based_stop = entry_params['atr'] * atr_multiplier
         stop_distance = max(atr_based_stop, risk_based_stop)
@@ -801,27 +992,55 @@ class TradeManager:
         
         # 2. Position Sizing Based on Risk
         risk_per_share = abs(entry_params['price'] - initial_stop)
-        max_risk_amount = entry_params['portfolio_value'] * entry_params['risk']
-        shares_by_risk = int(max_risk_amount / max(risk_per_share, 1e-9))  # Avoid division by zero
+        if risk_per_share < 1e-9: # Avoid division by zero
+            return False
 
-        # Calculate shares based on position size limit
-        max_position_value = entry_params['portfolio_value'] * entry_params['position_size']
-        shares_by_size = int(max_position_value / entry_params['price'])
+        max_risk_amount = entry_params['portfolio_value'] * entry_params['risk'] # Max $ risk for the trade
+        shares_by_risk = int(max_risk_amount / risk_per_share)
+        
+        # Calculate VIX scaling factor
+        current_vix = entry_params.get('vix', 20.0) # Default to a neutral VIX if not provided
+        vix_scaling_factor = 1.0
 
-        shares = min(shares_by_risk, shares_by_size)
+        if VIX_HIGH > VIX_LOW: # Ensure VIX_HIGH is greater than VIX_LOW to avoid division by zero or negative scaling
+            if current_vix < VIX_LOW:
+                vix_scaling_factor = 1.0  # Full size in low-vol
+            elif current_vix > VIX_HIGH:
+                vix_scaling_factor = 0.2 # Minimum size in high-vol
+            else: # VIX is between VIX_LOW and VIX_HIGH
+                vix_scaling_factor = np.clip(1.0 - (current_vix - VIX_LOW) / (VIX_HIGH - VIX_LOW), 0.2, 1.0)
+        else: # If VIX_HIGH <= VIX_LOW, default to full size or handle as an error/warning
+            print(f"Warning: VIX_HIGH ({VIX_HIGH}) is not greater than VIX_LOW ({VIX_LOW}). Defaulting VIX scaling factor to 1.0.")
+            vix_scaling_factor = 1.0
+        
+        # Apply VIX scaling to the base position size percentage from entry_params
+        # entry_params['position_size'] is the max % of portfolio for one position (e.g. 0.08 from your summary)
+        effective_position_size_pct = entry_params['position_size'] * vix_scaling_factor
+        
+        max_position_value_allowed = entry_params['portfolio_value'] * effective_position_size_pct
+        shares_by_size_cap = int(max_position_value_allowed / entry_params['price'])
+
+        # Determine shares: minimum of risk-based and VIX-adjusted size cap
+        shares = int(min(shares_by_risk, shares_by_size_cap))
+
+        # Ensure shares are not negative or zero if they passed previous checks
+        if shares <= 0:
+            return False
 
         # Calculate dollar amount for this position
         position_dollar_amount = shares * entry_params['price']
         actual_position_size = position_dollar_amount / entry_params['portfolio_value']
 
-        max_total_exposure = 1.0
+        max_total_exposure = 0.95
         current_exposure = 0.0 
         if not self.active_trades.empty:
-            current_positions_value = (self.active_trades['share_amount'] * entry_params['price']).sum()
+            # Ensure 'entry_price' and 'remaining_shares' are float32 for consistent calculation
+            current_prices_of_active_trades = self.active_trades['entry_price'].astype(np.float32)
+            remaining_shares_of_active_trades = self.active_trades['remaining_shares'].astype(np.float32)
+            current_positions_value = (remaining_shares_of_active_trades * current_prices_of_active_trades).sum()
             current_exposure = current_positions_value / entry_params['portfolio_value']
 
         # Calculate new position exposure
-        position_dollar_amount = shares * entry_params['price']
         new_exposure = position_dollar_amount / entry_params['portfolio_value']
         total_exposure = current_exposure + new_exposure
         
@@ -907,7 +1126,7 @@ class TradeManager:
             per_share_fee = 0.005 * shares  # 0.5 cents per share
             
             # Percentage-based model
-            percentage_fee = shares * price * 0.001  # 0.1% of trade value
+            percentage_fee = shares * price * 0.0005  # 0.1% of trade value
             
             # Tiered model example
             if shares * price < 5000:
@@ -918,10 +1137,10 @@ class TradeManager:
                 tiered_fee = 10.00
             
             # Choose your model
-            commission = fixed_fee  # or per_share_fee, percentage_fee, tiered_fee
+            commission = percentage_fee  # or per_share_fee, percentage_fee, tiered_fee
             
             # Add minimum commission if needed
-            return max(commission, 1.00)  # Minimum $1.00 commission
+            return max(1.0, commission)  # Minimum $1.00 commission
         else:
             return 0.0
     # ----------------------------------------------------------------------------------------------------------
@@ -933,15 +1152,16 @@ class TradeManager:
         position_id = trade_series['position_id']
         original_shares = trade_series['share_amount']
         entry_commission = trade_series['commission']
+        exit_price = exit_price
 
         # Calculate if this is a complete exit
         is_complete_exit = (shares_to_exit >= trade_series['remaining_shares'])
 
         gross_pnl = 0
         if trade_direction == 'Long':
-            gross_pnl = (exit_price*(1-0.003) - entry_price) * shares_to_exit
+            gross_pnl = (exit_price - entry_price) * shares_to_exit
         else:  # Short
-            gross_pnl = (entry_price - exit_price(1-0.003)) * shares_to_exit
+            gross_pnl = (entry_price - exit_price) * shares_to_exit
 
         duration = 0
         # Ensure entry_date is a Timestamp if it's not already
@@ -986,18 +1206,37 @@ class TradeManager:
 # --------------------------------------------------------------------------------------------------------------------------
 @jit(nopython=True)
 def risk_metrics(returns_array, risk_free_daily):
-    """Numba-optimized calculation of risk metrics"""
+    """Numba-optimized calculation of risk metrics with numerical safeguards"""
+    if len(returns_array) <= 1:
+        return 0.0, 0.0
+    
+    unique_values = np.unique(returns_array)
+    if len(unique_values) <= 1:
+        return 0.0, 0.0
+    
     excess_returns = returns_array - risk_free_daily
     returns_mean = np.mean(excess_returns)
     returns_std = np.std(excess_returns)
     
-    # Sharpe Ratio
-    sharpe = (returns_mean / returns_std) * np.sqrt(252) if returns_std != 0 else 0
+    # Sharpe Ratio with safeguards
+    # Add minimum threshold for standard deviation to prevent explosion
+    min_std_threshold = 1e-8  # Adjust based on your typical return values
     
-    # Sortino Ratio
+    if returns_std > min_std_threshold:
+        sharpe = (returns_mean / returns_std) * np.sqrt(252)
+        # Bound extreme values
+    else:
+        # Near-zero std scenario - use sign of mean to determine direction
+        sharpe = 0.0 if returns_mean == 0 else (np.sign(returns_mean) * 5.0)
+    
+    # Sortino Ratio with similar safeguards  
     downside_returns = returns_array[returns_array < 0]
     downside_std = np.std(downside_returns) if len(downside_returns) > 0 else 0
-    sortino = ((np.mean(returns_array) - risk_free_daily) / downside_std) * np.sqrt(252) if downside_std != 0 else 0
+    
+    if downside_std > min_std_threshold:
+        sortino = ((np.mean(returns_array) - risk_free_daily) / downside_std) * np.sqrt(252)
+    else:
+        sortino = 0.0 if returns_mean == 0 else (np.sign(returns_mean) * 5.0)
     
     return sharpe, sortino
 # --------------------------------------------------------------------------------------------------------------------------
@@ -1039,15 +1278,20 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
     expectancy_pct = (expectancy / initial_capital) * 100 if initial_capital > 0 else 0.0
 
     hit_count = 0
-    total_trades_with_target = 0
     # Hit Rate calculation
     if trade_log:
         for trade in trade_log:
             if 'Exit Reason' in trade:
-                if trade['Exit Reason'] == 'Take Profit':
+                if trade['Exit Reason'] in ['Take Profit', 'Trailing Stop', 'Max Duration']:
                     hit_count += 1
     
     hit_rate = (hit_count / total_trades * 100) if total_trades > 0 else 0.0
+
+    exit_reason_counts = {}
+    if trade_log:
+        for trade in trade_log:
+            reason = trade.get('Exit Reason', 'Unknown') # Use .get() for safety
+            exit_reason_counts[reason] = exit_reason_counts.get(reason, 0) + 1
 
     # Average Win/Loss Ratio
     if avg_loss == 0:
@@ -1093,9 +1337,10 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
         'Expectancy (%)': expectancy_pct,
         'Max Drawdown (%)': max_drawdown,
         'Annualized Return (%)': annualized_return,
-        'Sharpe Ratio': sharpe_ratio,
+        'Sharpe Ratio':sharpe_ratio,
         'Sortino Ratio': sortino_ratio,
-        'Avg Win/Loss Ratio': avg_win_loss_ratio
+        'Avg Win/Loss Ratio': avg_win_loss_ratio,
+        'Exit Reason Counts': exit_reason_counts
     }
 #================== OPTIMIZING STRATEGY =======================================================================================================================
 def parameter_test(df, long_risk, long_reward, position_size, tech_params, trial=None):
@@ -1167,24 +1412,28 @@ def objectives(trial, base_df):
             bad_metrics_template.append(np.inf)
     params = {
         # Basic parameters
-        'long_risk': trial.suggest_float('long_risk', 0.01, 0.15, step=0.01),
-        'long_reward': trial.suggest_float('long_reward', 0.02, 0.20, step=0.01),
-        'position_size': trial.suggest_float('position_size', 0.05, 0.50, step=0.05),
+        'long_risk': trial.suggest_float('long_risk', 0.01, 0.10, step=0.01),
+        'long_reward': trial.suggest_float('long_reward', 0.02, 0.15, step=0.01),
+        'position_size': trial.suggest_float('position_size', 0.05, 0.20, step=0.01),
 
         # Technical parameters
         'max_open_positions': trial.suggest_int('max_open_positions', 5, 50),
-        'adx_threshold': trial.suggest_float('adx_threshold', 20.0, 30.0, step=0.5),
+        'adx_threshold': trial.suggest_float('adx_threshold', 20.0, 35.0, step=1.0),
         'persistence_days': trial.suggest_int('persistence_days', 3,7),
-        'max_position_duration': trial.suggest_int('max_position_duration', 5, 30),
+        'max_position_duration': trial.suggest_int('max_position_duration', 400, 500),
 
         # Thresholds
-        'entry': trial.suggest_float('entry', 0.5, 0.7, step=0.025),
-        'exit': trial.suggest_float('exit', 0.3, 0.5, step=0.025),
-        'rsi_buy': trial.suggest_float('rsi_buy', 30, 35, step=0.25),
-        'rsi_exit': trial.suggest_float('rsi_exit', 60, 65, step=0.25),
+        'entry': trial.suggest_float('entry', 0.5, 0.7, step=0.01),
+        'exit': trial.suggest_float('exit', 0.3, 0.5, step=0.01),
+        'rsi_buy': trial.suggest_float('rsi_buy', 45, 55, step=1),
+        'rsi_exit': trial.suggest_float('rsi_exit', 75, 90, step=1),
     }
+    if params['long_reward'] < params['long_risk']:
+        return bad_metrics_template
     
-    
+    if (params['long_reward'] / params['long_risk']) < 2.0 or (params['long_reward'] / params['long_risk']) > 4.0:
+        return bad_metrics_template
+
     # Set up signal weights
     threshold = THRESHOLD.copy()
     threshold['Entry'] = params['entry']
@@ -1434,6 +1683,23 @@ def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
         ["Max. Drawdown [%]", f"{stats['Max Drawdown (%)']:.2f}"],
     ]
     print(tabulate(metrics, tablefmt="simple", colalign=("left", "right")))
+
+    if 'Exit Reason Counts' in stats and stats['Exit Reason Counts']:
+        print(f"\n=== EXIT REASON SUMMARY ===")
+        exit_reasons_data = []
+        total_exits_for_percentage = sum(stats['Exit Reason Counts'].values())
+        
+        # Sort by count for better readability
+        sorted_exit_reasons = sorted(stats['Exit Reason Counts'].items(), key=lambda item: item[1], reverse=True)
+
+        for reason, count in sorted_exit_reasons:
+            percentage = (count / total_exits_for_percentage * 100) if total_exits_for_percentage > 0 else 0
+            exit_reasons_data.append([reason, count, f"{percentage:.2f}%"])
+        
+        if exit_reasons_data:
+            print(tabulate(exit_reasons_data, headers=["Exit Reason", "Count", "Percentage"], tablefmt="simple", colalign=("left", "right", "right")))
+        else:
+            print("No exit reason data to display.")
     
     print(f"\n=== TRADE SUMMARY ===") 
     trade_metrics = [
@@ -1669,20 +1935,12 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1000):
     
     return results_df
 #================== STRATEGY ROBUSTNESS TESTING ================================================================================================================
-def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parameters):
-    """
-    Performs anchored walk-forward analysis with periodic re-optimization.
-
-    1. Starts with initial_is_data_raw as training data.
-    2. Tests on OOS_WINDOW chunks from full_oos_data_raw.
-    3. Appends tested OOS_WINDOW to training data (anchoring).
-    4. Re-optimizes parameters using optimize() when OPTIMIZATION_FREQUENCY days
-       of OOS data have been processed and added to training.
-    """
+def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parameters, risk_free_annual = RISK_FREE_RATE_ANNUAL):
     
     # Global constants from your script parameters
     oos_window_size = OOS_WINDOW  # e.g., 10 (days/periods in raw data)
     opt_frequency_days = OPTIMIZATION_FREQUENCY # e.g., 42 (days/periods in raw data)
+    daily_rf_rate = risk_free_annual / 252.0 # Daily risk-free rate for Sharpe ratio calculation
 
     # Make copies to avoid modifying originals passed to the function
     current_train_raw = initial_is_data_raw.copy()
@@ -1706,7 +1964,10 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
 
     step_number = 0
     print(f"\nStarting Anchored Walk-Forward Analysis...")
-    print(f"Initial training data: {current_train_raw.index[0].date()} to {current_train_raw.index[-1].date()} ({len(current_train_raw)} days)")
+    if not current_train_raw.empty:
+        print(f"Initial training data: {current_train_raw.index[0].date()} to {current_train_raw.index[-1].date()} ({len(current_train_raw)} days)")
+    else:
+        print("Initial training data: Empty")
     print(f"Total OOS data available: {len(remaining_oos_raw)} days")
     print(f"OOS Window Size: {oos_window_size} days, Optimization Frequency: {opt_frequency_days} days of new OOS data.")
 
@@ -1715,13 +1976,9 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
         print(f"\n--- WFA Step {step_number} ---")
 
         # 1. Re-optimization Check
-        # Re-optimize if enough new OOS data has been processed and added to training
-        # and it's not the very first step (unless opt_frequency_days is 0, which means optimize always)
-        if days_processed_since_last_opt >= opt_frequency_days and step_number > 0 : # step_number > 0 ensures it can run on first step if needed
+        if days_processed_since_last_opt >= opt_frequency_days and step_number > 1 : 
             print(f"Attempting re-optimization. Days processed since last opt: {days_processed_since_last_opt} >= {opt_frequency_days}")
             
-            # The `prepared_current_train` for optimization is the one derived from `current_train_raw`
-            # which now includes previously processed OOS chunks.
             if prepared_current_train.empty:
                 print("Cannot optimize: Current accumulated training data is empty after preparation.")
             else:
@@ -1729,9 +1986,7 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
                 pareto_front = optimize(prepared_current_train) 
                 
                 if pareto_front and len(pareto_front) > 0:
-                    best_trial = pareto_front[0] # Assuming optimize sorts/selects the best
-                    
-                    # Map Optuna trial params to the flat structure expected by momentum
+                    best_trial = pareto_front[0] 
                     active_parameters = {
                         'long_risk': float(best_trial.params['long_risk']),
                         'long_reward': float(best_trial.params['long_reward']),
@@ -1750,7 +2005,7 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
                     print(f"Parameters updated from optimization. New Sharpe from trial: {best_trial.values[0]:.2f}")
                 else:
                     print("Optimization did not yield new parameters. Continuing with existing ones.")
-            days_processed_since_last_opt = 0 # Reset counter regardless of optimization success
+            days_processed_since_last_opt = 0 
         
         # 2. Define and Prepare Current Test Window (OOS Chunk)
         current_oos_chunk_raw = remaining_oos_raw.iloc[:oos_window_size].copy()
@@ -1759,23 +2014,19 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
         if prepared_oos_chunk.empty:
             print(f"OOS chunk for step {step_number} ({current_oos_chunk_raw.index[0].date()} to {current_oos_chunk_raw.index[-1].date()}) is empty after preparation. Skipping this OOS chunk.")
             remaining_oos_raw = remaining_oos_raw.iloc[oos_window_size:].copy()
-            # Still count these raw days towards optimization frequency
             days_processed_since_last_opt += len(current_oos_chunk_raw) 
             continue
 
-        # Ensure prepared_current_train is valid for the training run part of this step
         if prepared_current_train.empty:
             print(f"Training data for step {step_number} is empty. Cannot proceed with this step.")
-            # This might indicate a problem with data or preparation logic if it happens mid-WFA
             break 
 
         print(f"Training data for this step: {prepared_current_train.index[0].date()} to {prepared_current_train.index[-1].date()} ({len(prepared_current_train)} days)")
         print(f"Testing with OOS data: {prepared_oos_chunk.index[0].date()} to {prepared_oos_chunk.index[-1].date()} ({len(prepared_oos_chunk)} days)")
 
         # 3. Run strategy on the current prepared training data (for reference)
-        # This uses `active_parameters` which might have been just re-optimized (or are initial/previous)
         train_log, train_stats, train_equity, train_returns = momentum(
-            prepared_current_train, # This is the growing training set
+            prepared_current_train, 
             long_risk=active_parameters['long_risk'],
             long_reward=active_parameters['long_reward'],
             position_size=active_parameters['position_size'],
@@ -1783,7 +2034,8 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
             adx_threshold=active_parameters['adx_thresh'],        
             persistence_days=active_parameters['persistence_days'],
             max_position_duration=active_parameters['max_position_duration'],
-            threshold=active_parameters['threshold']
+            threshold=active_parameters['threshold'],
+            risk_free_rate=risk_free_annual
         )
 
         # 4. Run strategy on the prepared OOS chunk (current test window)
@@ -1796,100 +2048,168 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
             adx_threshold=active_parameters['adx_thresh'],
             persistence_days=active_parameters['persistence_days'],
             max_position_duration=active_parameters['max_position_duration'],
-            threshold=active_parameters['threshold']
+            threshold=active_parameters['threshold'],
+            risk_free_rate=risk_free_annual
         )
         
         # 5. Record results for this step
+        # After running strategies, check for null trades in OOS period
+        oos_trade_count = oos_stats.get('Total Trades', 0)
+        train_trade_count = train_stats.get('Total Trades', 0)
+        
+        # Get Sharpe values with appropriate handling
         train_sharpe = train_stats.get('Sharpe Ratio', np.nan)
         oos_sharpe = oos_stats.get('Sharpe Ratio', np.nan)
-        decay_val = train_sharpe - oos_sharpe
-        decay_ratio_val = decay_val / max(0.01, abs(train_sharpe)) if pd.notna(train_sharpe) and train_sharpe != 0 else np.nan
+        
+        # Flag for periods with no trading activity
+        is_valid_train_period = train_trade_count > 0
+        is_valid_oos_period = oos_trade_count > 0
+        
+        # Handle null trade periods for OOS Sharpe calculation
+        if not is_valid_oos_period:
+            print(f"  WARNING: No trades executed in OOS period (Step {step_number}). Using neutral Sharpe (0.0).")
+            oos_sharpe = 0.0  # Use neutral value rather than extreme values
+        
+        # Handle null trade periods for training Sharpe
+        if not is_valid_train_period:
+            print(f"  WARNING: No trades executed in training period (Step {step_number}). Using neutral Sharpe (0.0).")
+            train_sharpe = 0.0  # Use neutral value
+        
+        # Only calculate decay when both periods have valid trades
+        if is_valid_train_period and is_valid_oos_period:
+            # Calculate decay with proper sign handling
+            if (train_sharpe >= 0 and oos_sharpe >= 0) or (train_sharpe < 0 and oos_sharpe < 0):
+                # Same sign - compare relative performance
+                performance_ratio = abs(oos_sharpe) / max(abs(train_sharpe), 0.1) # Avoid division by zero if train_sharpe is very small
+                decay_ratio_val = 1.0 - performance_ratio
+            else:
+                # Different signs - significant strategy change
+                decay_ratio_val = 1.5 # Indicates a flip in performance characteristic
+        else:
+            # Mark as invalid comparison when either period has no trades
+            decay_ratio_val = np.nan
+            if step_number > 0 : # Avoid printing for initial step if it's common to have no trades
+                print(f"  INFO: Decay ratio marked as invalid for step {step_number} due to null trade periods.")
         
         step_result_data = {
             'step': step_number,
-            'train_start_date': prepared_current_train.index[0].date(),
-            'train_end_date': prepared_current_train.index[-1].date(),
+            'train_start_date': prepared_current_train.index[0].date() if not prepared_current_train.empty else None,
+            'train_end_date': prepared_current_train.index[-1].date() if not prepared_current_train.empty else None,
             'train_days': len(prepared_current_train),
-            'test_start_date': prepared_oos_chunk.index[0].date(),
-            'test_end_date': prepared_oos_chunk.index[-1].date(),
+            'test_start_date': prepared_oos_chunk.index[0].date() if not prepared_oos_chunk.empty else None,
+            'test_end_date': prepared_oos_chunk.index[-1].date() if not prepared_oos_chunk.empty else None,
             'test_days': len(prepared_oos_chunk),
             'train_sharpe': train_sharpe,
             'test_sharpe': oos_sharpe,
             'decay_ratio': decay_ratio_val,
-            'train_trades': train_stats.get('Total Trades', 0),
-            'test_trades': oos_stats.get('Total Trades', 0),
+            'train_trades': train_trade_count,
+            'test_trades': oos_trade_count,
             'parameters_used_snapshot': active_parameters.copy(), 
-            'oos_returns_series': oos_returns,
+            'oos_returns_series': oos_returns, 
             'train_return_pct': train_stats.get('Return (%)', np.nan),
             'test_return_pct': oos_stats.get('Return (%)', np.nan),
+            'valid_train': is_valid_train_period,
+            'valid_test': is_valid_oos_period,
+            'valid_comparison': is_valid_train_period and is_valid_oos_period
         }
         all_step_results.append(step_result_data)
         
-        print(f"  Step {step_number} Results: Train Sharpe: {train_sharpe:.2f}, Test Sharpe: {oos_sharpe:.2f}, Decay Ratio: {decay_ratio_val:.2f}")
+        decay_ratio_str = f"{decay_ratio_val:.2f}" if pd.notna(decay_ratio_val) else 'N/A'
+        print(f"  Step {step_number} Results: Train Sharpe: {train_sharpe:.2f}, Test Sharpe: {oos_sharpe:.2f}, Decay Ratio: {decay_ratio_str}")
 
         # 6. Update data for the next iteration (Anchoring)
-        # Append the raw OOS chunk that was just processed to the raw training data
         current_train_raw = pd.concat([current_train_raw, current_oos_chunk_raw])
-        # Prepare this new, larger training set for the *next* step's training run / optimization
         prepared_current_train = prepare_data(current_train_raw.copy())
         if prepared_current_train.empty:
             print(f"CRITICAL: Accumulated training data became empty after preparing for next step (after step {step_number}). Aborting WFA.")
             break 
         
-        # Advance the remaining OOS data
         remaining_oos_raw = remaining_oos_raw.iloc[oos_window_size:].copy()
-        
-        # 7. Increment days processed for re-optimization tracking
-        # Add the length of the raw OOS chunk that was processed
         days_processed_since_last_opt += len(current_oos_chunk_raw) 
 
-    # --- Post-Loop Processing ---
     if not all_step_results:
         print("No walk-forward steps were completed.")
         return None
 
     results_df = pd.DataFrame(all_step_results)
     
-    all_oos_returns_list = [res['oos_returns_series'] for res in all_step_results if isinstance(res['oos_returns_series'], pd.Series) and not res['oos_returns_series'].empty]
+    all_oos_log_returns_list = [res['oos_returns_series'] for res in all_step_results if isinstance(res['oos_returns_series'], pd.Series) and not res['oos_returns_series'].empty]
     
-    concatenated_oos_returns = pd.Series(dtype=float)
+    concatenated_oos_log_returns = pd.Series(dtype=float)
     overall_oos_sharpe = np.nan
-    overall_oos_return_pct = np.nan
+    overall_oos_cumulative_return_pct = np.nan 
 
-    if all_oos_returns_list:
-        concatenated_oos_returns = pd.concat(all_oos_returns_list).sort_index()
-        # Remove duplicate index entries if any, keep first (shouldn't happen if OOS chunks are sequential)
-        concatenated_oos_returns = concatenated_oos_returns[~concatenated_oos_returns.index.duplicated(keep='first')]
-
-        if len(concatenated_oos_returns) > 1:
-            if concatenated_oos_returns.std() != 0 and pd.notna(concatenated_oos_returns.std()):
-                overall_oos_sharpe = (concatenated_oos_returns.mean() / concatenated_oos_returns.std()) * np.sqrt(252) # Assuming daily returns
-            
-            # Calculate overall cumulative return for concatenated OOS periods
-            # (1 + r1) * (1 + r2) * ... * (1 + rn) - 1
-            overall_oos_return_pct = (np.prod(1 + concatenated_oos_returns) - 1) * 100
+    if all_oos_log_returns_list:
+        concatenated_oos_log_returns = pd.concat(all_oos_log_returns_list).sort_index()
+        concatenated_oos_log_returns = concatenated_oos_log_returns[~concatenated_oos_log_returns.index.duplicated(keep='first')]
 
     print("\n=== Anchored Walk-Forward Analysis Final Summary ===")
     print(f"Total WFA Steps Completed: {len(results_df)}")
-    if not results_df.empty:
-        print(f"Mean Test Sharpe (across steps): {results_df['test_sharpe'].mean():.2f}")
-        print(f"Mean Test Return (%) (across steps): {results_df['test_return_pct'].mean():.2f}")
-        print(f"Mean Decay Ratio (across steps): {results_df['decay_ratio'].mean():.2f}")
-    print(f"Overall Concatenated OOS Sharpe Ratio: {overall_oos_sharpe:.2f}")
-    print(f"Overall Concatenated OOS Total Return (%): {overall_oos_return_pct:.2f}")
     
-    # Display detailed step results
+    if not results_df.empty:
+        # Filter for valid test periods when calculating means
+        valid_test_results_df = results_df[results_df['valid_test'] == True]
+        valid_comparisons_df = results_df[results_df['valid_comparison'] == True]
+        
+        # Count of steps with valid metrics
+        print(f"Steps with valid trades in test period: {len(valid_test_results_df)} of {len(results_df)}")
+        print(f"Steps with valid trade comparisons: {len(valid_comparisons_df)} of {len(results_df)}")
+        
+        # Calculate means only on valid periods
+        if not valid_test_results_df.empty:
+            print(f"Mean Test Sharpe (valid test periods only): {valid_test_results_df['test_sharpe'].mean():.2f}")
+            print(f"Mean Test Return (%) (valid test periods only): {valid_test_results_df['test_return_pct'].mean():.2f}")
+        else:
+            print("No valid test periods with trades to calculate mean metrics.")
+            
+        if not valid_comparisons_df.empty:
+            print(f"Mean Decay Ratio (valid comparisons only): {valid_comparisons_df['decay_ratio'].mean():.2f}")
+        else:
+            print("No valid comparison periods to calculate mean decay ratio.")
+
+    if len(concatenated_oos_log_returns) > 1: # Check if there are enough returns to calculate overall metrics
+        # Count of trading days with non-zero returns
+        active_trading_days = len(concatenated_oos_log_returns[concatenated_oos_log_returns != 0])
+        total_days_in_oos_concat = len(concatenated_oos_log_returns)
+        
+        print(f"Overall OOS trading activity: {active_trading_days} active days out of {total_days_in_oos_concat} total days in concatenated OOS periods.")
+        if total_days_in_oos_concat > 0:
+            print(f"Trading activity rate: {(active_trading_days/total_days_in_oos_concat*100):.1f}% of days")
+        else:
+            print("Trading activity rate: N/A (no OOS days)")
+
+        # Only calculate performance metrics if there were sufficient active trading days
+        if active_trading_days > 5:  # Arbitrary threshold for reliability
+            excess_concatenated_log_returns = concatenated_oos_log_returns - daily_rf_rate
+            mean_excess_log_return = excess_concatenated_log_returns.mean()
+            std_excess_log_return = excess_concatenated_log_returns.std()
+            
+            if std_excess_log_return != 0 and pd.notna(std_excess_log_return):
+                overall_oos_sharpe = (mean_excess_log_return / std_excess_log_return) * np.sqrt(252)
+            else: 
+                overall_oos_sharpe = 0.0 if mean_excess_log_return == 0 else np.nan 
+            
+            total_cumulative_log_return = concatenated_oos_log_returns.sum()
+            overall_oos_cumulative_return_pct = (np.exp(total_cumulative_log_return) - 1) * 100
+            
+            print(f"Overall Concatenated OOS Sharpe Ratio (from log returns): {overall_oos_sharpe:.2f}")
+            print(f"Overall Concatenated OOS Cumulative Return (from log returns, %): {overall_oos_cumulative_return_pct:.2f}")
+        else:
+            print("Insufficient active trading days in concatenated OOS periods for reliable overall performance metrics.")
+    else:
+        print("No concatenated OOS returns to calculate overall performance metrics.")
+        
     if not results_df.empty:
         print("\n--- Detailed Step Results ---")
-        display_cols = ['step', 'train_start_date', 'train_end_date', 'test_start_date', 'test_end_date', 
-                        'train_sharpe', 'test_sharpe', 'decay_ratio', 'train_trades', 'test_trades', 'test_return_pct']
+        display_cols = ['step', 'train_sharpe', 'test_sharpe', 'decay_ratio', 'train_trades', 'test_trades', 
+                        'test_return_pct', 'valid_train', 'valid_test', 'valid_comparison']
         print(tabulate(results_df[display_cols], headers='keys', tablefmt='grid', floatfmt=".2f"))
 
     return {
         'step_results_df': results_df, 
-        'concatenated_oos_returns': concatenated_oos_returns,
+        'concatenated_oos_returns': concatenated_oos_log_returns, 
         'overall_oos_sharpe': overall_oos_sharpe,
-        'overall_oos_return_pct': overall_oos_return_pct
+        'overall_oos_return_pct': overall_oos_cumulative_return_pct
     }
 #================== MAIN PROGRAM EXECUTION =====================================================================================================================
 def main():
