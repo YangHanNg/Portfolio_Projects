@@ -18,12 +18,12 @@ from statsmodels.tsa.stattools import adfuller, acf
 from joblib import Parallel, delayed
 #================== SCRIPT PARAMETERS =======================================================================================================================
 # Controls
-TYPE = 4 # 1. Full run # 2. Walk-Forward # 3. Monte Carlo # 4. Optimization # 5. Test
+TYPE = 41 # 1. Full run # 2. Walk-Forward # 3. Monte Carlo # 4. Optimization # 5. Test
 TICKER = ['SPY']
 INITIAL_CAPITAL = 25000.0
 TRIALS = 75
-COMMISION = True
-BLOCK_SIZE = 15
+COMMISION = False
+BLOCK_SIZE = 10
 OPTIMIZATION_FREQUENCY = 126
 OOS_WINDOW = 42
 FINAL_OOS_YEARS = 3
@@ -786,9 +786,9 @@ class TradeManager:
 
         # 2. Time-Decay Parameters
         enable_time_decay = True
-        time_decay_start_day = 5    # Start tightening after 5 days
-        time_decay_max_days = 60    # Max duration over which decay occurs
-        time_decay_min_factor = 0.6 # Stop can tighten up to 60% of its ATR component (e.g., 1.0 -> 0.6)
+        time_decay_start_day = 20    # Start tightening after 5 days
+        time_decay_max_days = 7    # Max duration over which decay occurs
+        time_decay_min_factor = 0.8 # Stop can tighten up to 60% of its ATR component (e.g., 1.0 -> 0.6)
 
         # 3. Market Regime Parameters
         enable_regime_filter = True
