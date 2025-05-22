@@ -5,29 +5,28 @@ import numpy as np
 import yfinance as yf
 from tabulate import tabulate  
 import pandas_ta as ta 
-import multiprocessing as mp 
+import multiprocessing as mp
+from multiprocessing import Pool, shared_memory
 from collections import deque
 from numba import jit
-from datetime import datetime
-from tqdm import tqdm
 import optuna
-from functools import partial  # Add missing import for partial
+import tqdm as tqdm
+from functools import partial
+from joblib import Parallel, delayed
 import traceback
 from scipy import stats
-from statsmodels.tsa.stattools import adfuller, acf
-from joblib import Parallel, delayed
 #================== SCRIPT PARAMETERS =======================================================================================================================
 # Controls
-TYPE = 41 # 1. Full run # 2. Walk-Forward # 3. Monte Carlo # 4. Optimization # 5. Test
-TICKER = ['SPY']
+TYPE = 1 # 1. Full run # 2. Walk-Forward # 3. Monte Carlo # 4. Optimization # 5. Test
+TICKER = 'SPY'
 INITIAL_CAPITAL = 25000.0
-TRIALS = 75
-COMMISION = False
-BLOCK_SIZE = 10
-OPTIMIZATION_FREQUENCY = 126
-OOS_WINDOW = 42
-FINAL_OOS_YEARS = 3
-RISK_FREE_RATE_ANNUAL = 0.04
+TRIALS = 35 # Number of trials for optimization
+COMMISION = False # Set to True for commission
+BLOCK_SIZE = 10 # Size of blocks for random sampling
+OPTIMIZATION_FREQUENCY = 126 # Number of days between optimizations (wfa)
+OOS_WINDOW = 42 # Number of days for out-of-sample testing (wfa)
+FINAL_OOS_YEARS = 3 # Number of years for final out-of-sample testing
+RISK_FREE_RATE_ANNUAL = 0.04   # Annual risk-free rate
 
 # Optimization directions
 OPTIMIZATION_DIRECTIONS = {
@@ -46,231 +45,369 @@ OBJECTIVE_WEIGHTS = {
 
 # Optimization parameters
 THRESHOLD = {
-    'Entry': 0.7,
-    'Exit': 0.4,
-    'RSI_BUY': 35,
-    'RSI_EXIT': 60,
+    'Entry': 0.65,
+    'Exit': 0.40,
+    'RSI_BUY': 60,
+    'RSI_EXIT': 70,
 }
-ADX_THRESHOLD_DEFAULT = 30
+ADX_THRESHOLD_DEFAULT = 25
 DEFAULT_LONG_RISK = 0.03 
-DEFAULT_LONG_REWARD = 0.08 
-DEFAULT_POSITION_SIZE = 0.05
-MAX_OPEN_POSITIONS = 100
-PERSISTENCE_DAYS = 3
-MAX_POSITION_DURATION = 10
+DEFAULT_LONG_REWARD = 0.09
+DEFAULT_POSITION_SIZE = 0.20
+MAX_OPEN_POSITIONS = 20
+PERSISTENCE_DAYS = 4
+MAX_POSITION_DURATION = 65
 
-# Risk & Reward
+# Other default parameters
 DEFAULT_SHORT_RISK = 0.01  
 DEFAULT_SHORT_REWARD = 0.03  
-
 # Moving average strategy parameters
-FAST = 25
+FAST = 20
 SLOW = 50
 WEEKLY_MA_PERIOD = 50
-
+LOOKBACK_BUFFER_DAYS = 100
+# Average True Range
+ATR_LENGTH = 14
+# Average Directional Index
+ADX_LENGTH = 14
 # RSI strategy parameters
 RSI_LENGTH = 14
-
 # Bollinger Bands strategy parameters
 BB_LEN = 20
-ST_DEV = 2
+ST_DEV = 2.0
 #================== DATA RETRIEVAL & HANDLING =================================================================================================================
 def get_data(ticker):
+    """
+    Download historical data for the given ticker and split it into in-sample and out-of-sample datasets.
+    """
     trading_days_per_year = 252
-    oos_period = 252 * FINAL_OOS_YEARS
-    is_period = oos_period + 252 * 5
+    oos_period_days = trading_days_per_year * FINAL_OOS_YEARS
+    target_is_days = trading_days_per_year * 5
+    data_start_year = 2013
 
-    data_start_year = 2015
-    print('\nDownloading data....')
-    data = yf.download(ticker, start=f"{data_start_year}-01-01", auto_adjust=True)
+    print(f"\nDownloading data for {ticker}...")
 
-    if data.empty:
-        print(f"No data available for {ticker}")
-        return None, None, None
+    try:
+        data = yf.download(ticker, start=f"{data_start_year}-01-01", auto_adjust=True)
 
-    # Get Out of Sample data
-    oos_df = data.iloc[-oos_period:].copy()
+        if data.empty:
+            print(f"No data downloaded for {ticker}.")
+            return pd.DataFrame(), pd.DataFrame()
+        
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
 
-    # Check if the data is sufficient for the specified periods
-    if len(data) < is_period + oos_period:
-        is_df = data.iloc[:-oos_period].copy()
-    else:
-        is_df = data.iloc[-is_period:-oos_period].copy()
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        missing = [col for col in required_cols if col not in data.columns]
+        if missing:
+            print(f"Missing required columns: {missing}")
+            return pd.DataFrame(), pd.DataFrame()
 
-    if is_df.empty or oos_df.empty:
-            raise ValueError(f"No data downloaded for {ticker}")
-    print(f"Data split: In-Sample from {is_df.index[0].year} to {is_df.index[-1].year}, Out-of-Sample from {oos_df.index[0].year} to {oos_df.index[-1].year}")
-    return is_df, oos_df
+        # Download VIX
+        vix = yf.download("^VIX", start=data.index[0], end=data.index[-1], auto_adjust=True)['Close']
+        vix = vix.reindex(data.index, method='ffill')
+        data['VIX'] = vix
+
+        core_cols = required_cols + ['VIX']
+        still_missing = [col for col in core_cols if col not in data.columns]
+        if still_missing:
+            print(f"Missing core columns before dropna: {still_missing}")
+            return pd.DataFrame(), pd.DataFrame()
+
+        # Ensure all core columns are numeric float32
+        for col in core_cols:
+            if col in data.columns:
+                col_data = data[col]
+                if isinstance(col_data, pd.Series):
+                    try:
+                        data[col] = pd.to_numeric(col_data, errors='coerce').astype('float32')
+                    except Exception as e:
+                        print(f"Warning: Could not convert column '{col}' to float32. Error: {e}")
+                else:
+                    print(f"Warning: Column '{col}' is not a Series. Type: {type(col_data)}")
+            else:
+                print(f"Warning: Column '{col}' not found in DataFrame before conversion.")
+
+        # Drop NaNs
+        data = data.dropna(subset=core_cols)
+        if data.empty:
+            print("All rows dropped after NaN removal.")
+            return pd.DataFrame(), pd.DataFrame()
+
+        # Slice OOS and IS
+        if len(data) < oos_period_days:
+            oos_df = data.copy()
+            data_before_oos = pd.DataFrame(columns=data.columns, index=pd.to_datetime([]))
+        else:
+            oos_df = data.iloc[-oos_period_days:].copy()
+            data_before_oos = data.iloc[:-oos_period_days].copy()
+
+        required_is = target_is_days + LOOKBACK_BUFFER_DAYS
+        if len(data_before_oos) < required_is:
+            is_df = data_before_oos.copy()
+        else:
+            is_df = data_before_oos.iloc[-required_is:].copy()
+
+        print(f"IS: {len(is_df)} rows | OOS: {len(oos_df)} rows")
+        return is_df, oos_df
+
+    except Exception as e:
+        print(f"Error in get_data: {e}")
+        traceback.print_exc()
+        return pd.DataFrame(), pd.DataFrame()
 # --------------------------------------------------------------------------------------------------------------------------
-def prepare_data(df_IS):
-
-    # 1. Initial Setup & Memory Optimization
-    df = df_IS.copy()
+def prepare_data(df_input, type=None):
+    """
+    Prepares the data with important indicators.
+    """
+    # 1. Data copy and critical checks
+    df = df_input.copy()
     if df.empty:
         print("Warning: Empty dataframe provided to prepare_data.")
         return df
     
-    # Convert known OHLCV columns and any float64 to float32 for memory efficiency
-    ohlcv_cols_for_dtype_check = ['Open', 'High', 'Low', 'Close', 'Volume']
-    for col in df.columns:
-        if df[col].dtype == 'float64':
-            df[col] = df[col].astype('float32')
-        elif col in ohlcv_cols_for_dtype_check:
-            if not pd.api.types.is_numeric_dtype(df[col]):
-                # If OHLCV cols are present but not numeric (e.g. object), try to convert
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            # Ensure it's float32 if it's numeric but not already float32
-            if pd.api.types.is_numeric_dtype(df[col]) and df[col].dtype != 'float32':
-                 df[col] = df[col].astype('float32')
+    if 'Close' not in df.columns or df['Close'].isnull().all():
+        print("CRITICAL ERROR: 'Close' column is missing or unusable before indicator calculation.")
+        return pd.DataFrame()
     
-    if len(df) > 100000:  # Only for large datasets
-        for col in df.select_dtypes(include=['object']).columns:
-            try:
-                df[col] = df[col].astype('category')
-            except TypeError: # Handle cases where conversion to category might fail
-                print(f"Warning: Could not convert column '{col}' to category type.")
-    
-    # 2. Multi-index Handling Simplification
-    if isinstance(df.columns, pd.MultiIndex):
-        # Assuming the primary column names are in the first level (level 0)
-        df.columns = df.columns.droplevel(1)
-        # Ensure no duplicate column names after droplevel, take the first occurrence
-        df = df.loc[:, ~df.columns.duplicated(keep='first')]
+    # List of indicator columns that will be created
+    indicator_columns = [
+        f'{FAST}_ma', f'{SLOW}_ma', 'Volume_MA20', f'Weekly_MA{WEEKLY_MA_PERIOD}',
+        'RSI', 'Upper_Band', 'Lower_Band', 'ATR', 'Close_26_ago', 'ADX',
+        'volume_confirmed', 'weekly_uptrend'
+    ]
 
-    # 3. Logic to 
-    core_ohlcv_names = ['Open', 'High', 'Low', 'Close', 'Volume']
-    # Threshold for dropping rows if NaNs are below this percentage for a given column
-    max_nan_percentage_to_drop_rows = 0.05
-    for col_name in core_ohlcv_names:
-        if col_name not in df.columns:
-                print(f"WARNING: Core column '{col_name}' is missing. Calculations requiring it may be affected or use defaults if available in the specific indicator logic.")
-        else:
-            if df[col_name].isnull().all(): # If the entire column is NaNs
-                    print(f"WARNING: Core column '{col_name}' consists entirely of NaN values. This will likely cause issues for indicators relying on it.")
-            else:
-                num_nans = df[col_name].isnull().sum()
-                if num_nans > 0:
-                    nan_percentage = num_nans / len(df)
-                    if nan_percentage < max_nan_percentage_to_drop_rows:
-                        print(f"INFO: Column '{col_name}' has {num_nans} NaN values ({nan_percentage*100:.2f}% of current data). Dropping rows with these NaNs.")
-                        df.dropna(subset=[col_name], inplace=True)
-                        if df.empty:
-                            print(f"WARNING: DataFrame became empty after dropping NaNs for column '{col_name}'.")
-                            return df # Return the now empty DataFrame
-                    else:
-                        print(f"WARNING: Column '{col_name}' has {nan_percentage*100:.2f}% NaNs, which is high. Attempting forward-fill then backward-fill.")
-                        df[col_name].ffill(inplace=True)
-                        df[col_name].bfill(inplace=True) # Fill any NaNs remaining at the beginning
-                        if df[col_name].isnull().any(): # Should only happen if column was all NaNs initially (caught above)
-                            print(f"ERROR: Column '{col_name}' still contains NaNs after ffill/bfill. This column may be unusable for some indicators.")
-
-
-    # Final check: After all initial cleaning, is 'Close' usable?
-    if 'Close' not in df.columns or df.empty or df['Close'].isnull().all():
-        print("CRITICAL ERROR: 'Close' column is missing or unusable after initial data preparation steps.")
-        return df
-    
-    # 4. Calculate Core Indicators
+    # 2. Calculate Core Indicators
     try:
         # Main Indicators
-        # Vectorized Moving Averages
-        df[f'{FAST}_ma'] = df['Close'].rolling(window=FAST, min_periods=1).mean()
-        df[f'{SLOW}_ma'] = df['Close'].rolling(window=SLOW, min_periods=1).mean()
-        df['Volume_MA20'] = df['Volume'].rolling(window=20, min_periods=1).mean()
-        vix = yf.download("^VIX", start=df.index[0], end=df.index[-1])['Close']  
-        df['VIX'] = vix
+        df[f'{FAST}_ma'] = df['Close'].rolling(window=FAST, min_periods=1).mean().fillna(0)
+        df[f'{SLOW}_ma'] = df['Close'].rolling(window=SLOW, min_periods=1).mean().fillna(0)
+        df['Volume_MA20'] = df['Volume'].rolling(window=20, min_periods=1).mean().fillna(0)
         
         # Weekly Moving Average
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index)
         df_weekly = df['Close'].resample('W').last()
         df[f'Weekly_MA{WEEKLY_MA_PERIOD}'] = (df_weekly.rolling(window=WEEKLY_MA_PERIOD, min_periods=1)
-            .mean().reindex(df.index, method='ffill'))
+            .mean().reindex(df.index, method='ffill')).fillna(0) 
         
-        # Relative Strength Index - Measures pct change in price
+        # Relative Strength Index
         rsi_series = ta.rsi(df['Close'], length=RSI_LENGTH)
-        if rsi_series is not None:
-            df['RSI'] = rsi_series.fillna(50.0)
-        else:
-            df['RSI'] = pd.Series(50.0, index=df.index) # Default if ta.rsi returns None
+        df['RSI'] = rsi_series.fillna(0) # NaNs will persist if rsi_series has them
         
-        # Bollinger Bands - Measures volatility
+        # Bollinger Bands
         bb = ta.bbands(df['Close'], length=BB_LEN, std=ST_DEV)
-        if bb is not None and not bb.empty:
-            df['Upper_Band'] = bb[f'BBU_{BB_LEN}_{float(ST_DEV)}'].fillna(df['Close'] * 1.02)
-            df['Lower_Band'] = bb[f'BBL_{BB_LEN}_{float(ST_DEV)}'].fillna(df['Close'] * 0.98)
+        if isinstance(bb, pd.DataFrame):  # If bb is a DataFrame with multiple columns
+            # Access specific columns by their proper names
+            df['Upper_Band'] = bb[f'BBU_{BB_LEN}_{ST_DEV}'].fillna(0)
+            df['Lower_Band'] = bb[f'BBL_{BB_LEN}_{ST_DEV}'].fillna(0)
         else:
-            df['Upper_Band'] = df['Close'] * 1.02
-            df['Lower_Band'] = df['Close'] * 0.98
+            print(f"Warning: Bollinger Bands calculation failed or returned unexpected format: {type(bb)}")
+            # Create empty columns to avoid errors
+            df['Upper_Band'] = 0
+            df['Lower_Band'] = 0
 
-        # Secondary Indicators
-        # Average True Range - Measures volatility
-        atr_series = ta.atr(df['High'], df['Low'], df['Close'], length=14)
-        if atr_series is not None:
-            df['ATR'] = atr_series.fillna(df['Close'] * 0.02)
-        else:
-            df['ATR'] = pd.Series(df['Close'] * 0.02, index=df.index) # Default if ta.atr returns None
+        # Average True Range
+        df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=ATR_LENGTH).fillna(0)
 
         # Close price 26 periods ago
-        df['Close_26_ago'] = df['Close'].shift(26).ffill().fillna(df['Close'])
+        df['Close_26_ago'] = df['Close'].shift(26).fillna(0)
 
-        # Average Directional Index - Measures trend strength
-        adx_result = ta.adx(df['High'], df['Low'], df['Close'])
-        if isinstance(adx_result, pd.DataFrame) and 'ADX_14' in adx_result.columns:
-            df['ADX'] = adx_result['ADX_14'].fillna(25.0)
-        else:
-            df['ADX'] = pd.Series(25.0, index=df.index)
-
-        # Volume and Weekly Trend Confirmations
-        # Ensure dependencies are present before calculating these
-        if 'Volume' in df.columns and 'Volume_MA20' in df.columns:
-            df['volume_confirmed'] = df['Volume'] > df['Volume_MA20']
-        else:
-            df['volume_confirmed'] = pd.Series(False, index=df.index)
-
-        if 'Close' in df.columns and f'Weekly_MA{WEEKLY_MA_PERIOD}' in df.columns:
-            df['weekly_uptrend'] = (df['Close'] > df[f'Weekly_MA{WEEKLY_MA_PERIOD}']) & \
-                                   (df[f'Weekly_MA{WEEKLY_MA_PERIOD}'].shift(1).ffill() < \
-                                    df[f'Weekly_MA{WEEKLY_MA_PERIOD}'])
-        else:
-            df['weekly_uptrend'] = pd.Series(False, index=df.index)
+        # Average Directional Index
+        adx_result = ta.adx(df['High'], df['Low'], df['Close'], length=ADX_LENGTH)
+        df['ADX'] = adx_result[f'ADX_{ADX_LENGTH}'].fillna(0)
         
+        # Volume and Weekly Trend Confirmations
+        df['volume_confirmed'] = df['Volume'] > df['Volume_MA20'].fillna(False)
+        weekly_ma_series = df[f'Weekly_MA{WEEKLY_MA_PERIOD}']
+        df['weekly_uptrend'] = (df['Close'] > weekly_ma_series) & \
+                                (weekly_ma_series.shift(1).ffill() < weekly_ma_series).fillna(False)
+
+        # Check if all expected indicator columns were created
+        missing_calculated_indicators = [col for col in indicator_columns if col not in df.columns and col not in ['volume_confirmed', 'weekly_uptrend']] # Booleans have defaults
+        if missing_calculated_indicators:
+            print(f"CRITICAL ERROR in prepare_data: The following indicator columns were expected but not created: {missing_calculated_indicators}. Aborting preparation.")
+            return pd.DataFrame()
+
     except Exception as e:
-        print(f"Error calculating indicators: {e}. Applying defaults.")
-
-    # 5. Validate and Fill Missing (New Default Value Handling)
-    default_values = {
-        f'{FAST}_ma': df['Close'],
-        f'{SLOW}_ma': df['Close'],
-        'RSI': 50.0,
-        'Upper_Band': df['Close'] * 1.02,
-        'Lower_Band': df['Close'] * 0.98,
-        'ATR': df['Close'] * 0.02,
-        'ADX': 25.0,
-        'Volume_MA20': df['Volume'] if 'Volume' in df else 10000.0, # Default if volume itself is missing
-        f'Weekly_MA{WEEKLY_MA_PERIOD}': df['Close'],
-        'Close_26_ago': df['Close']
-    }
-    # Fill missing values with defaults
-    for col_name, default_series_or_value in default_values.items():
-        if col_name not in df.columns or df[col_name].isnull().all(): # If col is missing or all NaN
-            df[col_name] = default_series_or_value
-        else: # If column exists but has some NaNs, fill them
-            df[col_name] = df[col_name].fillna(default_series_or_value)
-
-    # 6. Final Cleanup
-    df = df.dropna() # Drop rows where essential data might still be missing after fill attempts
-    if df.empty and not df_IS.empty:
-        print("Warning: DataFrame became empty after processing.")
+        print(f"CRITICAL ERROR during indicator calculation in prepare_data: {e}. Aborting preparation.")
+        traceback.print_exc()
+        return pd.DataFrame()
     
-    return df
+    # 3. Data type split
+    if type == 1:
+        # In-Sample Data
+        df = df.iloc[-1260:].copy()
+        # Modify check to exclude boolean columns from zero value check
+        boolean_columns = ['volume_confirmed', 'weekly_uptrend']
+        numeric_columns = [col for col in df.columns if col not in boolean_columns]
+        
+        # Check if df has null values in any column or zero values in numeric columns only
+        has_null = df.isnull().any().any()
+        has_zero_in_numeric = (df[numeric_columns] == 0).any().any()
+        
+        if has_null or has_zero_in_numeric:
+            print("Warning: DataFrame contains null or zero values after indicator calculation. Returning empty DataFrame.")
+            
+            return pd.DataFrame()
+        else:
+            print("DataFrame is valid after indicator calculation.")
+        return df
+    elif type == 2:
+        # Full Data
+        df = df.iloc[-2016:].copy()
+        # Modify check to exclude boolean columns from zero value check
+        boolean_columns = ['volume_confirmed', 'weekly_uptrend']
+        numeric_columns = [col for col in df.columns if col not in boolean_columns]
+        
+        # Check if df has null values in any column or zero values in numeric columns only
+        has_null = df.isnull().any().any()
+        has_zero_in_numeric = (df[numeric_columns] == 0).any().any()
+        
+        if has_null or has_zero_in_numeric:
+            print("Warning: DataFrame contains null or zero values after indicator calculation. Returning empty DataFrame.")
+            
+            return pd.DataFrame()
+        else:
+            print("DataFrame is valid after indicator calculation.")
+        return df
+    else:
+        print("Warning: Invalid type provided to prepare_data. Returning empty DataFrame.")
+        return pd.DataFrame()
+#================== MOMENTUM STRATEGY =========================================================================================================================
+def _calculate_atr_ratio(close_np, atr_np):
+    """Calculate ATR ratio for volatility normalization"""
+    atr_ratio_np = np.full_like(close_np, 0.02, dtype=float)
+    valid_close_mask = close_np != 0
+    safe_close_np = np.where(valid_close_mask, close_np, 1e-9)
+    atr_ratio_np[valid_close_mask] = atr_np[valid_close_mask] / safe_close_np[valid_close_mask]
+    return np.nan_to_num(atr_ratio_np, nan=0.03, posinf=0.03, neginf=0.03)
+# --------------------------------------------------------------------------------------------------------------------------
+def _calculate_momentum_persistence(high_np, low_np, roll_window=7):
+    """Calculate higher highs and higher lows for momentum persistence"""
+    higher_highs = np.zeros_like(high_np, dtype=bool)
+    higher_lows = np.zeros_like(low_np, dtype=bool)
+    
+    for i in range(roll_window, len(high_np)):
+        higher_highs[i] = high_np[i] > np.max(high_np[i-roll_window:i])
+        higher_lows[i] = low_np[i] > np.min(low_np[i-roll_window:i])
+    
+    return higher_highs, higher_lows
+# --------------------------------------------------------------------------------------------------------------------------
+def _create_trading_conditions(df, close_np, fast_ma_np, slow_ma_np, adx_np, adx_threshold,
+                              rsi_np, rsi_buy_threshold, rsi_exit_threshold, rsi_pct_change,
+                              lower_band_np, upper_band_np, higher_highs, higher_lows,
+                              close_roc_5, vix_np, vix_ema_5, vix_pct_change, VIX_HIGH):
+    """Create dictionary of trading conditions"""
+    conditions = {
+        # Primary trend conditions
+        'primary_trend_long': (close_np > fast_ma_np) & (close_np > slow_ma_np),
+        'trend_strength_ok': adx_np > adx_threshold,
+        'relative_trend_strength': adx_np > (adx_np.mean() * 0.8),
+        'volume_ok': df['volume_confirmed'].values.astype(bool),
+        'weekly_uptrend': df['weekly_uptrend'].values.astype(bool),
+        
+        # Secondary conditions
+        'rsi_buy_zone': (rsi_np > rsi_buy_threshold) & (rsi_pct_change > 0),
+        'rsi_exit_zone': rsi_np > rsi_exit_threshold,
+        'rsi_extreme_exit': rsi_np > 80,
+        'bb_buy': close_np < lower_band_np,
+        'bb_exit': close_np > upper_band_np,
+        'price_momentum_strong': higher_highs | higher_lows,
+        'close_uptrend': close_roc_5 > 0,
+        
+        # VIX conditions
+        'vix_ok_for_entry': (vix_np < VIX_HIGH) & (vix_ema_5 < 25),
+        'vix_forced_exit': (vix_np > VIX_HIGH) & (vix_pct_change > 0.45)
+    }
+    
+    # Convert all conditions to boolean arrays
+    for key in conditions:
+        conditions[key] = np.array(conditions[key], dtype=bool)
+    
+    return conditions
+# --------------------------------------------------------------------------------------------------------------------------
+def _calculate_momentum_score(close_np, fast_ma_np, slow_ma_np, close_roc_5,
+                             rsi_np, rsi_pct_change, conditions, atr_ratio_np):
+    """Calculate composite momentum score"""
+    # Trend component
+    trend_score = (
+        (close_np > fast_ma_np).astype(float) * 0.10 +
+        (fast_ma_np > slow_ma_np).astype(float) * 0.10 +
+        (close_roc_5 > 0).astype(float) * 0.05
+    )
+    # RSI component
+    rsi_strength_threshold = 50
+    rsi_scaling_range_top = 70
+    above_threshold_condition = rsi_np > rsi_strength_threshold
+    rsi_rising_condition = rsi_pct_change > 0
+    rsi_score_contribution = 0.25
+    
+    rsi_score = np.where(
+        above_threshold_condition,
+        np.clip((rsi_np - rsi_strength_threshold) / 
+                (rsi_scaling_range_top - rsi_strength_threshold), 0, 1) * rsi_score_contribution,
+        0
+    )
+    rsi_score = np.where(
+        rsi_rising_condition,
+        rsi_score * 1.15,
+        rsi_score
+    )
+    # Volume component
+    volume_score = conditions['volume_ok'].astype(float) * 0.25
+
+    # Price action scoring
+    price_action_score = (
+        conditions['price_momentum_strong'].astype(float) * 0.15 +
+        conditions['close_uptrend'].astype(float) * 0.10
+    )
+    # Combined score
+    momentum_score = trend_score + rsi_score + volume_score + price_action_score
+    
+    # Adjust for volatility with reduced impact
+    atr_impact_factor = 0.7
+    momentum_score *= (1 + np.log1p(atr_ratio_np) * atr_impact_factor)
+    
+    return np.clip(momentum_score, 0, 1)
+# --------------------------------------------------------------------------------------------------------------------------
+def _detect_momentum_decay(momentum_score, decay_window=8, decay_threshold=0.7):
+    """Detect momentum decay patterns"""
+    momentum_decay = np.zeros_like(momentum_score, dtype=bool)
+    
+    for i in range(decay_window, len(momentum_score)):
+        declining_days = sum(momentum_score[i-j] < momentum_score[i-j-1] for j in range(1, decay_window))
+        if declining_days >= int(decay_window * decay_threshold):
+            momentum_decay[i] = True
+    
+    return momentum_decay
+# --------------------------------------------------------------------------------------------------------------------------
+def _calculate_entry_conditions(conditions):
+    """Calculate primary and secondary entry conditions"""
+    primary_entry_conditions = (
+        conditions['trend_strength_ok'].astype(float) * 0.4 +
+        conditions['primary_trend_long'].astype(float) * 0.3 +
+        conditions['weekly_uptrend'].astype(float) * 0.3
+    )
+    
+    secondary_entry_conditions = (
+        conditions['rsi_buy_zone'].astype(float) * 0.3 +
+        conditions['price_momentum_strong'].astype(float) * 0.4 +
+        conditions['volume_ok'].astype(float) * 0.3
+    )
+    
+    return primary_entry_conditions, secondary_entry_conditions
 # --------------------------------------------------------------------------------------------------------------------------
 def signals(df, adx_threshold, threshold):
     
+    # Initialize signals DataFrame with the same index
+    signals_df = pd.DataFrame(index=df.index)
+    
+    # Setup signal parameters
     fast_ma_col = f"{FAST}_ma"
     slow_ma_col = f"{SLOW}_ma"
-    signals_df = pd.DataFrame(index=df.index)
-
+    
+    # Validate threshold dictionary and apply defaults if needed
     params = ['Entry', 'Exit', 'RSI_BUY', 'RSI_EXIT']
     for param in params:
         if param in threshold:
@@ -278,47 +415,31 @@ def signals(df, adx_threshold, threshold):
         else:
             print(f"Warning: {param} not found in threshold. Using default value.")
     
-    # Keep the optimized parameters
+    # Extract thresholds
     rsi_buy_threshold = threshold.get('RSI_BUY', 40)
     rsi_exit_threshold = threshold.get('RSI_EXIT', 60)
     buy_threshold = threshold.get('Entry', 0.6)
     exit_threshold = threshold.get('Exit', 0.4)
     VIX_HIGH = 35  # Exit momentum trades above this
     
-    # Add new parameter for entry weighting
-    ENTRY_WEIGHT_PRIMARY = 0.65    # Weight of primary conditions (trend, volume)
-    ENTRY_WEIGHT_SECONDARY = 0.35  # Weight of secondary conditions (rsi, price action)
+    # Weight parameters for entry conditions
+    ENTRY_WEIGHT_PRIMARY = 0.65
+    ENTRY_WEIGHT_SECONDARY = 0.35
 
-    required_indicator_cols = [fast_ma_col, slow_ma_col, 'RSI', 'Close',
-                                'Lower_Band', 'Upper_Band', 'ATR', 'ADX', 'Volume', 'Volume_MA20', 'Open', 
-                                'High', 'Low','volume_confirmed', 'weekly_uptrend']
+    # Validate required columns exist in the dataframe
+    required_indicator_cols = [
+        fast_ma_col, slow_ma_col, 'RSI', 'Close',
+        'Lower_Band', 'Upper_Band', 'ATR', 'ADX', 
+        'Volume', 'Volume_MA20', 'Open', 'High', 'Low',
+        'volume_confirmed', 'weekly_uptrend'
+    ]
+    
     missing_cols = [col for col in required_indicator_cols if col not in df.columns]
     if missing_cols:
         print(f"Warning: Missing columns for signals: {missing_cols}. Returning default signals.")
-        # Ensure signals_df is initialized with the DataFrame's index if df is not empty
-        if not df.empty:
-            signals_df = pd.DataFrame(index=df.index)
-        else: # df is empty, create an empty signals_df with correct columns
-            signals_df = pd.DataFrame(columns=['momentum_score', 'momentum_decay', 'buy_signal', 'exit_signal', 'immediate_exit', 'signal_changed'])
-            # Populate with default values if df was empty
-            signals_df['momentum_score'] = 0.0
-            signals_df['momentum_decay'] = False
-            signals_df['buy_signal'] = False
-            signals_df['exit_signal'] = False 
-            signals_df['immediate_exit'] = False 
-            signals_df['signal_changed'] = False
-            return signals_df
-            
-        # If df is not empty but columns are missing, populate with default values
-        signals_df['momentum_score'] = 0.0
-        signals_df['momentum_decay'] = False
-        signals_df['buy_signal'] = False
-        signals_df['exit_signal'] = False 
-        signals_df['immediate_exit'] = False 
-        signals_df['signal_changed'] = False
         return signals_df
 
-    # 1. Performance Optimizations: Use NumPy arrays
+    # Extract NumPy arrays for performance
     close_np = df['Close'].values
     atr_np = df['ATR'].values
     adx_np = df['ADX'].values
@@ -329,10 +450,13 @@ def signals(df, adx_threshold, threshold):
     upper_band_np = df['Upper_Band'].values
     high_np = df['High'].values
     lower_np = df['Low'].values
-    rsi_series = df['RSI'] # Keep as Series
-    vix_series = df['VIX'] # Keep as Series
+    
+    # Get series for operations that work better with Series
+    rsi_series = df['RSI']
+    vix_series = df['VIX'] if 'VIX' in df.columns else pd.Series(20.0, index=df.index)
     vix_np = vix_series.values
 
+    # Determine market regime
     regime_conditions = [
         vix_np < 15,
         vix_np > 25
@@ -343,193 +467,113 @@ def signals(df, adx_threshold, threshold):
     ]
     market_regime_series = np.select(regime_conditions, regime_choices, default="normal")
     
-    # Calculate ATR ratio for volatility normalization
-    atr_ratio_np = np.full_like(close_np, 0.02, dtype=float) # Ensure float
-    valid_close_mask = close_np != 0
-    safe_close_np = np.where(valid_close_mask, close_np, 1e-9) # Avoid division by zero
-    atr_ratio_np[valid_close_mask] = atr_np[valid_close_mask] / safe_close_np[valid_close_mask]
-    atr_ratio_np = np.nan_to_num(atr_ratio_np, nan=0.03, posinf=0.03, neginf=0.03)
-
-    # 2. Calculate Primary and Secondary Conditions
+    # Calculate ATR ratio
+    atr_ratio_np = _calculate_atr_ratio(close_np, atr_np)
     
-    # Momentum persistence check - IMPROVED with smoother detection
-    roll_window = 7  # Keep as is since it's optimized
-    higher_highs = np.zeros_like(high_np, dtype=bool)
-    higher_lows = np.zeros_like(lower_np, dtype=bool)
-
-    for i in range(roll_window, len(high_np)):
-        # Check if current high is higher than previous N-day high
-        higher_highs[i] = high_np[i] > np.max(high_np[i-roll_window:i])
-        # FIXED: Correct logic for higher_lows
-        higher_lows[i] = lower_np[i] > np.min(lower_np[i-roll_window:i])
-
-    # Improved VIX conditions - with smoother transitions
-    vix_rolling_mean_5 = vix_series.rolling(window=5, min_periods=1).mean()
+    # Calculate momentum indicators
+    higher_highs, higher_lows = _calculate_momentum_persistence(high_np, lower_np)
+    
+    # Calculate VIX-related indicators
+    vix_ema_5 = vix_series.ewm(span=5, adjust=False).mean()
     vix_pct_change_3 = vix_series.pct_change(periods=3).fillna(0)
     rsi_pct_change_3 = rsi_series.pct_change(periods=3).fillna(0)
     
-    # NEW: Exponential smoothing for VIX series to reduce noise
-    vix_ema_5 = vix_series.ewm(span=5, adjust=False).mean()
-    
-    # NEW: Rate of change for trend measure
+    # Calculate price momentum indicators
     close_series = pd.Series(close_np)
     close_roc_5 = close_series.pct_change(periods=5).fillna(0)
     close_roc_10 = close_series.pct_change(periods=10).fillna(0)
 
-    conditions = {
-        # Primary trend conditions
-        'primary_trend_long': (close_np > fast_ma_np) & (close_np > slow_ma_np),
-        'trend_strength_ok': adx_np > adx_threshold,
-        'relative_trend_strength': adx_np > (adx_np.mean() * 0.8),  # NEW: Relative ADX strength
-        'volume_ok': df['volume_confirmed'].values.astype(bool),
-        'weekly_uptrend': df['weekly_uptrend'].values.astype(bool),
-        
-        # Secondary conditions
-        'rsi_buy_zone': (rsi_np > rsi_buy_threshold) & (rsi_pct_change_3.values > 0),
-        'rsi_exit_zone': rsi_np > rsi_exit_threshold,
-        'rsi_extreme_exit': rsi_np > 90,
-        'bb_buy': close_np < lower_band_np,
-        'bb_exit': close_np > upper_band_np,
-        'price_momentum_strong': higher_highs | higher_lows,
-        'close_uptrend': close_roc_5.values > 0,  # NEW: Simple trend check
-        
-        # VIX conditions
-        'vix_ok_for_entry': (vix_np < VIX_HIGH) & (vix_ema_5.values < 25),  # MODIFIED: Using EMA instead
-        'vix_forced_exit': (vix_np > VIX_HIGH) & (vix_pct_change_3.values > 0.45)
-    }
-    
-    # Convert all conditions to boolean arrays
-    for key in conditions:
-        conditions[key] = np.array(conditions[key], dtype=bool)
-
-    # 3. Calculate Momentum Score - with improved weighting
-    momentum_score = np.zeros_like(close_np, dtype=float)
-
-    # MODIFIED: Enhanced trend component with multiple factors
-    trend_score = (
-        (close_np > fast_ma_np).astype(float) * 0.10 +
-        (fast_ma_np > slow_ma_np).astype(float) * 0.10 +
-        (close_roc_5.values > 0).astype(float) * 0.05  # Positive short-term momentum
+    # Define signal conditions
+    conditions = _create_trading_conditions(
+        df, close_np, fast_ma_np, slow_ma_np, adx_np, adx_threshold,
+        rsi_np, rsi_buy_threshold, rsi_exit_threshold, rsi_pct_change_3.values,
+        lower_band_np, upper_band_np, higher_highs, higher_lows,
+        close_roc_5.values, vix_np, vix_ema_5.values, vix_pct_change_3.values, VIX_HIGH
     )
     
-    # RSI component - MODIFIED: More nuanced approach
-    rsi_strength_threshold = 45
-    above_threshold_condition = rsi_np > rsi_strength_threshold
-    rsi_rising_condition = rsi_pct_change_3.values > 0
-    rsi_score_contribution = 0.25
-    rsi_scaling_range_top = 70
-    rsi_score = np.zeros_like(close_np, dtype=float)
-    
-    # Enhanced RSI score calculation
-    rsi_score = np.where(
-        above_threshold_condition,
-        np.clip((rsi_np - rsi_strength_threshold) / 
-                (rsi_scaling_range_top - rsi_strength_threshold), 0, 1) * rsi_score_contribution,
-        0
+    # Calculate momentum score components
+    momentum_score = _calculate_momentum_score(
+        close_np, fast_ma_np, slow_ma_np, close_roc_5.values,
+        rsi_np, rsi_pct_change_3.values, conditions, atr_ratio_np
     )
     
-    # Additional boost for rising RSI
-    rsi_score = np.where(
-        rsi_rising_condition,
-        rsi_score * 1.15,  # 15% boost for rising RSI
-        rsi_score
-    )
-
-    # Volume component - MODIFIED: More nuanced with relative volume
-    volume_score = conditions['volume_ok'].astype(float) * 0.25
+    # Calculate momentum decay
+    momentum_decay = _detect_momentum_decay(momentum_score)
     
-    # NEW: Enhanced price action scoring
-    price_action_score = np.zeros_like(close_np, dtype=float)
-    price_action_score += conditions['price_momentum_strong'].astype(float) * 0.15
-    price_action_score += conditions['close_uptrend'].astype(float) * 0.10
+    # Generate buy and exit signals
+    primary_entry_conditions, secondary_entry_conditions = _calculate_entry_conditions(conditions)
     
-    # Combined scores with improved weighting
-    momentum_score = trend_score + rsi_score + volume_score + price_action_score
-
-    # MODIFIED: More balanced volatility adjustment
-    # Reduce the impact of volatility on the momentum score
-    atr_impact_factor = 0.7  # Reduced from 1.0
-    momentum_score *= (1 + np.log1p(atr_ratio_np) * atr_impact_factor)
-    momentum_score = np.clip(momentum_score, 0, 1)
-
-    # 4. Calculate Momentum Decay - IMPROVED: More flexible detection
-    momentum_decay = np.zeros_like(close_np, dtype=bool)
-    buy_signal = np.zeros_like(close_np, dtype=bool)
-    exit_signal = np.zeros_like(close_np, dtype=bool)
-    immediate_exit = np.zeros_like(close_np, dtype=bool)
-    
-    # MODIFIED: More flexible decay detection
-    decay_window = 8  # Reduced from 10
-    decay_threshold = 0.7  # NEW: How many days must show decay
-    
-    for i in range(decay_window, len(momentum_score)):
-        # Count how many days in the window show declining momentum
-        declining_days = sum(momentum_score[i-j] < momentum_score[i-j-1] for j in range(1, decay_window))
-        # If more than decay_threshold of days show decline, mark as decay
-        if declining_days >= int(decay_window * decay_threshold):
-            momentum_decay[i] = True
-
-    # 5. Generate Buy and Exit Signals - IMPROVED: Weighted approach
-    
-    # NEW: Calculate entry condition score instead of strict AND requirements
-    primary_entry_conditions = np.zeros_like(close_np, dtype=float)
-    secondary_entry_conditions = np.zeros_like(close_np, dtype=float)
-    
-    # Primary conditions (must-have)
-    primary_entry_conditions += conditions['trend_strength_ok'].astype(float) * 0.4
-    primary_entry_conditions += conditions['primary_trend_long'].astype(float) * 0.3
-    primary_entry_conditions += conditions['weekly_uptrend'].astype(float) * 0.3
-    
-    # Secondary conditions (nice-to-have)
-    secondary_entry_conditions += conditions['rsi_buy_zone'].astype(float) * 0.3
-    secondary_entry_conditions += conditions['price_momentum_strong'].astype(float) * 0.4
-    secondary_entry_conditions += conditions['volume_ok'].astype(float) * 0.3
-    
-    # Combined weighted entry score
     entry_score = (primary_entry_conditions * ENTRY_WEIGHT_PRIMARY) + (
         secondary_entry_conditions * ENTRY_WEIGHT_SECONDARY)
     
-    # Buy signal: Score-based approach instead of strict conditions
     buy_signal = (
-        (entry_score >= 0.6) &  # At least 60% of our conditions met
-        ~momentum_decay &       # Still no decay
-        (momentum_score > buy_threshold) &  # Keep optimized threshold
-        conditions['vix_ok_for_entry']      # VIX condition maintained
+        (entry_score >= 0.6) &
+        ~momentum_decay &
+        (momentum_score > buy_threshold) &
+        conditions['vix_ok_for_entry']
     )
     
-    # Exit signal: Keep mostly the same with optimized parameters
     exit_signal = (
-        momentum_decay | 
-        conditions['rsi_exit_zone'] |
-        (~conditions['primary_trend_long'] & (momentum_score < exit_threshold)) |
-        conditions['vix_forced_exit'] |
-        conditions['bb_exit']
+        momentum_decay | conditions['vix_forced_exit'] | conditions['rsi_exit_zone'] | 
+         ~conditions['primary_trend_long'] & (momentum_score < exit_threshold) | conditions['bb_exit'] 
     )
-
-    # Immediate exit: Keep as is - these are critical risk management signals
-    immediate_exit = conditions['rsi_extreme_exit'] | (adx_np < adx_threshold/3) | (vix_np > 40)
     
-    # NEW: Add signal strength indicators
-    signal_strength = np.zeros_like(close_np, dtype=float)
+    immediate_exit = conditions['rsi_extreme_exit'] | (adx_np < adx_threshold/3.5) | (vix_np > 30)
+    
+    # Calculate signal strength
     signal_strength = np.where(
         buy_signal,
-        entry_score * momentum_score,  # Higher score = stronger entry signal
+        entry_score * momentum_score,
         0
     )
+    normalized_signal_strength = np.where(
+        signal_strength > 0,
+        0.5 + np.clip(signal_strength, 0, 1),
+        0
+        )
     
-    # Assign calculated signals to the DataFrame
+    # Assign all signals to the DataFrame
     signals_df['momentum_score'] = momentum_score
     signals_df['momentum_decay'] = momentum_decay
     signals_df['market_regime'] = market_regime_series
     signals_df['buy_signal'] = buy_signal
     signals_df['exit_signal'] = exit_signal
     signals_df['immediate_exit'] = immediate_exit
-    signals_df['signal_changed'] = False
-    signals_df['entry_score'] = entry_score  # NEW: Added for transparency
-    signals_df['signal_strength'] = signal_strength  # NEW: Signal conviction level
+    signals_df['signal_strength'] = normalized_signal_strength
 
     return signals_df
-#================== MOMENTUM STRATEGY =========================================================================================================================
+# --------------------------------------------------------------------------------------------------------------------------
+def process_signals(signals_df, i, previous_day_atr, previous_day_adx, previous_day_vix, persistence_days):
+    """Extract signal processing logic to a separate function"""
+    current_date = signals_df.index[i]
+    buy_signal = signals_df['buy_signal'].iloc[i-1]
+    exit_signal = signals_df['exit_signal'].iloc[i-1]
+    immediate_exit = signals_df['immediate_exit'].iloc[i-1]
+    momentum_score = signals_df['momentum_score'].iloc[i-1]
+    momentum_decay = signals_df['momentum_decay'].iloc[i-1]
+    market_regime = signals_df['market_regime'].iloc[i-1]
+    momentum_strength = signals_df['signal_strength'].iloc[i-1]
+    
+    # Check for momentum persistence
+    momentum_persistence = False
+    if i >= persistence_days:
+        momentum_persistence = all(signals_df['momentum_score'].iloc[i-persistence_days:i] > 0.5)
+    
+    return {
+        'current_date': current_date,
+        'buy_signal': buy_signal,
+        'exit_signal': exit_signal,
+        'immediate_exit': immediate_exit,
+        'momentum_score': momentum_score,
+        'momentum_decay': momentum_decay,
+        'previous_day_atr': previous_day_atr,
+        'previous_day_adx': previous_day_adx,
+        'previous_day_vix': previous_day_vix,
+        'momentum_persistence': momentum_persistence,
+        'market_regime': market_regime,
+        'momentum_strength': momentum_strength
+    }
+# --------------------------------------------------------------------------------------------------------------------------
 def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, position_size=DEFAULT_POSITION_SIZE, risk_free_rate=RISK_FREE_RATE_ANNUAL, 
              max_positions=MAX_OPEN_POSITIONS, adx_threshold=ADX_THRESHOLD_DEFAULT, persistence_days=PERSISTENCE_DAYS, max_position_duration=MAX_POSITION_DURATION, threshold=THRESHOLD):
 
@@ -542,127 +586,113 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
 
     # 2. Initialize Trade Managers and Tracking
     trade_manager = TradeManager(INITIAL_CAPITAL, max_positions)
-
-    # Use the index from df_with_indicators
     equity_curve = pd.Series(INITIAL_CAPITAL, index=df_with_indicators.index)
     returns_series = pd.Series(0.0, index=df_with_indicators.index)
 
+    # Pre-allocate numpy arrays for critical data for faster access
+    prices = df_with_indicators['Open'].values
+    atrs = df_with_indicators['ATR'].values
+    adxs = df_with_indicators['ADX'].values
+    vixs = df_with_indicators['VIX'].values if 'VIX' in df_with_indicators.columns else np.zeros(len(df_with_indicators))
+
     # 3. Main Processing Loop
     for i in range(1, len(df_with_indicators)):
+        # Get transaction price for this step
+        transaction_price = prices[i]
         current_date = df_with_indicators.index[i]
-        transaction_price = df_with_indicators['Open'].iloc[i]
 
-        # Critical data checks for the current row
-        previous_day_data_row = df_with_indicators.iloc[i-1]
-        previous_day_atr = previous_day_data_row['ATR']
-        previous_day_adx = previous_day_data_row['ADX']
-        previous_day_vix = previous_day_data_row['VIX']
-    
-
-        # Get signals for the previous day
-        buy_signal = signals_df['buy_signal'].iloc[i-1]
-        exit_signal = signals_df['exit_signal'].iloc[i-1]
-        immediate_exit = signals_df['immediate_exit'].iloc[i-1]
-        momentum_score = signals_df['momentum_score'].iloc[i-1]
-        momentum_decay = signals_df['momentum_decay'].iloc[i-1]
-        previous_day_market_regime = signals_df['market_regime'].iloc[i-1]
-
-
-        # Check for momentum persistence
-        momentum_persistence = False
-        if i >= persistence_days:
-            momentum_persistence = all(signals_df['momentum_score'].iloc[i-persistence_days:i] > 0.6)
+        # Process signals for this step
+        signal_data = process_signals(signals_df, i, atrs[i-1], adxs[i-1], vixs[i-1], persistence_days)
 
         # --- Exit Conditions (Priority Order) ---
         if trade_manager.position_count > 0:
-            # 1. Check trailing stop first (highest priority)
-            any_trailing_stop_hit = trade_manager.trailing_stops(transaction_price, current_date, previous_day_atr, 
-                                                                 previous_day_adx, previous_day_market_regime)
+            # 1. Check trailing stop first
+            any_trailing_stop_hit = trade_manager.trailing_stops(
+                transaction_price, 
+                current_date, 
+                signal_data['previous_day_atr'],
+                signal_data['previous_day_adx'], 
+                signal_data['market_regime']
+            )
+            
             if not any_trailing_stop_hit:
-                # Check for immediate exit signal
-                if immediate_exit:
-                    trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.0, reason_override="Immediate Exit")
-                # Normal exit with tiered approach
-                elif exit_signal:
-                    # Determine if we should exit partially or fully
-                    if momentum_score < threshold.get('Exit', 0.4): # For this run, threshold.get('Exit', 0.4) is 0.38
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.05) # Existing small trim
-                    else: # This means exit_signal is TRUE, and momentum_score >= 0.38
-                        # Previously: pass
-                        # Now: A very small trim to acknowledge the exit_signal.
-                        trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.02)
+                # 2. Check for immediate exit signal
+                if signal_data['immediate_exit']:
+                    trade_manager.process_exits(current_date, transaction_price, 
+                                               direction_to_exit='Long', Trim=0.0, 
+                                               reason_override="Immediate Exit")
+                # 3. Normal exit with tiered approach
+                elif signal_data['exit_signal']:
+                    trim_amount = 0.05 if signal_data['momentum_score'] < threshold.get('Exit', 0.4) else 0.02
+                    trade_manager.process_exits(current_date, transaction_price, 
+                                               direction_to_exit='Long', Trim=trim_amount)
                 
-                #elif momentum_persistence and trade_manager.position_count > 0:
-                    # Take partial profits if we had strong momentum for a while
-                    #unrealized_pnls = trade_manager.unrealized_pnl(transaction_price)
-                    #portfolio_value = trade_manager.portfolio_value + unrealized_pnls
-                    #if unrealized_pnls > (portfolio_value * 0.05):
-                        #trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.03)
+                # 4. Take partial profits if we had strong momentum for a while
+                elif signal_data['momentum_persistence'] and trade_manager.position_count > 0:
+                    unrealized_pnls = trade_manager.unrealized_pnl(transaction_price)
+                    portfolio_value = trade_manager.portfolio_value + unrealized_pnls
+                    if unrealized_pnls > (portfolio_value * 0.03):
+                        trade_manager.process_exits(current_date, transaction_price, 
+                                                  direction_to_exit='Long', Trim=0.03)
 
-            # Check position health
-            position_health = trade_manager.position_health(transaction_price, previous_day_atr, current_date, momentum_score)
-
-            # 2. Check trend validity  
+            # 5. Check position health and apply exits based on health
             if trade_manager.position_count > 0 and not any_trailing_stop_hit:
-                # Check if we have position with substantial profits
-                if position_health['profit_factor'] > 3.0:
-                    trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.03)
-                    # Scale exit size based on momentum score
-                    #if position_health['strength'] in ['weak', 'very_weak']:
-                        # Exit full position if momentum is weak
-                        #trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.10)
-                    #elif position_health['strength'] == 'moderate':
-                        # Partial exit (50%) if momentum is moderate
-                        #trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.07)
-                    #elif position_health['strength'] in ['strong', 'very_strong'] and position_health['profit_factor'] > 3.0:
-                        # Take some profits even with strong momentum
-                        #trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.03)
+                position_health = trade_manager.position_health(
+                    transaction_price, 
+                    signal_data['previous_day_atr'],
+                    current_date, 
+                    signal_data['momentum_score'], 
+                    max_position_duration
+                )
                 
-                # Check for position that have reached their time limit
-                for trade_df_index, duration in position_health['position_duration'].items(): # trade_df_index is now the correct DataFrame index
-                    if duration > max_position_duration:
-                        # Reduce exposure for time-based risk management
-                        if trade_df_index in trade_manager.active_trades.index:  # Ensure position still exists
-                            # Exit partially for old positions regardless of performance
-                            trade_manager.process_exits(current_date, transaction_price, direction_to_exit='Long', Trim=0.0, reason_override="Max Duration")
+                # Access the PnL from health-based exits
+                health_based_pnl = position_health.get('health_pnl', 0.0)
 
         # --- Entry Conditions ---
-        if buy_signal and trade_manager.position_count < max_positions:
-            # Only enter if not in decay and ADX shows sufficient trend strength
-            if not momentum_decay and previous_day_adx > adx_threshold:
-                entry_params = {'price': transaction_price*(1 + 0.001),
-                                'portfolio_value': trade_manager.portfolio_value,
-                                'risk': long_risk, 'reward': long_reward,
-                                'atr': previous_day_atr,
-                                'adx': previous_day_adx,
-                                'position_size': position_size,
-                                'vix': previous_day_vix
-                            }
-                trade_manager.process_entry(current_date, entry_params, direction='Long')
+        if (signal_data['buy_signal'] and trade_manager.position_count < max_positions and 
+            not signal_data['momentum_decay'] and signal_data['previous_day_adx'] > adx_threshold):
+            
+            entry_params = {
+                'price': transaction_price * (1 + 0.001),
+                'portfolio_value': trade_manager.portfolio_value,
+                'risk': long_risk, 
+                'reward': long_reward,
+                'atr': signal_data['previous_day_atr'],
+                'adx': signal_data['previous_day_adx'],
+                'position_size': position_size,
+                'vix': signal_data['previous_day_vix'],
+                'momentum_strength': signal_data['momentum_strength'],
+            }
+            trade_manager.process_entry(current_date, entry_params, direction='Long')
         
         # Performance Tracking
         total_value = trade_manager.portfolio_value + trade_manager.unrealized_pnl(transaction_price)
-        equity_curve.iloc[i] = max(total_value, 1e-9) # Ensure positive for log
+        equity_curve.iloc[i] = max(total_value, 1e-9)  # Ensure positive for log
 
         # Calculate periodic log returns
-        prev_equity_val = equity_curve.iloc[i-1] # Already max( , 1e-9) from previous iteration or init
-        current_equity_val = equity_curve.iloc[i] 
-        
-        # Both prev_equity_val and current_equity_val are guaranteed > 0 due to max( , 1e-9)
+        prev_equity_val = equity_curve.iloc[i-1]
+        current_equity_val = equity_curve.iloc[i]
         returns_series.iloc[i] = np.log(current_equity_val / prev_equity_val)
 
-
-    final_unrealized_pnl = trade_manager.unrealized_pnl(df_with_indicators['Close'].iloc[-1] if not df_with_indicators.empty else INITIAL_CAPITAL)
+    # Final portfolio value calculation
+    final_close = df_with_indicators['Close'].iloc[-1] if not df_with_indicators.empty else INITIAL_CAPITAL
+    final_unrealized_pnl = trade_manager.unrealized_pnl(final_close)
     final_equity_value = equity_curve.iloc[-1] if not equity_curve.empty else INITIAL_CAPITAL
+    
+    # Calculate statistics
     final_stats = {
         'Equity Final': final_equity_value,
         'Open Position Value': final_unrealized_pnl,
-        'Total Portfolio Value': final_equity_value + final_unrealized_pnl # Recalculate based on final equity
+        'Total Portfolio Value': final_equity_value + final_unrealized_pnl
     }
     
-    # Update stats dictionary with the additional values
-    stats_dict = trade_statistics(equity_curve, trade_manager.trade_log, trade_manager.wins, 
-                           trade_manager.losses, risk_free_rate) # risk_free_rate is annual
+    stats_dict = trade_statistics(
+        equity_curve, 
+        trade_manager.trade_log, 
+        trade_manager.wins, 
+        trade_manager.losses, 
+        risk_free_rate
+    )
     stats_dict.update(final_stats)
 
     return trade_manager.trade_log, stats_dict, equity_curve, returns_series
@@ -706,10 +736,25 @@ class TradeManager:
         
         return pnl_values.sum()
     # ----------------------------------------------------------------------------------------------------------
-    def position_health(self, current_price, current_atr, current_date, current_score):
+    def position_health(self, current_price, current_atr, current_date, current_score, max_position_duration):
+        """
+        Assess position health and take appropriate exit actions based on analysis.
+        Returns a combined dictionary with health metrics and total PnL from any health-based exits.
+        """
+        # Initialize return value
+        total_pnl = 0.0
+        
         if self.active_trades.empty:
-            # Ensure 'strength' key is present for consistency with usage in momentum()
-            return {'profit_factor': 0.0, 'strength': 'none', 'position_duration': {}, 'take_profit_levels': {}}
+            # Return empty health metrics if no positions
+            return {
+                'profit_factor': 0.0, 
+                'strength': 'none', 
+                'position_duration': {}, 
+                'take_profit_levels': {},
+                'health_pnl': total_pnl
+            }
+            
+        # Cast inputs to proper types
         current_price = np.float32(current_price)
         current_atr = np.float32(current_atr)
         current_score = np.float32(current_score)
@@ -732,7 +777,17 @@ class TradeManager:
 
                 if isinstance(trade['entry_date'], pd.Timestamp):
                     # Store duration keyed by the DataFrame index 'idx'
-                    position_durations[idx] = (current_date - trade['entry_date']).days
+                    duration = (current_date - trade['entry_date']).days
+                    position_durations[idx] = duration
+                    
+                    # Check for positions that have reached their time limit
+                    # Integrated from process_position_health
+                    if 'max_position_duration' in locals() and duration > max_position_duration:
+                        # Ensure position still exists (it should, we're iterating over active trades)
+                        if idx in self.active_trades.index:
+                            pnl = self.process_exits(current_date, current_price, direction_to_exit='Long', 
+                                                Trim=0.0, reason_override="Max Duration")
+                            total_pnl += pnl
                 else:
                     position_durations[idx] = np.nan # Handle potential non-Timestamp entry_date
 
@@ -765,114 +820,94 @@ class TradeManager:
             strength_label = 'weak'
         else:
             strength_label = 'very_weak'
+        
+        # --- Integrated position health processing ---
+        # Previously separate function now integrated here
+        if profit_factor_overall > 1.5:
+            if strength_label in ['weak', 'very_weak']:
+                # Exit full position if momentum is weak
+                total_pnl += self.process_exits(current_date, current_price, direction_to_exit='Long', Trim=0.10, reason_override="Positional Take Profit")
+            elif strength_label == 'moderate':
+                # Partial exit (50%) if momentum is moderate
+                total_pnl += self.process_exits(current_date, current_price, direction_to_exit='Long', Trim=0.07, reason_override="Positional Take Profit")
+            elif strength_label in ['strong', 'very_strong'] and profit_factor_overall > 3.0:
+                # Take some profits even with strong momentum
+                total_pnl += self.process_exits(current_date, current_price, direction_to_exit='Long', Trim=0.03, reason_override="Positional Take Profit")
             
         return {
             'profit_factor': profit_factor_overall,
-            'strength': strength_label, # Consistent key 'strength'
-            'position_duration': position_durations, # Now correctly keyed by DataFrame index
-            'take_profit_levels': take_profit_levels # Now correctly keyed by DataFrame index
+            'strength': strength_label, 
+            'position_duration': position_durations, 
+            'take_profit_levels': take_profit_levels,
+            'health_pnl': total_pnl  # Include PnL from health-based exits
         }
     # ----------------------------------------------------------------------------------------------------------
-    def trailing_stops(self, current_price, current_date, current_atr, adx_value, market_regime="normal"): # Added market_regime
+    def trailing_stops(self, current_price, current_date, current_atr, adx_value, market_regime="normal"):
+        """
+        Simplified trailing stop implementation using vectorized operations.
+        """
         if self.active_trades.empty:
             return False
 
-        current_price_f32 = np.float32(current_price) * (1 - 0.001) # Apply a small slippage/spread
-        current_atr_f32 = np.float32(current_atr)
-
-        # --- Parameters for new features (can be optimized or passed as arguments later) ---
-        # 1. Increase base_atr_multiplier for wider stops
-        base_atr_multiplier = 4.0  # Example: Increased from 3.5 to 4.0
-
-        # 2. Time-Decay Parameters
-        enable_time_decay = True
-        time_decay_start_day = 20    # Start tightening after 5 days
-        time_decay_max_days = 7    # Max duration over which decay occurs
-        time_decay_min_factor = 0.8 # Stop can tighten up to 60% of its ATR component (e.g., 1.0 -> 0.6)
-
-        # 3. Market Regime Parameters
-        enable_regime_filter = True
-        regime_vol_factors = {
-            "low_vol": 0.85,  # Tighter stop in low volatility
-            "normal": 1.0,
-            "high_vol": 1.15  # Wider stop in high volatility
-        }
-
-        # --- Apply Market Regime Adjustment ---
-        effective_base_atr_multiplier = base_atr_multiplier
-        if enable_regime_filter:
-            regime_factor = regime_vol_factors.get(market_regime, 1.0)
-            effective_base_atr_multiplier *= regime_factor
-
-        # ADX component for dynamic ATR multiplier (as in your existing code)
-        adx_component = np.clip(adx_value / 50, 0, 0.5) 
+        # Vectorized operations for performance
+        current_price_arr = np.float32(current_price)
+        current_atr_arr = np.float32(current_atr)
         
-        # Vectorized update of highest prices for all active trades (remains efficient)
+        # Update highest prices since entry
         self.active_trades['highest_close_since_entry'] = np.maximum(
             self.active_trades['highest_close_since_entry'],
-            current_price_f32
+            current_price_arr
         )
         
-        # Prepare a Series to store newly calculated stop-loss levels for each trade
-        new_calculated_stops = pd.Series(index=self.active_trades.index, dtype=float)
-
-        for idx, trade in self.active_trades.iterrows():
-            # --- Calculate Time-Decay Factor for the current trade ---
-            current_time_decay_factor = 1.0
-            if enable_time_decay:
-                trade_duration_days = (current_date - trade['entry_date']).days
-                if trade_duration_days > time_decay_start_day:
-                    # Calculate how far into the decay period the trade is
-                    decay_period_duration = max(1, time_decay_max_days - time_decay_start_day)
-                    days_into_decay = max(0, trade_duration_days - time_decay_start_day)
-                    decay_progress = min(1.0, days_into_decay / decay_period_duration)
-                    
-                    # Apply decay: factor goes from 1.0 down to time_decay_min_factor
-                    current_time_decay_factor = 1.0 - (decay_progress * (1.0 - time_decay_min_factor))
-                    current_time_decay_factor = max(current_time_decay_factor, time_decay_min_factor) # Ensure it doesn't go below min
-
-            # Combine base (regime-adjusted), ADX, and time decay for this trade's ATR multiplier
-            final_atr_multiplier_for_trade = (effective_base_atr_multiplier + adx_component) * current_time_decay_factor
-            
-            # Calculate new stop-loss for this specific trade
-            highest_close_for_trade = trade['highest_close_since_entry'] # Use the updated highest close
-            new_stop_for_trade = highest_close_for_trade - (final_atr_multiplier_for_trade * current_atr_f32)
-            new_calculated_stops.loc[idx] = new_stop_for_trade
+        # Calculate dynamic multipliers
+        adx_normalized = (adx_value - 25) / 50  # 0 at ADX=25, 0.5 at ADX=50
+        base_multiplier = 2.0 + adx_normalized
         
-        # Update stop-loss for all trades: only if the new calculated stop is higher than the current one
+        # Calculate profit factor based on percentage gain from entry
+        profit_pct = ((self.active_trades['highest_close_since_entry'] - self.active_trades['entry_price']) / 
+                            self.active_trades['entry_price']) 
+        profit_factor = 1 + np.clip(profit_pct * 3, 0, 1)  
+        
+        # Final multiplier combines trend strength and profit
+        final_multiplier = base_multiplier * profit_factor
+        
+        # Calculate new stops
+        new_stops = (self.active_trades['highest_close_since_entry'] - 
+                    (final_multiplier * current_atr_arr))
+        
+        # Never move stops backward
+        in_profit = profit_pct > 0.03
+        new_stops = np.where(in_profit, 
+                        np.maximum(new_stops, self.active_trades['entry_price'] * 1.01),
+                        new_stops)
+
         self.active_trades['stop_loss'] = np.maximum(
-            self.active_trades['stop_loss'], # Current stop-loss
-            new_calculated_stops            # Newly calculated potential stop-loss
+            self.active_trades['stop_loss'],
+            new_stops
         )
         
-        # Check if current price hits the (potentially updated) stop-loss
-        stops_hit_flags = current_price_f32 <= self.active_trades['stop_loss']
+        # Check for exits
+        stops_hit = current_price_arr <= self.active_trades['stop_loss'].values
+        
+        if np.any(stops_hit):
+            hit_indices = np.where(stops_hit)[0]
+            total_pnl = 0.0
 
-        # Process Exits for Hit Stops (your existing logic for this part is fine)
-        if stops_hit_flags.any():
-            indices_to_remove = []
-            trades_that_hit_stop = self.active_trades[stops_hit_flags]
+            for idx in hit_indices:
+                if idx < len(self.active_trades):
+                    trade_idx = self.active_trades.index[idx]
+                    trade = self.active_trades.loc[trade_idx]
 
-            for idx, trade in trades_that_hit_stop.iterrows():
-                # Ensure exit_price for trailing stop is the stop_loss level it hit, or current_price if lower
-                # This is a common convention, though exiting at current_price (as you do) is also valid.
-                # For simplicity, sticking to your current_price_f32 for exit.
-                pnl = self.exit_pnl(trade, current_date, current_price_f32, 
-                                trade['remaining_shares'], 'Trailing Stop')
-                self.portfolio_value += pnl
-                # self.allocated_capital -= (trade['entry_price'] * trade['remaining_shares']) # Original cost
-                # Correctly, it should be the value at exit if you are tracking allocated capital precisely
-                # However, your current code uses current_price_f32 for this, which is also a way to do it.
-                # For consistency with your existing code:
-                self.allocated_capital -= (current_price_f32 * trade['remaining_shares']) 
-                self.position_count -= 1
-                indices_to_remove.append(idx)
-            
-            if indices_to_remove:
-                self.active_trades = self.active_trades.drop(index=indices_to_remove).reset_index(drop=True)
-            return True # Indicates one or more trailing stops were hit and processed
-
-        return False # No trailing stops were hit
+                    pnl = self.process_exits(
+                    current_date, 
+                    current_price, 
+                    direction_to_exit='Long', 
+                    Trim=0.0,  # Full exit
+                    reason_override='Trailing Stop'
+                    )
+                    total_pnl += pnl
+            return True
+        return False
     # ----------------------------------------------------------------------------------------------------------
     def process_exits(self, current_date, current_price, direction_to_exit, Trim=0.0, reason_override=None): 
 
@@ -978,17 +1013,24 @@ class TradeManager:
         return total_pnl
     # ----------------------------------------------------------------------------------------------------------
     def process_entry(self, current_date, entry_params, direction=None):
-        VIX_LOW = 12   
-        VIX_HIGH = 25
         is_long = direction == 'Long'
         direction_mult = 1 if is_long else -1
-        
+        momentum_strength = entry_params.get('momentum_strength', 1.0)
+
         # 1. Calculate Initial Stop (ATR + ADX adjusted)
-        atr_multiplier = np.clip(1.0 + (entry_params['adx'] / 50), 1.0, 3.0)
-        risk_based_stop = entry_params['price'] * entry_params['risk']
-        atr_based_stop = entry_params['atr'] * atr_multiplier
-        stop_distance = max(atr_based_stop, risk_based_stop)
-        initial_stop = entry_params['price'] - (stop_distance * direction_mult)
+        risk_pct = entry_params['risk'] 
+        adx_adjustment = 1 + (entry_params['adx'] - 25)/100
+        volatility_adjustment = entry_params['atr']/entry_params['price'] * 3
+        final_risk = risk_pct * adx_adjustment * volatility_adjustment
+        price_based_stop = entry_params['price'] * (1 - min(0.08, final_risk))
+        
+        adx_factor = 1.0 + (entry_params['adx'] - 25) / 50
+        multiplier = 2.5 * adx_factor * momentum_strength
+        stop_distance = entry_params['atr'] * multiplier
+        atr_based_stop = entry_params['price'] - (stop_distance)
+        
+        # Use the tighter of the two stops for better protection
+        initial_stop = atr_based_stop
         
         # 2. Position Sizing Based on Risk
         risk_per_share = abs(entry_params['price'] - initial_stop)
@@ -1000,22 +1042,9 @@ class TradeManager:
         
         # Calculate VIX scaling factor
         current_vix = entry_params.get('vix', 20.0) # Default to a neutral VIX if not provided
-        vix_scaling_factor = 1.0
+        vix_scaling_factor = np.clip(1.0 + (current_vix - 20) / 30, 0.8, 1.5)
 
-        if VIX_HIGH > VIX_LOW: # Ensure VIX_HIGH is greater than VIX_LOW to avoid division by zero or negative scaling
-            if current_vix < VIX_LOW:
-                vix_scaling_factor = 1.0  # Full size in low-vol
-            elif current_vix > VIX_HIGH:
-                vix_scaling_factor = 0.2 # Minimum size in high-vol
-            else: # VIX is between VIX_LOW and VIX_HIGH
-                vix_scaling_factor = np.clip(1.0 - (current_vix - VIX_LOW) / (VIX_HIGH - VIX_LOW), 0.2, 1.0)
-        else: # If VIX_HIGH <= VIX_LOW, default to full size or handle as an error/warning
-            print(f"Warning: VIX_HIGH ({VIX_HIGH}) is not greater than VIX_LOW ({VIX_LOW}). Defaulting VIX scaling factor to 1.0.")
-            vix_scaling_factor = 1.0
-        
-        # Apply VIX scaling to the base position size percentage from entry_params
-        # entry_params['position_size'] is the max % of portfolio for one position (e.g. 0.08 from your summary)
-        effective_position_size_pct = entry_params['position_size'] * vix_scaling_factor
+        effective_position_size_pct = entry_params['position_size'] * vix_scaling_factor * momentum_strength
         
         max_position_value_allowed = entry_params['portfolio_value'] * effective_position_size_pct
         shares_by_size_cap = int(max_position_value_allowed / entry_params['price'])
@@ -1074,13 +1103,15 @@ class TradeManager:
         
     
         # 4. Calculate Take-Profit Using Risk/Reward Ratio
-        if 'reward' in entry_params:
-            # Reward distance = (risk_per_share) * (reward/risk ratio)
-            # Example: If risk=0.01 (1%) and reward=0.03 (3%), reward_distance = risk_per_share * 3
-            reward_distance = risk_per_share * (entry_params['reward'] / entry_params['risk'])
-            take_profit = entry_params['price'] + (reward_distance * direction_mult)
-        else:
-            take_profit = None
+        reward = entry_params['reward'] 
+        adx_boost = (entry_params['adx']/40)
+        volatility_boost = (entry_params['atr']/entry_params['price']) * 4
+        reward_profit = entry_params['price'] * (1 + reward + adx_boost + volatility_boost)
+        base_profit = 3 * entry_params['atr']  # 3x ATR as initial target
+        adx_boost = 1 + (entry_params['adx'] / 100)  # Up to 2x for strong trends
+        atr_profit = entry_params['price'] + base_profit * adx_boost
+
+        take_profit = atr_profit
 
         self.position_count += 1
 
@@ -1343,31 +1374,75 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
         'Exit Reason Counts': exit_reason_counts
     }
 #================== OPTIMIZING STRATEGY =======================================================================================================================
-def parameter_test(df, long_risk, long_reward, position_size, tech_params, trial=None):
+def objectives(trial, base_df):
+    """Objective function for Optuna optimization that directly tests parameters"""
+    # Define bad metrics template
     bad_metrics_template = []
-    for metric_name in OPTIMIZATION_DIRECTIONS:
+    for metric_name in OPTIMIZATION_DIRECTIONS: # Ensure order matches OPTIMIZATION_DIRECTIONS
         if OPTIMIZATION_DIRECTIONS[metric_name] == 'maximize':
             bad_metrics_template.append(-np.inf)
         else: # minimize
             bad_metrics_template.append(np.inf)
+
+    # Define parameter ranges for optimization
+    params = {
+        # Basic parameters
+        'long_risk': trial.suggest_float('long_risk', 0.02, 0.10, step=0.01),
+        'long_reward': trial.suggest_float('long_reward', 0.04, 0.15, step=0.01),
+        'position_size': trial.suggest_float('position_size', 0.05, 0.20, step=0.01),
+
+        # Technical parameters
+        'max_open_positions': trial.suggest_int('max_open_positions', 2, 30),
+        'adx_threshold': trial.suggest_float('adx_threshold', 20.0, 35.0, step=1.0),
+        'persistence_days': trial.suggest_int('persistence_days', 3,10),
+        'max_position_duration': trial.suggest_int('max_position_duration', 5, 30),
+
+        # Thresholds
+        'entry': trial.suggest_float('entry', 0.5, 0.7, step=0.01),
+        'exit': trial.suggest_float('exit', 0.3, 0.5, step=0.01),
+        'rsi_buy': trial.suggest_float('rsi_buy', 45, 55, step=1),
+        'rsi_exit': trial.suggest_float('rsi_exit', 75, 90, step=1),
+    }
+
+    # Prune trials based on risk/reward ratio
+    if params['long_reward'] < params['long_risk']:
+        return bad_metrics_template
+    
+    if (params['long_reward'] / params['long_risk']) < 2.0 or (
+        params['long_reward'] / params['long_risk']) > 4.0:
+        return bad_metrics_template
+
+    # Set up signal weights and threshold dict
+    threshold = THRESHOLD.copy()
+    threshold['Entry'] = params['entry']
+    threshold['Exit'] = params['exit']
+    threshold['RSI_BUY'] = params['rsi_buy']
+    threshold['RSI_EXIT'] = params['rsi_exit']
+
+    # Set up technical parameters for momentum function
+    tech_params = { 
+        'MAX_OPEN_POSITIONS': params['max_open_positions'],
+        'ADX_THRESHOLD': params['adx_threshold'],
+        'PERSISTENCE_DAYS': params['persistence_days'],
+        'MAX_POSITION_DURATION': params['max_position_duration'],
+        'THRESHOLD': threshold,
+    }
     
     # For debugging  
-    if trial:
-        trial_num = trial.number
-    else:
-        trial_num = "Unknown"
+    trial_num = trial.number
         
     try:
+        # Direct evaluation
         trade_log, stats, equity_curve, returns_series = momentum(
-            df,
-            long_risk=long_risk,
-            long_reward=long_reward,
-            position_size=position_size,
-            max_positions=tech_params.get('MAX_OPEN_POSITIONS', MAX_OPEN_POSITIONS),
-            adx_threshold=tech_params.get('ADX_THRESHOLD', ADX_THRESHOLD_DEFAULT),
-            persistence_days=tech_params.get('PERSISTENCE_DAYS', PERSISTENCE_DAYS),
-            max_position_duration=tech_params.get('MAX_POSITION_DURATION', MAX_POSITION_DURATION),
-            threshold=tech_params.get('THRESHOLD', THRESHOLD),
+            base_df,
+            long_risk=params['long_risk'],
+            long_reward=params['long_reward'],
+            position_size=params['position_size'],
+            max_positions=tech_params['MAX_OPEN_POSITIONS'],
+            adx_threshold=tech_params['ADX_THRESHOLD'],
+            persistence_days=tech_params['PERSISTENCE_DAYS'],
+            max_position_duration=tech_params['MAX_POSITION_DURATION'],
+            threshold=tech_params['THRESHOLD'],
         )
         
         # Process metrics
@@ -1379,19 +1454,20 @@ def parameter_test(df, long_risk, long_reward, position_size, tech_params, trial
                 stats['Avg Win/Loss Ratio'],
                 stats['Max Drawdown (%)']
             ]
-            if trial:
-                trial.set_user_attr('sharpe', metrics[0])
-                trial.set_user_attr('profit_factor', metrics[1])
-                trial.set_user_attr('avg_win_loss_ratio', metrics[2])
-                trial.set_user_attr('max_drawdown', metrics[3])
-                trial.set_user_attr('num_trades', len(trade_log))
-                
-                # Store additional performance metrics
-                trial.set_user_attr('avg_trade_duration', 
-                    np.mean([t['Duration'] for t in trade_log if t['Duration'] is not None]) if trade_log else 0)
-                trial.set_user_attr('total_pnl', 
-                    sum(t['PnL'] for t in trade_log if t['PnL'] is not None))
-                
+            
+            # Store additional attributes in trial
+            trial.set_user_attr('sharpe', metrics[0])
+            trial.set_user_attr('profit_factor', metrics[1])
+            trial.set_user_attr('avg_win_loss_ratio', metrics[2])
+            trial.set_user_attr('max_drawdown', metrics[3])
+            trial.set_user_attr('num_trades', len(trade_log))
+            
+            # Store additional performance metrics
+            trial.set_user_attr('avg_trade_duration', 
+                np.mean([t['Duration'] for t in trade_log if t['Duration'] is not None]) if trade_log else 0)
+            trial.set_user_attr('total_pnl', 
+                sum(t['PnL'] for t in trade_log if t['PnL'] is not None))
+            
             return metrics
 
         return bad_metrics_template
@@ -1402,70 +1478,13 @@ def parameter_test(df, long_risk, long_reward, position_size, tech_params, trial
         print(f"Error in parameter evaluation for trial {trial_num}: {e}")
         return bad_metrics_template
 # --------------------------------------------------------------------------------------------------------------------------
-def objectives(trial, base_df):
-    # Define parameter search spaces for both basic and technical parameters
-    bad_metrics_template = []
-    for metric_name in OPTIMIZATION_DIRECTIONS: # Ensure order matches OPTIMIZATION_DIRECTIONS
-        if OPTIMIZATION_DIRECTIONS[metric_name] == 'maximize':
-            bad_metrics_template.append(-np.inf)
-        else: # minimize
-            bad_metrics_template.append(np.inf)
-    params = {
-        # Basic parameters
-        'long_risk': trial.suggest_float('long_risk', 0.01, 0.10, step=0.01),
-        'long_reward': trial.suggest_float('long_reward', 0.02, 0.15, step=0.01),
-        'position_size': trial.suggest_float('position_size', 0.05, 0.20, step=0.01),
-
-        # Technical parameters
-        'max_open_positions': trial.suggest_int('max_open_positions', 5, 50),
-        'adx_threshold': trial.suggest_float('adx_threshold', 20.0, 35.0, step=1.0),
-        'persistence_days': trial.suggest_int('persistence_days', 3,7),
-        'max_position_duration': trial.suggest_int('max_position_duration', 400, 500),
-
-        # Thresholds
-        'entry': trial.suggest_float('entry', 0.5, 0.7, step=0.01),
-        'exit': trial.suggest_float('exit', 0.3, 0.5, step=0.01),
-        'rsi_buy': trial.suggest_float('rsi_buy', 45, 55, step=1),
-        'rsi_exit': trial.suggest_float('rsi_exit', 75, 90, step=1),
-    }
-    if params['long_reward'] < params['long_risk']:
-        return bad_metrics_template
-    
-    if (params['long_reward'] / params['long_risk']) < 2.0 or (params['long_reward'] / params['long_risk']) > 4.0:
-        return bad_metrics_template
-
-    # Set up signal weights
-    threshold = THRESHOLD.copy()
-    threshold['Entry'] = params['entry']
-    threshold['Exit'] = params['exit']
-    threshold['RSI_BUY'] = params['rsi_buy']
-    threshold['RSI_EXIT'] = params['rsi_exit']
-
-    # Set up combined tech params
-    tech_params = { 
-        'MAX_OPEN_POSITIONS': params['max_open_positions'],
-        'ADX_THRESHOLD': params['adx_threshold'],
-        'PERSISTENCE_DAYS': params['persistence_days'],
-        'MAX_POSITION_DURATION': params['max_position_duration'],
-        'THRESHOLD': threshold,
-    }
-    # Evaluate this parameter set
-    return parameter_test(
-        base_df.copy(),
-        params['long_risk'],
-        params['long_reward'],
-        params['position_size'],
-        tech_params,
-        trial
-    )
-# --------------------------------------------------------------------------------------------------------------------------
 def optimize(prepared_data):
-    # Optimizing parameters for Optuna
+    """Optimizing function to find the best parameters for the strategy"""
+    # Define optimization parameters
     target_metrics = list(OPTIMIZATION_DIRECTIONS.keys())
     opt_directions = [OPTIMIZATION_DIRECTIONS[metric] for metric in target_metrics]
     n_trials=TRIALS
-    min_completed_trials=20
-    timeout=3600
+    timeout=1200
 
     data = prepared_data.copy()
     if data.empty:
@@ -1473,8 +1492,7 @@ def optimize(prepared_data):
         return None
     
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    base_pruner=optuna.pruners.HyperbandPruner(
-            min_resource=5, max_resource=n_trials, reduction_factor=3)
+
     # Create Optuna study with pruning
     study = optuna.create_study(
         directions=opt_directions,  # Direction for each metric
@@ -1488,22 +1506,13 @@ def optimize(prepared_data):
     objective_func = partial(objectives, base_df=data)
         
     # Run optimization with progress bar
-    completed_trials=0
     print("\nOptimizing Parameters...")
     try:
         study.optimize(objective_func, n_trials=n_trials, timeout=timeout, 
                 n_jobs=max(1, mp.cpu_count() - 1),
                 show_progress_bar=True)
-        completed_trials = len(study.trials)
     except Exception as e:
         print(f"Optimization error: {e}")
-
-    # Ensure minimum number of trials are completed
-    if completed_trials < min_completed_trials:
-        print(f"Only {completed_trials}/{min_completed_trials} minimum trials completed. Running additional trials...")
-        additional_trials = min_completed_trials - completed_trials
-        study.optimize(objective_func, n_trials=additional_trials,
-                      n_jobs=1, show_progress_bar=True) 
     
     # Get Pareto front solutions
     all_trials = study.trials
@@ -1534,7 +1543,7 @@ def optimize(prepared_data):
     # Extract just the trials for display
     pareto_front = [trial_tuple[0] for trial_tuple in filtered_trials]
     return pareto_front[:10]  # Return top 10 trialscl
-# --------------------------------------------------------------------------------------------------------------------------
+#================== VIEW STRATEGY =======================================================================================================================
 def visualize(pareto_front, base_df):
     while True:
         # Extract trial metrics for display
@@ -1689,15 +1698,45 @@ def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
         exit_reasons_data = []
         total_exits_for_percentage = sum(stats['Exit Reason Counts'].values())
         
+        # Create dictionaries to track PnL and wins by exit reason
+        pnl_by_reason = {}
+        wins_by_reason = {}
+        total_by_reason = {}
+        
+        # Calculate PnL and win counts by exit reason
+        if trade_log:
+            for trade in trade_log:
+                reason = trade.get('Exit Reason', 'Unknown') 
+                pnl = trade.get('PnL', 0.0)
+                is_win = pnl > 0
+                
+                pnl_by_reason[reason] = pnl_by_reason.get(reason, 0.0) + pnl
+                wins_by_reason[reason] = wins_by_reason.get(reason, 0) + (1 if is_win else 0)
+                total_by_reason[reason] = total_by_reason.get(reason, 0) + 1
+        
         # Sort by count for better readability
         sorted_exit_reasons = sorted(stats['Exit Reason Counts'].items(), key=lambda item: item[1], reverse=True)
 
         for reason, count in sorted_exit_reasons:
             percentage = (count / total_exits_for_percentage * 100) if total_exits_for_percentage > 0 else 0
-            exit_reasons_data.append([reason, count, f"{percentage:.2f}%"])
+            pnl = pnl_by_reason.get(reason, 0.0)
+            
+            # Calculate win percentage for this exit reason
+            win_pct = (wins_by_reason.get(reason, 0) / total_by_reason.get(reason, 1)) * 100
+            
+            exit_reasons_data.append([
+                reason, 
+                count, 
+                f"{percentage:.2f}%", 
+                f"${pnl:.2f}",
+                f"{win_pct:.1f}%"
+            ])
         
         if exit_reasons_data:
-            print(tabulate(exit_reasons_data, headers=["Exit Reason", "Count", "Percentage"], tablefmt="simple", colalign=("left", "right", "right")))
+            print(tabulate(exit_reasons_data, 
+                        headers=["Exit Reason", "Count", "Percentage", "Total PnL", "Win %"], 
+                        tablefmt="simple", 
+                        colalign=("left", "right", "right", "right", "right")))
         else:
             print("No exit reason data to display.")
     
@@ -1720,49 +1759,46 @@ def test(df_input, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD,
     return None
 #================== STRATEGY SIGNIFICANCE TESTING ==============================================================================================================
 def stationary_bootstrap(data, block_size = BLOCK_SIZE, num_samples= 1000, sample_length = None, seed = None):
-    if seed is not None:
-        np.random.seed(seed)
-    
     n = len(data)
     if sample_length is None:
         sample_length = n
     
-    # Probability parameter for geometric distribution
+    # Generate all random indices at once
     p = 1.0 / block_size
+    all_random_starts = np.random.randint(0, n, size=(num_samples, sample_length))
+    all_random_continues = np.random.random(size=(num_samples, sample_length)) < p
     
-    # Store bootstrapped samples
+    # Process in batches
     bootstrap_samples = []
+    batch_size = 50  # Process 50 samples at a time to manage memory
     
-    for _ in range(num_samples):
-        # Initialize indices array for this bootstrap sample
-        indices = np.zeros(sample_length, dtype=int)
+    for batch_idx in range(0, num_samples, batch_size):
+        batch_end = min(batch_idx + batch_size, num_samples)
+        batch_samples = []
         
-        # Generate the first index randomly
-        t = np.random.randint(0, n)
-        
-        # Fill the bootstrap indices
-        for i in range(sample_length):
-            indices[i] = t
+        for i in range(batch_idx, batch_end):
+            indices = np.zeros(sample_length, dtype=int)
+            t = all_random_starts[i, 0]
+            indices[0] = t
             
-            # With probability p, start a new block
-            if np.random.random() < p:
-                t = np.random.randint(0, n)
-            else:
-                # Continue the block, handling the case where we reach the end
-                t = (t + 1) % n
+            for j in range(1, sample_length):
+                if all_random_continues[i, j]:
+                    t = all_random_starts[i, j]
+                else:
+                    t = (t + 1) % n
+                indices[j] = t
+            
+            # Create sample more efficiently
+            bootstrap_sample = data.iloc[indices]
+            bootstrap_sample.index = data.index[:len(bootstrap_sample)]
+            batch_samples.append(bootstrap_sample)
         
-        # Create the bootstrapped sample with proper index
-        bootstrap_sample = data.iloc[indices].copy()
+        bootstrap_samples.extend(batch_samples)
         
-        # Reset the index to maintain the same date structure as original
-        # This is important for strategy testing - maintaining continuous time
-        bootstrap_sample.index = data.index[:len(bootstrap_sample)]
-        
-        bootstrap_samples.append(bootstrap_sample)
-    
     return bootstrap_samples
 # --------------------------------------------------------------------------------------------------------------------------  
 def monte_carlo(prepared_data, pareto_front, num_simulations=1000):
+    """Monte Carlo analysis with improved statistical visualization"""
     
     mc_results = []
     total_iterations = len(pareto_front)
@@ -1828,7 +1864,7 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1000):
             if original_key in observed_stats:
                 observed_metrics[internal_key] = observed_stats[original_key]
             else:
-                observed_metrics[internal_key] = np.nan # Or some default bad value
+                observed_metrics[internal_key] = np.nan
 
         # Initialize arrays for simulation metrics using internal keys
         sim_metrics = {internal_key: [] for internal_key in metric_key_map.keys()}
@@ -1841,9 +1877,7 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1000):
                 if original_key in sim_stats_run:
                     sim_metrics[internal_key].append(sim_stats_run[original_key])
                 else:
-                    # This case should ideally not happen
-                    # print(f"Warning: Simulated metric {original_key} not found in sim_stats for param set {param_idx + 1}, sample {sample_idx}.") # Optional: reduce verbosity
-                    sim_metrics[internal_key].append(np.nan) # Append NaN if key is missing
+                    sim_metrics[internal_key].append(np.nan)
         
         # Calculate p-values and simulation statistics
         results = {
@@ -1855,7 +1889,7 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1000):
             'simulation_metrics': {}
         }
         
-        for internal_key in sim_metrics: # internal_key is 'sharpe', 'profit_factor', etc.
+        for internal_key in sim_metrics:
             sim_array_raw = np.array(sim_metrics[internal_key], dtype=float)
             # Filter out NaNs that might have been appended if keys were missing
             sim_array = sim_array_raw[~np.isnan(sim_array_raw)]
@@ -1866,12 +1900,13 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1000):
                 results['p_values'][internal_key] = np.nan
                 results['percentiles'][internal_key] = np.nan
                 results['simulation_metrics'][internal_key] = {
-                    'mean': np.nan, 'std': np.nan, 'skew': np.nan, 'kurtosis': np.nan
+                    'mean': np.nan, 'std': np.nan, 'skew': np.nan, 'kurtosis': np.nan,
+                    'p5': np.nan, 'p95': np.nan  # Adding percentiles
                 }
                 continue
             
             # Calculate p-value (proportion of simulations better than observed)
-            if internal_key in ['sharpe', 'profit_factor', 'avg_win_loss_ratio']: # These are the internal keys
+            if internal_key in ['sharpe', 'profit_factor', 'avg_win_loss_ratio']:
                 p_value = np.mean(sim_array >= observed_value)
             else:  # max_drawdown - lower is better
                 p_value = np.mean(sim_array <= observed_value)
@@ -1879,13 +1914,19 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1000):
             # Calculate percentile of observed value
             percentile = stats.percentileofscore(sim_array, observed_value)
             
+            # Calculate percentiles for null distribution
+            p5 = np.percentile(sim_array, 5) if len(sim_array) > 20 else np.nan
+            p95 = np.percentile(sim_array, 95) if len(sim_array) > 20 else np.nan
+            
             results['p_values'][internal_key] = p_value
             results['percentiles'][internal_key] = percentile
             results['simulation_metrics'][internal_key] = {
                 'mean': np.mean(sim_array),
                 'std': np.std(sim_array),
                 'skew': stats.skew(sim_array),
-                'kurtosis': stats.kurtosis(sim_array)
+                'kurtosis': stats.kurtosis(sim_array),
+                'p5': p5,
+                'p95': p95
             }
         
         return results
@@ -1902,40 +1943,109 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1000):
     # Convert results to DataFrame for analysis
     results_df = pd.DataFrame(mc_results)
     
-    # Print summary statistics
-    print("\n=== Monte Carlo Analysis Summary ===")
-    print(f"Total Parameter Sets Analyzed: {len(mc_results)}")
-    print(f"Significant Results (p < 0.05):")
-
+    # Print new formatted summary statistics
+    print("\n=== BOOTSTRAP MONTE CARLO RESULTS ===")
+    
+    # 1. Summary section
+    print("1. Simulation:")
+    print(f"   - Bootstrap Samples: {num_simulations:,}")
+    print(f"   - Avg Block Length: {BLOCK_SIZE}")
+    
+    # Additional data for summary
+    total_obs_metrics = {}
     for metric in ['sharpe', 'profit_factor', 'avg_win_loss_ratio', 'max_drawdown']:
-        sig_count = sum(1 for result in mc_results if result['p_values'][metric] < 0.05)
-        print(f"{metric}: {sig_count}/{len(mc_results)}")
+        values = [result['observed_metrics'][metric] for result in mc_results 
+                  if pd.notna(result['observed_metrics'][metric])]
+        if values:
+            total_obs_metrics[metric] = np.mean(values)
     
-    print("\nTop 5 Parameter Sets by Statistical Significance:")
-    headers = ["Set", "Metric", "Observed", "Sim Mean", "Sim Std", "p-value", "Percentile"]
-    rows = []
+    if 'sharpe' in total_obs_metrics and 'max_drawdown' in total_obs_metrics:
+        print(f"   - Avg Observed Sharpe: {total_obs_metrics['sharpe']:.2f} | " + 
+              f"Max DD: {total_obs_metrics['max_drawdown']:.2f}%")
     
-    # Sort by combined significance
-    sorted_results = sorted(mc_results, 
-                          key=lambda x: sum(x['p_values'].values()))[:5]
+    # Get significant metric counts
+    sig_counts = {}
+    for metric in ['sharpe', 'profit_factor', 'avg_win_loss_ratio', 'max_drawdown']:
+        sig_counts[metric] = sum(1 for result in mc_results 
+                                 if result['p_values'].get(metric, 1.0) < 0.05)
     
-    for result in sorted_results:
+    print(f"   - Significant Results (p<0.05): " + 
+          f"Sharpe: {sig_counts['sharpe']}/{len(mc_results)}, " +
+          f"PF: {sig_counts['profit_factor']}/{len(mc_results)}")
+    
+    # 2-5. Null Distribution tables for each key metric
+    metric_display_names = {
+        'sharpe': 'Sharpe Ratio',
+        'profit_factor': 'Profit Factor', 
+        'avg_win_loss_ratio': 'Win/Loss Ratio',
+        'max_drawdown': 'Max Drawdown (%)'
+    }
+    
+    # For each metric, create a separate table
+    for metric_num, metric in enumerate(['sharpe', 'profit_factor', 'avg_win_loss_ratio', 'max_drawdown'], 2):
+        print(f"\n{metric_num}. Null Distribution - {metric_display_names[metric]}:")
+        
+        # Create table data for this metric
+        table_data = []
+        headers = ['Set', 'Observed', 'Mean', 'Std Dev', '5th %ile', '95th %ile', 'p-value']
+        
+        for result in mc_results:
+            param_set = result['parameter_set']
+            observed = result['observed_metrics'].get(metric, np.nan)
+            sim_stats = result['simulation_metrics'].get(metric, {})
+            
+            if not sim_stats or np.isnan(observed):
+                continue
+                
+            p_value = result['p_values'].get(metric, np.nan)
+            
+            row = [
+                f"{param_set}",
+                f"{observed:.2f}",
+                f"{sim_stats.get('mean', np.nan):.2f}",
+                f"{sim_stats.get('std', np.nan):.2f}",
+                f"{sim_stats.get('p5', np.nan):.2f}",
+                f"{sim_stats.get('p95', np.nan):.2f}",
+                f"{p_value:.3f}"
+            ]
+            table_data.append(row)
+        
+        # Print table for this metric
+        if table_data:
+            print(tabulate(table_data, headers=headers, tablefmt='grid'))
+        else:
+            print("   No valid simulation data available for this metric")
+    
+    # Find best parameter set overall (lowest combined p-values)
+    if mc_results:
+        best_set_idx = np.argmin([sum(res['p_values'].values()) for res in mc_results])
+        best_set = mc_results[best_set_idx]['parameter_set']
+        
+        print(f"\nBest Overall Parameter Set: #{best_set}")
+        print("Key Performance Metrics:")
+        
+        # Format best set metrics nicely
+        best_metrics = []
         for metric in ['sharpe', 'profit_factor', 'avg_win_loss_ratio', 'max_drawdown']:
-            rows.append([
-                f"{result['parameter_set']}",
-                metric,
-                f"{result['observed_metrics'][metric]:.2f}",
-                f"{result['simulation_metrics'][metric]['mean']:.2f}",
-                f"{result['simulation_metrics'][metric]['std']:.2f}",
-                f"{result['p_values'][metric]:.3f}",
-                f"{result['percentiles'][metric]:.1f}"
+            observed = mc_results[best_set_idx]['observed_metrics'].get(metric, np.nan)
+            p_val = mc_results[best_set_idx]['p_values'].get(metric, np.nan)
+            sim_mean = mc_results[best_set_idx]['simulation_metrics'].get(metric, {}).get('mean', np.nan)
+            
+            # Mark significant metrics with *
+            sig_marker = '*' if pd.notna(p_val) and p_val < 0.05 else ''
+            
+            best_metrics.append([
+                f"{metric_display_names[metric]}{sig_marker}", 
+                f"{observed:.2f}",
+                f"{sim_mean:.2f}",
+                f"{observed - sim_mean:.2f}" if pd.notna(observed) and pd.notna(sim_mean) else "N/A"
             ])
-    
-    print(tabulate(rows, headers=headers, tablefmt="grid"))
+        
+        print(tabulate(best_metrics, headers=['Metric', 'Observed', 'Sim Mean', 'Edge'], tablefmt='simple'))
     
     return results_df
 #================== STRATEGY ROBUSTNESS TESTING ================================================================================================================
-def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parameters, risk_free_annual = RISK_FREE_RATE_ANNUAL):
+def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parameters, risk_free_annual=RISK_FREE_RATE_ANNUAL):
     
     # Global constants from your script parameters
     oos_window_size = OOS_WINDOW  # e.g., 10 (days/periods in raw data)
@@ -1945,22 +2055,30 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
     # Make copies to avoid modifying originals passed to the function
     current_train_raw = initial_is_data_raw.copy()
     remaining_oos_raw = full_oos_data_raw.copy()
-    
-    active_parameters = initial_parameters.copy() # Current parameters for the strategy
+    oos_length = len(remaining_oos_raw)
 
+    # Combine datasets and prepare together
+    full_data = pd.concat([current_train_raw, remaining_oos_raw])
+    prepared_data = prepare_data(full_data.copy(), type=2)
+    
+    if prepared_data.empty:
+        print("Combined data is empty after preparation. Aborting WFA.")
+        return None
+    
+    # Split back into IS and OOS based on original sizes
+    is_size = len(current_train_raw)
+    prepared_current_train = prepared_data.iloc[:is_size].copy()
+    prepared_remaining_oos = prepared_data.iloc[is_size:].copy()
+    
+    if prepared_current_train.empty:
+        print("Initial training data is empty after preparation. Aborting WFA.")
+        return None
+        
+    active_parameters = initial_parameters.copy() # Current parameters for the strategy
     all_step_results = []
     
     # For re-optimization tracking
-    # This tracks raw OOS days processed and added to training since last optimization
     days_processed_since_last_opt = 0 
-    
-    # Initial preparation of the first training set
-    # This prepared data will be used for the first training run (reference)
-    # and potentially the first optimization if opt_frequency_days is small or zero.
-    prepared_current_train = prepare_data(current_train_raw.copy())
-    if prepared_current_train.empty:
-        print("Initial training data (is_data) is empty after preparation. Aborting WFA.")
-        return None
 
     step_number = 0
     print(f"\nStarting Anchored Walk-Forward Analysis...")
@@ -1971,18 +2089,17 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
     print(f"Total OOS data available: {len(remaining_oos_raw)} days")
     print(f"OOS Window Size: {oos_window_size} days, Optimization Frequency: {opt_frequency_days} days of new OOS data.")
 
-    while len(remaining_oos_raw) >= oos_window_size:
+    while len(prepared_remaining_oos) >= oos_window_size:
         step_number += 1
         print(f"\n--- WFA Step {step_number} ---")
 
         # 1. Re-optimization Check
-        if days_processed_since_last_opt >= opt_frequency_days and step_number > 1 : 
-            print(f"Attempting re-optimization. Days processed since last opt: {days_processed_since_last_opt} >= {opt_frequency_days}")
+        if days_processed_since_last_opt >= opt_frequency_days and step_number > 1:
+            #print(f"Attempting re-optimization. Days processed since last opt: {days_processed_since_last_opt} >= {opt_frequency_days}")
             
             if prepared_current_train.empty:
                 print("Cannot optimize: Current accumulated training data is empty after preparation.")
             else:
-                print(f"Optimizing with training data ending on {prepared_current_train.index[-1].date()} ({len(prepared_current_train)} days)")
                 pareto_front = optimize(prepared_current_train) 
                 
                 if pareto_front and len(pareto_front) > 0:
@@ -2002,27 +2119,24 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
                             'RSI_EXIT': float(best_trial.params['rsi_exit'])
                         }
                     }
-                    print(f"Parameters updated from optimization. New Sharpe from trial: {best_trial.values[0]:.2f}")
+                    #print(f"Parameters updated from optimization. New Sharpe from trial: {best_trial.values[0]:.2f}")
                 else:
                     print("Optimization did not yield new parameters. Continuing with existing ones.")
             days_processed_since_last_opt = 0 
         
         # 2. Define and Prepare Current Test Window (OOS Chunk)
-        current_oos_chunk_raw = remaining_oos_raw.iloc[:oos_window_size].copy()
-        prepared_oos_chunk = prepare_data(current_oos_chunk_raw.copy())
+        prepared_oos_chunk = prepared_remaining_oos.iloc[:oos_window_size].copy()
+        raw_oos_chunk = remaining_oos_raw.iloc[:oos_window_size].copy()
 
         if prepared_oos_chunk.empty:
-            print(f"OOS chunk for step {step_number} ({current_oos_chunk_raw.index[0].date()} to {current_oos_chunk_raw.index[-1].date()}) is empty after preparation. Skipping this OOS chunk.")
+            print(f"OOS chunk for step {step_number} is empty after preparation. Skipping this OOS chunk.")
+            prepared_remaining_oos = prepared_remaining_oos.iloc[oos_window_size:].copy()
             remaining_oos_raw = remaining_oos_raw.iloc[oos_window_size:].copy()
-            days_processed_since_last_opt += len(current_oos_chunk_raw) 
+            days_processed_since_last_opt += len(raw_oos_chunk) 
             continue
 
-        if prepared_current_train.empty:
-            print(f"Training data for step {step_number} is empty. Cannot proceed with this step.")
-            break 
-
-        print(f"Training data for this step: {prepared_current_train.index[0].date()} to {prepared_current_train.index[-1].date()} ({len(prepared_current_train)} days)")
-        print(f"Testing with OOS data: {prepared_oos_chunk.index[0].date()} to {prepared_oos_chunk.index[-1].date()} ({len(prepared_oos_chunk)} days)")
+        #print(f"Training data for this step: {prepared_current_train.index[0].date()} to {prepared_current_train.index[-1].date()} ({len(prepared_current_train)} days)")
+        #print(f"Testing with OOS data: {prepared_oos_chunk.index[0].date()} to {prepared_oos_chunk.index[-1].date()} ({len(prepared_oos_chunk)} days)")
 
         # 3. Run strategy on the current prepared training data (for reference)
         train_log, train_stats, train_equity, train_returns = momentum(
@@ -2053,44 +2167,49 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
         )
         
         # 5. Record results for this step
-        # After running strategies, check for null trades in OOS period
         oos_trade_count = oos_stats.get('Total Trades', 0)
         train_trade_count = train_stats.get('Total Trades', 0)
         
-        # Get Sharpe values with appropriate handling
+        # Get key metrics for tracking (added for improved tracking)
         train_sharpe = train_stats.get('Sharpe Ratio', np.nan)
         oos_sharpe = oos_stats.get('Sharpe Ratio', np.nan)
+        
+        # Additional metrics to track (added)
+        train_annualized_return = train_stats.get('Annualized Return (%)', np.nan)
+        oos_annualized_return = oos_stats.get('Annualized Return (%)', np.nan)
+        
+        train_max_drawdown = train_stats.get('Max Drawdown (%)', np.nan)
+        oos_max_drawdown = oos_stats.get('Max Drawdown (%)', np.nan)
+        
+        train_win_rate = train_stats.get('Win Rate', np.nan)
+        oos_win_rate = oos_stats.get('Win Rate', np.nan)
+        
+        train_profit_factor = train_stats.get('Profit Factor', np.nan)
+        oos_profit_factor = oos_stats.get('Profit Factor', np.nan)
         
         # Flag for periods with no trading activity
         is_valid_train_period = train_trade_count > 0
         is_valid_oos_period = oos_trade_count > 0
         
-        # Handle null trade periods for OOS Sharpe calculation
         if not is_valid_oos_period:
             print(f"  WARNING: No trades executed in OOS period (Step {step_number}). Using neutral Sharpe (0.0).")
-            oos_sharpe = 0.0  # Use neutral value rather than extreme values
+            oos_sharpe = 0.0
         
-        # Handle null trade periods for training Sharpe
         if not is_valid_train_period:
             print(f"  WARNING: No trades executed in training period (Step {step_number}). Using neutral Sharpe (0.0).")
-            train_sharpe = 0.0  # Use neutral value
+            train_sharpe = 0.0
         
-        # Only calculate decay when both periods have valid trades
+        # Calculate decay with proper handling
         if is_valid_train_period and is_valid_oos_period:
-            # Calculate decay with proper sign handling
             if (train_sharpe >= 0 and oos_sharpe >= 0) or (train_sharpe < 0 and oos_sharpe < 0):
-                # Same sign - compare relative performance
-                performance_ratio = abs(oos_sharpe) / max(abs(train_sharpe), 0.1) # Avoid division by zero if train_sharpe is very small
+                performance_ratio = abs(oos_sharpe) / max(abs(train_sharpe), 0.1)
                 decay_ratio_val = 1.0 - performance_ratio
             else:
-                # Different signs - significant strategy change
-                decay_ratio_val = 1.5 # Indicates a flip in performance characteristic
+                decay_ratio_val = 1.5
         else:
-            # Mark as invalid comparison when either period has no trades
             decay_ratio_val = np.nan
-            if step_number > 0 : # Avoid printing for initial step if it's common to have no trades
-                print(f"  INFO: Decay ratio marked as invalid for step {step_number} due to null trade periods.")
         
+        # Create comprehensive step results
         step_result_data = {
             'step': step_number,
             'train_start_date': prepared_current_train.index[0].date() if not prepared_current_train.empty else None,
@@ -2099,87 +2218,99 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
             'test_start_date': prepared_oos_chunk.index[0].date() if not prepared_oos_chunk.empty else None,
             'test_end_date': prepared_oos_chunk.index[-1].date() if not prepared_oos_chunk.empty else None,
             'test_days': len(prepared_oos_chunk),
+            
+            # Original metrics
             'train_sharpe': train_sharpe,
             'test_sharpe': oos_sharpe,
             'decay_ratio': decay_ratio_val,
             'train_trades': train_trade_count,
             'test_trades': oos_trade_count,
-            'parameters_used_snapshot': active_parameters.copy(), 
             'oos_returns_series': oos_returns, 
             'train_return_pct': train_stats.get('Return (%)', np.nan),
             'test_return_pct': oos_stats.get('Return (%)', np.nan),
             'valid_train': is_valid_train_period,
             'valid_test': is_valid_oos_period,
-            'valid_comparison': is_valid_train_period and is_valid_oos_period
+            'valid_comparison': is_valid_train_period and is_valid_oos_period,
+            
+            # Additional metrics (added)
+            'train_ann_return': train_annualized_return,
+            'test_ann_return': oos_annualized_return,
+            'train_max_drawdown': train_max_drawdown,
+            'test_max_drawdown': oos_max_drawdown,
+            'train_win_rate': train_win_rate,
+            'test_win_rate': oos_win_rate,
+            'train_profit_factor': train_profit_factor,
+            'test_profit_factor': oos_profit_factor,
+            
+            # Parameter snapshot
+            'parameters_used_snapshot': active_parameters.copy()
         }
         all_step_results.append(step_result_data)
         
+        # Display step results
         decay_ratio_str = f"{decay_ratio_val:.2f}" if pd.notna(decay_ratio_val) else 'N/A'
         print(f"  Step {step_number} Results: Train Sharpe: {train_sharpe:.2f}, Test Sharpe: {oos_sharpe:.2f}, Decay Ratio: {decay_ratio_str}")
 
         # 6. Update data for the next iteration (Anchoring)
-        current_train_raw = pd.concat([current_train_raw, current_oos_chunk_raw])
-        prepared_current_train = prepare_data(current_train_raw.copy())
-        if prepared_current_train.empty:
-            print(f"CRITICAL: Accumulated training data became empty after preparing for next step (after step {step_number}). Aborting WFA.")
-            break 
+        # Update prepared data by appending the current OOS chunk to training data
+        prepared_current_train = pd.concat([prepared_current_train, prepared_oos_chunk])
         
+        # Update raw data tracking for consistency
+        current_train_raw = pd.concat([current_train_raw, raw_oos_chunk])
+        
+        # Remove the processed chunk from remaining OOS data
+        prepared_remaining_oos = prepared_remaining_oos.iloc[oos_window_size:].copy()
         remaining_oos_raw = remaining_oos_raw.iloc[oos_window_size:].copy()
-        days_processed_since_last_opt += len(current_oos_chunk_raw) 
+        
+        # Update days processed counter
+        days_processed_since_last_opt += len(raw_oos_chunk)
 
     if not all_step_results:
         print("No walk-forward steps were completed.")
         return None
 
+    # Create results DataFrame
     results_df = pd.DataFrame(all_step_results)
     
-    all_oos_log_returns_list = [res['oos_returns_series'] for res in all_step_results if isinstance(res['oos_returns_series'], pd.Series) and not res['oos_returns_series'].empty]
+    # Process all OOS returns for overall metrics
+    all_oos_log_returns_list = [res['oos_returns_series'] for res in all_step_results 
+                               if isinstance(res['oos_returns_series'], pd.Series) and not res['oos_returns_series'].empty]
     
     concatenated_oos_log_returns = pd.Series(dtype=float)
     overall_oos_sharpe = np.nan
     overall_oos_cumulative_return_pct = np.nan 
+    overall_max_drawdown = np.nan
 
     if all_oos_log_returns_list:
         concatenated_oos_log_returns = pd.concat(all_oos_log_returns_list).sort_index()
         concatenated_oos_log_returns = concatenated_oos_log_returns[~concatenated_oos_log_returns.index.duplicated(keep='first')]
-
-    print("\n=== Anchored Walk-Forward Analysis Final Summary ===")
-    print(f"Total WFA Steps Completed: {len(results_df)}")
     
-    if not results_df.empty:
-        # Filter for valid test periods when calculating means
-        valid_test_results_df = results_df[results_df['valid_test'] == True]
-        valid_comparisons_df = results_df[results_df['valid_comparison'] == True]
-        
-        # Count of steps with valid metrics
-        print(f"Steps with valid trades in test period: {len(valid_test_results_df)} of {len(results_df)}")
-        print(f"Steps with valid trade comparisons: {len(valid_comparisons_df)} of {len(results_df)}")
-        
-        # Calculate means only on valid periods
-        if not valid_test_results_df.empty:
-            print(f"Mean Test Sharpe (valid test periods only): {valid_test_results_df['test_sharpe'].mean():.2f}")
-            print(f"Mean Test Return (%) (valid test periods only): {valid_test_results_df['test_return_pct'].mean():.2f}")
-        else:
-            print("No valid test periods with trades to calculate mean metrics.")
-            
-        if not valid_comparisons_df.empty:
-            print(f"Mean Decay Ratio (valid comparisons only): {valid_comparisons_df['decay_ratio'].mean():.2f}")
-        else:
-            print("No valid comparison periods to calculate mean decay ratio.")
-
-    if len(concatenated_oos_log_returns) > 1: # Check if there are enough returns to calculate overall metrics
-        # Count of trading days with non-zero returns
+    # Calculate metrics for final report
+    total_steps = len(results_df)
+    valid_test_results_df = results_df[results_df['valid_test'] == True] if not results_df.empty else pd.DataFrame()
+    valid_comparisons_df = results_df[results_df['valid_comparison'] == True] if not results_df.empty else pd.DataFrame()
+    
+    valid_tests_count = len(valid_test_results_df)
+    zero_trade_count = total_steps - valid_tests_count
+    
+    # Calculate rolling decay ratios (for detailed analysis)
+    rolling_decay = None
+    if len(valid_comparisons_df) >= 2:
+        decay_values = valid_comparisons_df['decay_ratio'].dropna()
+        if len(decay_values) >= 2:
+            # Calculate rolling window statistics if enough data points
+            rolling_size = min(3, len(decay_values))
+            rolling_decay = decay_values.rolling(rolling_size).mean()
+    
+    # Calculate overall OOS performance metrics
+    active_trading_days = 0
+    total_days_in_oos_concat = 0
+    if len(concatenated_oos_log_returns) > 1:
         active_trading_days = len(concatenated_oos_log_returns[concatenated_oos_log_returns != 0])
         total_days_in_oos_concat = len(concatenated_oos_log_returns)
         
-        print(f"Overall OOS trading activity: {active_trading_days} active days out of {total_days_in_oos_concat} total days in concatenated OOS periods.")
-        if total_days_in_oos_concat > 0:
-            print(f"Trading activity rate: {(active_trading_days/total_days_in_oos_concat*100):.1f}% of days")
-        else:
-            print("Trading activity rate: N/A (no OOS days)")
-
-        # Only calculate performance metrics if there were sufficient active trading days
-        if active_trading_days > 5:  # Arbitrary threshold for reliability
+        if active_trading_days > 5:
+            # Calculate OOS Sharpe
             excess_concatenated_log_returns = concatenated_oos_log_returns - daily_rf_rate
             mean_excess_log_return = excess_concatenated_log_returns.mean()
             std_excess_log_return = excess_concatenated_log_returns.std()
@@ -2187,47 +2318,209 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
             if std_excess_log_return != 0 and pd.notna(std_excess_log_return):
                 overall_oos_sharpe = (mean_excess_log_return / std_excess_log_return) * np.sqrt(252)
             else: 
-                overall_oos_sharpe = 0.0 if mean_excess_log_return == 0 else np.nan 
+                overall_oos_sharpe = 0.0 if mean_excess_log_return == 0 else np.nan
             
+            # Calculate cumulative return
             total_cumulative_log_return = concatenated_oos_log_returns.sum()
             overall_oos_cumulative_return_pct = (np.exp(total_cumulative_log_return) - 1) * 100
             
-            print(f"Overall Concatenated OOS Sharpe Ratio (from log returns): {overall_oos_sharpe:.2f}")
-            print(f"Overall Concatenated OOS Cumulative Return (from log returns, %): {overall_oos_cumulative_return_pct:.2f}")
-        else:
-            print("Insufficient active trading days in concatenated OOS periods for reliable overall performance metrics.")
+            # Calculate max drawdown for overall OOS period
+            cum_rets = concatenated_oos_log_returns.cumsum()
+            cum_rets_exp = np.exp(cum_rets) - 1  # Convert to regular returns for drawdown calc
+            running_max = np.maximum.accumulate(cum_rets_exp)
+            drawdowns = ((cum_rets_exp - running_max) / (running_max + 1)) * 100  # As percentage
+            overall_max_drawdown = np.nanmin(drawdowns)
+    
+    # Print the new formatted summary
+    print("\n=== WFA FINAL SUMMARY ===")
+    
+    # 1. Overview section
+    print("1. Overview:")
+    if total_steps > 0:
+        print(f"   - Total WFA Steps: {total_steps}")
+        print(f"   - Valid OOS Windows: {valid_tests_count}/{total_steps} ({valid_tests_count/total_steps*100:.1f}%)")
+        if zero_trade_count > 0:
+            zero_trade_pct = zero_trade_count/total_steps*100
+            risk_level = "HIGH RISK" if zero_trade_pct > 40 else "MODERATE RISK" if zero_trade_pct > 20 else "LOW RISK"
+            print(f"   - Zero-Trade Windows: {zero_trade_count}/{total_steps} ({zero_trade_pct:.1f}%) → {risk_level}")
     else:
-        print("No concatenated OOS returns to calculate overall performance metrics.")
+        print("   - No WFA steps completed")
+    
+    # 2. Performance metrics table
+    print("\n2. Performance (Valid OOS):")
+    if not valid_test_results_df.empty:
+        # Create a summary table for OOS metrics
+        metrics = {
+            'OOS Sharpe': valid_test_results_df['test_sharpe'],
+            'Ann. Return (%)': valid_test_results_df['test_ann_return'],
+            'Max Drawdown (%)': valid_test_results_df['test_max_drawdown'],
+            'Win Rate (%)': valid_test_results_df['test_win_rate'],
+            'Profit Factor': valid_test_results_df['test_profit_factor']
+        }
         
+        # Calculate statistics for each metric
+        summary_data = []
+        for name, values in metrics.items():
+            valid_values = values.dropna()
+            if not valid_values.empty:
+                row = [
+                    name,
+                    f"{valid_values.mean():.2f}",
+                    f"{valid_values.median():.2f}",
+                    f"{valid_values.std():.2f}",
+                    f"{valid_values.min():.2f}",
+                    f"{valid_values.max():.2f}"
+                ]
+                summary_data.append(row)
+        
+        if summary_data:
+            print(tabulate(
+                summary_data,
+                headers=['Metric', 'Mean', 'Median', 'Std Dev', 'Min', 'Max'],
+                tablefmt='grid'
+            ))
+        else:
+            print("   No valid metrics data available")
+    else:
+        print("   No valid OOS periods with trades for performance analysis")
+    
+    # 3. Decay Analysis
+    print("\n3. Decay Analysis:")
+    if not valid_comparisons_df.empty:
+        decay_values = valid_comparisons_df['decay_ratio'].dropna()
+        if not decay_values.empty:
+            mean_decay = decay_values.mean()
+            std_decay = decay_values.std()
+            
+            # Classify decay ratio
+            decay_classification = ""
+            if mean_decay > 0.7:
+                decay_classification = "CATASTROPHIC"
+            elif mean_decay > 0.5:
+                decay_classification = "SEVERE"
+            elif mean_decay > 0.3:
+                decay_classification = "SIGNIFICANT" 
+            elif mean_decay > 0.1:
+                decay_classification = "MODERATE"
+            else:
+                decay_classification = "MINIMAL"
+                
+            # Classify volatility
+            vol_classification = ""
+            if std_decay > 0.4:
+                vol_classification = "EXTREME VOLATILITY"
+            elif std_decay > 0.2:
+                vol_classification = "HIGH VOLATILITY" 
+            elif std_decay > 0.1:
+                vol_classification = "MODERATE VOLATILITY"
+            else:
+                vol_classification = "STABLE"
+                
+            print(f"   - Mean Decay Ratio: {mean_decay:.2f} → {decay_classification}")
+            print(f"   - Std Dev Decay: {std_decay:.2f} → {vol_classification}")
+            
+            if rolling_decay is not None and len(rolling_decay.dropna()) > 0:
+                recent_decay = rolling_decay.dropna().iloc[-1] if len(rolling_decay.dropna()) > 0 else np.nan
+                if pd.notna(recent_decay):
+                    print(f"   - Recent Rolling Decay (n={min(3, len(decay_values))}): {recent_decay:.2f}")
+        else:
+            print("   - No valid decay ratio data available")
+    else:
+        print("   - No valid comparison periods to calculate decay metrics")
+    
+    # 4. Activity metrics
+    print("\n4. Activity:")
+    if total_days_in_oos_concat > 0:
+        trading_activity_pct = active_trading_days/total_days_in_oos_concat*100
+        print(f"   - Trading Days: {active_trading_days}/{total_days_in_oos_concat} ({trading_activity_pct:.1f}%)")
+        
+        # Identify potential causes for low activity
+        if trading_activity_pct < 30:
+            # Analyze parameters to suggest causes
+            if not results_df.empty and 'parameters_used_snapshot' in results_df.columns:
+                entry_thresholds = []
+                for _, row in results_df.iterrows():
+                    if isinstance(row['parameters_used_snapshot'], dict):
+                        threshold = row['parameters_used_snapshot'].get('threshold', {})
+                        if isinstance(threshold, dict) and 'Entry' in threshold:
+                            entry_thresholds.append(threshold['Entry'])
+                
+                if entry_thresholds:
+                    avg_entry = np.mean(entry_thresholds)
+                    if avg_entry > 0.8:
+                        print("   - Zero-Trade Cause: Restrictive entry thresholds (too high)")
+                    elif all(t.get('adx_thresh', 25) > 30 for t in results_df['parameters_used_snapshot'] if isinstance(t, dict)):
+                        print("   - Zero-Trade Cause: High ADX threshold requirements")
+                    else:
+                        print("   - Zero-Trade Cause: Overfit parameter combination")
+        elif zero_trade_count > 0:
+            print("   - Zero-Trade Cause: Parameter instability between periods")
+    else:
+        print("   - No trading activity data available")
+    
+    # 5. Concatenated OOS Performance
+    print("\n5. Concatenated OOS:")
+    if len(concatenated_oos_log_returns) > 5:
+        print(f"   - Ann. Sharpe: {overall_oos_sharpe:.2f} | Cum. Return: {overall_oos_cumulative_return_pct:.2f}% | Max DD: {overall_max_drawdown:.1f}%")
+        
+        # Market classification based on overall performance
+        market_type = ""
+        if overall_oos_sharpe > 1.5:
+            market_type = "HIGHLY FAVORABLE"
+        elif overall_oos_sharpe > 0.5:
+            market_type = "FAVORABLE" 
+        elif overall_oos_sharpe > -0.5:
+            market_type = "NEUTRAL"
+        elif overall_oos_sharpe > -1.5:
+            market_type = "CHALLENGING"
+        else:
+            market_type = "HIGHLY ADVERSE"
+            
+        print(f"   - Market Classification: {market_type}")
+    else:
+        print("   - Insufficient data for reliable OOS performance metrics")
+    
+    # Display detailed results table
     if not results_df.empty:
         print("\n--- Detailed Step Results ---")
-        display_cols = ['step', 'train_sharpe', 'test_sharpe', 'decay_ratio', 'train_trades', 'test_trades', 
-                        'test_return_pct', 'valid_train', 'valid_test', 'valid_comparison']
-        print(tabulate(results_df[display_cols], headers='keys', tablefmt='grid', floatfmt=".2f"))
-
+        display_cols = [
+            'step', 'train_sharpe', 'test_sharpe', 'decay_ratio', 
+            'train_ann_return', 'test_ann_return',
+            'train_max_drawdown', 'test_max_drawdown',
+            'train_profit_factor', 'test_profit_factor',
+            'train_trades', 'test_trades'
+        ]
+        # Filter columns that exist in the dataframe
+        available_cols = [col for col in display_cols if col in results_df.columns]
+        if available_cols:
+            print(tabulate(results_df[available_cols], headers='keys', tablefmt='grid', floatfmt=".2f"))
+    
+    # Return comprehensive results
     return {
         'step_results_df': results_df, 
         'concatenated_oos_returns': concatenated_oos_log_returns, 
         'overall_oos_sharpe': overall_oos_sharpe,
-        'overall_oos_return_pct': overall_oos_cumulative_return_pct
+        'overall_oos_return_pct': overall_oos_cumulative_return_pct,
+        'overall_oos_max_drawdown': overall_max_drawdown,
+        'rolling_decay': rolling_decay if rolling_decay is not None else None
     }
 #================== MAIN PROGRAM EXECUTION =====================================================================================================================
 def main():
     try:
-        if isinstance(TICKER, list):
-            ticker_str = TICKER[0]
-        else:
-            ticker_str = TICKER
-        IS, OOS = get_data(ticker_str)
+        IS, OOS = get_data(TICKER)
+
+        # --------------------------------------------------------------------------------------------------------------------------
         if TYPE == 5:
-            df_prepared_for_test = prepare_data(IS.copy())
+            df_prepared_for_test = prepare_data(IS.copy(), type=1)
             if df_prepared_for_test is None or df_prepared_for_test.empty:
                 print("Data for test is empty after preparation. Aborting.")
                 return
             test(df_prepared_for_test, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, position_size=DEFAULT_POSITION_SIZE, max_positions_param=MAX_OPEN_POSITIONS,
                 adx_thresh=ADX_THRESHOLD_DEFAULT, persistence_days=PERSISTENCE_DAYS, max_position_duration=MAX_POSITION_DURATION, threshold=THRESHOLD)
+        
+        # --------------------------------------------------------------------------------------------------------------------------
         elif TYPE == 4:
-            df_prepared_for_opt = prepare_data(IS.copy())
+            df_prepared_for_opt = prepare_data(IS.copy(), type=1)
             if df_prepared_for_opt is None or df_prepared_for_opt.empty:
                 print("Data for optimization is empty after preparation. Aborting.")
                 return
@@ -2237,8 +2530,10 @@ def main():
                 visualize(pareto_front, df_prepared_for_opt)
             else:
                 print("Optimization did not yield any results.")
+
+        # --------------------------------------------------------------------------------------------------------------------------
         elif TYPE == 3:  # Monte Carlo Testing
-            df_prepared_for_mc = prepare_data(IS.copy())
+            df_prepared_for_mc = prepare_data(IS.copy(), type=1)
             if df_prepared_for_mc is None or df_prepared_for_mc.empty:
                 print("Data for Monte Carlo is empty after preparation. Aborting.")
                 return
@@ -2276,26 +2571,15 @@ def main():
                     print("Monte Carlo analysis did not yield any results.")
             else:
                 print("Optimization did not yield any Pareto front for Monte Carlo.")
+        
+        # --------------------------------------------------------------------------------------------------------------------------
         elif TYPE == 2: # Walk-Forward Analysis
-            df_prepared_is_for_wfa_opt = prepare_data(IS.copy()) # Prepare IS data for initial optimization
+            df_prepared_is_for_wfa_opt = prepare_data(IS.copy(), type=1) # Prepare IS data for initial optimization
             if df_prepared_is_for_wfa_opt is None or df_prepared_is_for_wfa_opt.empty:
                 print("In-sample data for WFA initial optimization is empty after preparation. Aborting.")
                 return
 
             pareto_front_wfa = optimize(df_prepared_is_for_wfa_opt)
-            
-            # Initialize current_wfa_parameters with defaults
-            current_wfa_parameters = {
-                'long_risk': DEFAULT_LONG_RISK,
-                'long_reward': DEFAULT_LONG_REWARD,
-                'position_size': DEFAULT_POSITION_SIZE,
-                'max_positions_param': MAX_OPEN_POSITIONS,
-                'adx_thresh': ADX_THRESHOLD_DEFAULT,
-                'persistence_days': PERSISTENCE_DAYS,
-                'max_position_duration': MAX_POSITION_DURATION,
-                'threshold': THRESHOLD.copy()
-            }
-
             if pareto_front_wfa and len(pareto_front_wfa) > 0:
                 best_trial = pareto_front_wfa[0]  # Assuming the first trial is the best
                 
@@ -2316,30 +2600,24 @@ def main():
                     }
                 }
                 print(f"Using optimized parameters from initial IS for WFA start. Sharpe: {best_trial.values[0]:.2f}")
+                # walk_forward_analysis expects raw IS and OOS data
+                wfa_summary = walk_forward_analysis(IS, OOS, current_wfa_parameters) 
+                
+                if wfa_summary:
+                    print("\nAnchored Walk-Forward Analysis completed.")
+                else:
+                    print("Anchored Walk-Forward Analysis failed or produced no results.")
             else:
-                print("Initial optimization for WFA failed or yielded no results. Using default parameters for WFA start.")
+                print("Initial optimization for WFA failed or yielded no results.")
             
-            # walk_forward_analysis expects raw IS and OOS data
-            wfa_summary = walk_forward_analysis(IS, OOS, current_wfa_parameters) 
-            
-            if wfa_summary:
-                print("\nAnchored Walk-Forward Analysis completed.")
-            else:
-                print("Anchored Walk-Forward Analysis failed or produced no results.")
+        # --------------------------------------------------------------------------------------------------------------------------
         elif TYPE == 1: # Full Run (Opt -> MC -> WFA)
-            df_prepared_full_run = prepare_data(IS.copy())
+            df_prepared_full_run = prepare_data(IS.copy(), type=1)
             if df_prepared_full_run is None or df_prepared_full_run.empty:
                 print("Data for Full Run (Type 1) is empty after preparation. Aborting.")
                 return
 
             pareto_front_full_run_opt = optimize(df_prepared_full_run) 
-            
-            initial_params_for_wfa = { # Default parameters
-                'long_risk': DEFAULT_LONG_RISK, 'long_reward': DEFAULT_LONG_REWARD,
-                'position_size': DEFAULT_POSITION_SIZE, 'max_positions_param': MAX_OPEN_POSITIONS,
-                'adx_thresh': ADX_THRESHOLD_DEFAULT, 'persistence_days': PERSISTENCE_DAYS,
-                'max_position_duration': MAX_POSITION_DURATION, 'threshold': THRESHOLD.copy()
-            }
 
             if pareto_front_full_run_opt and len(pareto_front_full_run_opt) > 0:
                 mc_candidate_trials = pareto_front_full_run_opt[:3]
@@ -2365,73 +2643,22 @@ def main():
                                 'max_position_duration': best_params_from_mc['max_position_duration'],
                                 'threshold': best_params_from_mc['threshold']
                             }
-                            print("\nRunning final test with MC parameters before WFA...")
-                            test(df_prepared_full_run, **initial_params_for_wfa)
+                            print("\nProceeding to Walk-Forward Analysis for Full Run...")
+                            wfa_summary_full_run = walk_forward_analysis(IS, OOS, initial_params_for_wfa)
+                            if wfa_summary_full_run:
+                                print("\nAnchored Walk-Forward Analysis for Full Run completed.")
+                            else:
+                                print("Anchored Walk-Forward Analysis for Full Run failed or produced no results.")
                         else:
                             print("⚠ No statistically significant parameters from MC. Using best from initial Opt for WFA.")
-                            # Fallback to best from initial optimization if MC not significant
-                            best_opt_trial = pareto_front_full_run_opt[0]
-                            initial_params_for_wfa = {
-                                'long_risk': float(best_opt_trial.params['long_risk']),
-                                'long_reward': float(best_opt_trial.params['long_reward']),
-                                'position_size': float(best_opt_trial.params['position_size']),
-                                'max_positions_param': int(best_opt_trial.params['max_open_positions']),
-                                'adx_thresh': float(best_opt_trial.params['adx_threshold']),
-                                'persistence_days': int(best_opt_trial.params['persistence_days']),
-                                'max_position_duration': int(best_opt_trial.params['max_position_duration']),
-                                'threshold': {
-                                    'Entry': float(best_opt_trial.params['entry']),
-                                    'Exit': float(best_opt_trial.params['exit']),
-                                    'RSI_BUY': float(best_opt_trial.params['rsi_buy']),
-                                    'RSI_EXIT': float(best_opt_trial.params['rsi_exit'])
-                                }
-                            }
                     else:
-                        print("Error in MC results format for Full Run. Using best from initial Opt for WFA.")
-                        best_opt_trial = pareto_front_full_run_opt[0]
-                        initial_params_for_wfa = {
-                            'long_risk': float(best_opt_trial.params['long_risk']),
-                            'long_reward': float(best_opt_trial.params['long_reward']),
-                            'position_size': float(best_opt_trial.params['position_size']),
-                            'max_positions_param': int(best_opt_trial.params['max_open_positions']),
-                            'adx_thresh': float(best_opt_trial.params['adx_threshold']),
-                            'persistence_days': int(best_opt_trial.params['persistence_days']),
-                            'max_position_duration': int(best_opt_trial.params['max_position_duration']),
-                            'threshold': {
-                                'Entry': float(best_opt_trial.params['entry']),
-                                'Exit': float(best_opt_trial.params['exit']),
-                                'RSI_BUY': float(best_opt_trial.params['rsi_buy']),
-                                'RSI_EXIT': float(best_opt_trial.params['rsi_exit'])
-                            }
-                        }
+                        print("Error in MC results format for Full Run.")
                 else:
-                    print("Monte Carlo analysis for Full Run did not yield results. Using best from initial Opt for WFA.")
-                    best_opt_trial = pareto_front_full_run_opt[0]
-                    initial_params_for_wfa = {
-                        'long_risk': float(best_opt_trial.params['long_risk']),
-                        'long_reward': float(best_opt_trial.params['long_reward']),
-                        'position_size': float(best_opt_trial.params['position_size']),
-                        'max_positions_param': int(best_opt_trial.params['max_open_positions']),
-                        'adx_thresh': float(best_opt_trial.params['adx_threshold']),
-                        'persistence_days': int(best_opt_trial.params['persistence_days']),
-                        'max_position_duration': int(best_opt_trial.params['max_position_duration']),
-                        'threshold': {
-                            'Entry': float(best_opt_trial.params['entry']),
-                            'Exit': float(best_opt_trial.params['exit']),
-                            'RSI_BUY': float(best_opt_trial.params['rsi_buy']),
-                            'RSI_EXIT': float(best_opt_trial.params['rsi_exit'])
-                        }
-                    }
+                    print("Monte Carlo analysis for Full Run did not yield results.")
             else:
-                print("Initial optimization for Full Run did not yield results. Using default parameters for WFA.")
+                print("Initial optimization for Full Run did not yield results.")
 
-            print("\nProceeding to Walk-Forward Analysis for Full Run...")
-            wfa_summary_full_run = walk_forward_analysis(IS, OOS, initial_params_for_wfa)
-            if wfa_summary_full_run:
-                print("\nAnchored Walk-Forward Analysis for Full Run completed.")
-            else:
-                print("Anchored Walk-Forward Analysis for Full Run failed or produced no results.")
-            return None # End of TYPE 1
+        # --------------------------------------------------------------------------------------------------------------------------
     except Exception as e:
         print(f"Error in main function: {e}")
         traceback.print_exc()

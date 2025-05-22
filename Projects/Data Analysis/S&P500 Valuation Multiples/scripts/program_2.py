@@ -352,24 +352,50 @@ def save_calculated_metrics(df, company_id, period_id):
                         """, (col,))
                         result = cur.fetchone()
                         
-                        if result:
-                            metric_id = result[0]
-                        else:
-                            # Store formula in calculated_metric_definitions if it exists
-                            if formula:
+                        # Store formula in calculated_metric_definitions if it exists
+                        definition_id = None
+                        if formula:
+                            # First check if definition already exists
+                            cur.execute("""
+                                SELECT definition_id FROM calculated_metric_definitions 
+                                WHERE metric_name = %s
+                            """, (col,))
+                            definition_result = cur.fetchone()
+                            
+                            if definition_result:
+                                definition_id = definition_result[0]
+                            else:
+                                # Create new definition
                                 cur.execute("""
                                     INSERT INTO calculated_metric_definitions (metric_name, formula)
                                     VALUES (%s, %s)
-                                    ON CONFLICT (metric_name) 
-                                    DO UPDATE SET formula = EXCLUDED.formula
+                                    RETURNING definition_id
                                 """, (col, formula))
-
-                            # Create new metric in financial_metrics
-                            cur.execute("""
-                                INSERT INTO financial_metrics (metric_name)
-                                VALUES (%s)
-                                RETURNING metric_id
-                            """, (col,))
+                                definition_id = cur.fetchone()[0]
+                        
+                        if result:
+                            metric_id = result[0]
+                            # Update existing metric with definition_id if available
+                            if definition_id:
+                                cur.execute("""
+                                    UPDATE financial_metrics
+                                    SET definition_id = %s
+                                    WHERE metric_id = %s
+                                """, (definition_id, metric_id))
+                        else:
+                            # Create new metric in financial_metrics with definition_id if available
+                            if definition_id:
+                                cur.execute("""
+                                    INSERT INTO financial_metrics (metric_name, definition_id)
+                                    VALUES (%s, %s)
+                                    RETURNING metric_id
+                                """, (col, definition_id))
+                            else:
+                                cur.execute("""
+                                    INSERT INTO financial_metrics (metric_name)
+                                    VALUES (%s)
+                                    RETURNING metric_id
+                                """, (col,))
                             metric_id = cur.fetchone()[0]
 
                         # Add to batch data with metric_id
@@ -789,9 +815,9 @@ def get_metric_formula(metric_name):
 
 def convert_numpy_types(obj):
     """Convert NumPy types to standard Python types for database compatibility."""
-    if isinstance(obj, (np.int_, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64)):
+    if isinstance(obj, (np.integer, np.int8, np.int16, np.int32, np.int64)):
         return int(obj)
-    elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+    elif isinstance(obj, (np.floating, np.float16, np.float32, np.float64)):
         return float(obj)
     elif isinstance(obj, np.ndarray):
         return [convert_numpy_types(x) for x in obj]
