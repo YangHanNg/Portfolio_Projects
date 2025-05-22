@@ -56,4 +56,64 @@ A data analysis project that is an extension to comparable companies analysis, a
 - statsmodels / scikit-learn
 - JSON / psycopg2
 
-## #2
+## #2 Momentum Trading Strategy: Quantitative Analysis and Optimization
+
+Last Updated: 23/May/2025 &nbsp; &nbsp; Status: Ongoing
+
+### Summary
+This project implements a quantitative momentum trading strategy for financial assets, exemplified using SPY (S&P 500 ETF). It focuses on identifying and capitalizing on prevailing market trends by employing a variety of technical indicators and statistical methods. The core of the project involves data acquisition, signal generation, trade execution logic, strategy optimization, and rigorous backtesting, including Monte Carlo simulations and Walk-Forward Analysis to assess robustness and significance.
+
+### Key Features
+- Data acquisition and preparation for financial instruments.
+- Calculation of a suite of technical indicators (Moving Averages, RSI, Bollinger Bands, ATR, ADX).
+- Core momentum strategy logic with signal generation based on a composite momentum score.
+- Trade management including position sizing and risk management (stop-loss/take-profit).
+- Strategy optimization framework using weighted objectives (Sharpe Ratio, Profit Factor, etc.).
+- Backtesting engine to simulate trades and calculate comprehensive performance KPIs.
+- Robustness testing via Monte Carlo simulations and Walk-Forward Analysis.
+
+### Tools & Libraries Used
+- pandas, numpy
+- numba (for JIT compilation)
+- multiprocessing, joblib (for parallel execution)
+- tabulate (for results presentation)
+- yfinance (implicitly, for data acquisition)
+
+## #3 Factor Zoo Explorer
+
+Last Updated: 23/May/2025 &nbsp; &nbsp; Status: Currently Cooking
+
+### Summary
+Currently Cooking
+
+### Key Features
+Currently Cooking
+
+### Tools & Libraries Used
+Currently Cooking
+
+## #4 Market-Making Simulator
+
+Last Updated: 23/May/2025 &nbsp; &nbsp; Status: Currently Cooking
+
+### Summary
+Currently Cooking
+
+### Key Features
+Currently Cooking
+
+### Tools & Libraries Used
+Currently Cooking
+
+## #5 Options Volatility Arbitrage
+
+Last Updated: 23/May/2025 &nbsp; &nbsp; Status: Currently Cooking
+
+### Summary
+Currently Cooking
+
+### Key Features
+Currently Cooking
+
+### Tools & Libraries Used
+Currently Cooking
