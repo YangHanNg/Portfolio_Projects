@@ -460,17 +460,20 @@ def analyze_financial_data(data, selected_industry, confidence=0.90):
             'EV/Capital Invested': ['Return On Invested Capital', '3Y Exp Growth']
         }
 
-        # Get required identifiers
-        company_id = data['company_id'].iloc[0]
-        period_id = data['period_id'].iloc[0]
-        fiscal_date_ending = data['fiscal_date_ending'].iloc[0]
+        # These identifiers are taken from the first company in the 'data' (year_df)
+        # and are used for logging the overall regression process for the industry-year
+        # and for saving the industry-wide regression model's statistics.
+        representative_company_id = data['company_id'].iloc[0]
+        representative_period_id = data['period_id'].iloc[0]
+        # fiscal_date_ending = data['fiscal_date_ending'].iloc[0] # Not directly used below for saving theoreticals
 
-        logger.info(f"Processing regression analysis for company {company_id}, period {period_id}")
+        logger.info(f"Processing regression analysis for industry {selected_industry}, period representative: {representative_period_id}")
 
         results = {}
         # Process each multiple regression separately
         for multiple, (x1_name, x2_name) in regression_format.items():
             # Extract only necessary columns for this regression and replace nulls with 0
+            # This numeric_data corresponds row-wise with the input 'data' (year_df)
             regression_cols = [multiple, x1_name, x2_name]
             numeric_data = data[regression_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
 
@@ -478,41 +481,86 @@ def analyze_financial_data(data, selected_industry, confidence=0.90):
             y = numeric_data[multiple].values
 
             try:
-                # Fit model with constant term
+                # Fit model with constant term (industry-wide model for this year)
                 X_with_const = sm.add_constant(X)
                 model = sm.OLS(y, X_with_const).fit()
                 
-                # Calculate theoretical values
-                coefficients = {
-                    'y_intercept': float(model.params[0]),
-                    'c1_coefficient': float(model.params[1]),
-                    'c2_coefficient': float(model.params[2])
-                }
-                theoretical_values = calculate_theoretical_values(X, coefficients)
+                # Check if model parameters are valid
+                if np.any(np.isnan(model.params)) or np.any(np.isinf(model.params)):
+                    logger.warning(
+                        f"Regression for {multiple} in industry {selected_industry} (period representative: {representative_period_id}) "
+                        f"resulted in NaN/Inf coefficients: {model.params}. "
+                        f"Theoretical values for this multiple will be set to 0."
+                    )
+                    all_theoretical_values = np.zeros(len(X))
+                else:
+                    coefficients = {
+                        'y_intercept': float(model.params[0]),
+                        'c1_coefficient': float(model.params[1]),
+                        'c2_coefficient': float(model.params[2])
+                    }
+
+                    # Log inputs to calculate_theoretical_values
+                    logger.debug(f"Inputs for calculate_theoretical_values for {multiple} in {selected_industry}:")
+                    logger.debug(f"Coefficients: {coefficients}")
+                    if X.size > 0: # Check if X is not empty
+                        logger.debug(f"X shape: {X.shape}")
+                        logger.debug(f"X[:, 0] stats: min={np.min(X[:,0]) if X.shape[0]>0 else 'N/A'}, max={np.max(X[:,0]) if X.shape[0]>0 else 'N/A'}, mean={np.mean(X[:,0]) if X.shape[0]>0 else 'N/A'}")
+                        logger.debug(f"X[:, 1] stats: min={np.min(X[:,1]) if X.shape[0]>0 else 'N/A'}, max={np.max(X[:,1]) if X.shape[0]>0 else 'N/A'}, mean={np.mean(X[:,1]) if X.shape[0]>0 else 'N/A'}")
+                        logger.debug(f"Are X values finite? {np.all(np.isfinite(X))}")
+                    else:
+                        logger.debug("X is empty.")
+                    logger.debug(f"Are y values finite? {np.all(np.isfinite(y))}")
+
+
+                    all_theoretical_values = calculate_theoretical_values(X, coefficients)
+
+                    # Ensure all_theoretical_values are finite; replace NaN/Inf with 0.0
+                    if np.any(~np.isfinite(all_theoretical_values)):
+                        logger.warning(
+                            f"Theoretical values for {multiple} in industry {selected_industry} (period representative: {representative_period_id}) "
+                            f"contained NaN/Inf values after calculation. Replacing with 0.0. "
+                            f"Coefficients used: {coefficients}. "
+                            f"X example (first row if exists): {X[0] if X.shape[0] > 0 else 'N/A'}. "
+                            f"Original theoretical values (first 5 if available): {all_theoretical_values[:5]}"
+                        )
+                        all_theoretical_values = np.nan_to_num(all_theoretical_values, nan=0.0, posinf=0.0, neginf=0.0)
                 
-                # Create DataFrame with theoretical values
-                theoretical_df = pd.DataFrame({
-                    f"{multiple}_Theoretical": theoretical_values,
-                    'company_id': company_id,
-                    'period_id': period_id,
-                    'fiscal_date_ending': fiscal_date_ending
-                })
+                # Save theoretical values for each company in the 'data' (year_df)
+                for row_idx_label, company_row_in_data in data.iterrows():
+                    current_company_id = company_row_in_data['company_id']
+                    current_period_id = company_row_in_data['period_id']
+                    
+                    try:
+                        # Get the integer position of this row to correctly index into all_theoretical_values
+                        integer_row_position = data.index.get_loc(row_idx_label)
+                        company_specific_theoretical_value = all_theoretical_values[integer_row_position]
+                    except Exception as e_pos:
+                        logger.error(f"Error getting row position for index {row_idx_label} for company {current_company_id} while processing {multiple}: {e_pos}. Skipping theoretical value saving for this row.")
+                        continue
+                    
+                    # Create a DataFrame for saving this single theoretical value
+                    # The column name must be the metric name, e.g., "EV/EBIT_Theoretical"
+                    theoretical_df_for_saving = pd.DataFrame([{
+                        f"{multiple}_Theoretical": company_specific_theoretical_value
+                    }])
+                    
+                    # Save the theoretical value for the current company and period
+                    save_calculated_metrics(theoretical_df_for_saving, current_company_id, current_period_id)
                 
-                # Save theoretical values
-                save_calculated_metrics(theoretical_df, company_id, period_id)
-                
-                # Run regression diagnostics and save results
+                # Run regression diagnostics and save results for the industry-wide model
+                # Uses representative_company_id and representative_period_id for linking the industry model record
                 _, _, diagnostics, plot_binary = calculate_predictions_and_confidence(
                     X, y, multiple, x1_name, x2_name, 0, confidence, selected_industry
                 )
-                save_regression_results(company_id, period_id, multiple, model, diagnostics, plot_binary)
+                save_regression_results(representative_company_id, representative_period_id, multiple, model, diagnostics, plot_binary)
                 
                 results[multiple] = {
-                    'theoretical_values': theoretical_values,
+                    'theoretical_values': all_theoretical_values, # This is the array for all companies
                     'diagnostics': diagnostics
                 }
                 
-                logger.info(f"Completed regression analysis for {multiple}")
+                logger.info(f"Completed regression analysis for {multiple} for industry {selected_industry}")
 
             except Exception as e:
                 logger.error(f"Failed regression analysis for {multiple}: {str(e)}")

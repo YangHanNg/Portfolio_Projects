@@ -17,7 +17,7 @@ import traceback
 from scipy import stats
 #================== SCRIPT PARAMETERS =======================================================================================================================
 # Controls
-TYPE = 1 # 1. Full run # 2. Walk-Forward # 3. Monte Carlo # 4. Optimization # 5. Test
+TYPE = 5 # 1. Full run # 2. Walk-Forward # 3. Monte Carlo # 4. Optimization # 5. Test
 TICKER = 'SPY'
 INITIAL_CAPITAL = 25000.0
 TRIALS = 35 # Number of trials for optimization
@@ -47,16 +47,16 @@ OBJECTIVE_WEIGHTS = {
 THRESHOLD = {
     'Entry': 0.65,
     'Exit': 0.40,
-    'RSI_BUY': 60,
+    'RSI_BUY': 50,
     'RSI_EXIT': 70,
 }
 ADX_THRESHOLD_DEFAULT = 25
-DEFAULT_LONG_RISK = 0.03 
+DEFAULT_LONG_RISK = 0.06 
 DEFAULT_LONG_REWARD = 0.09
 DEFAULT_POSITION_SIZE = 0.20
-MAX_OPEN_POSITIONS = 20
-PERSISTENCE_DAYS = 4
-MAX_POSITION_DURATION = 65
+MAX_OPEN_POSITIONS = 50
+PERSISTENCE_DAYS = 3
+MAX_POSITION_DURATION = 30
 
 # Other default parameters
 DEFAULT_SHORT_RISK = 0.01  
@@ -75,6 +75,8 @@ RSI_LENGTH = 14
 # Bollinger Bands strategy parameters
 BB_LEN = 20
 ST_DEV = 2.0
+MOMENTUM_LOOKBACK = 14
+MOMENTUM_VOLATILITY_LOOKBACK = 21
 #================== DATA RETRIEVAL & HANDLING =================================================================================================================
 def get_data(ticker):
     """
@@ -174,7 +176,8 @@ def prepare_data(df_input, type=None):
     indicator_columns = [
         f'{FAST}_ma', f'{SLOW}_ma', 'Volume_MA20', f'Weekly_MA{WEEKLY_MA_PERIOD}',
         'RSI', 'Upper_Band', 'Lower_Band', 'ATR', 'Close_26_ago', 'ADX',
-        'volume_confirmed', 'weekly_uptrend'
+        'volume_confirmed', 'weekly_uptrend',
+        'price_roc_raw', 'ma_dist_raw', 'vol_accel_raw', 'adx_slope_raw', 'atr_pct_raw'
     ]
 
     # 2. Calculate Core Indicators
@@ -222,6 +225,26 @@ def prepare_data(df_input, type=None):
         weekly_ma_series = df[f'Weekly_MA{WEEKLY_MA_PERIOD}']
         df['weekly_uptrend'] = (df['Close'] > weekly_ma_series) & \
                                 (weekly_ma_series.shift(1).ffill() < weekly_ma_series).fillna(False)
+        
+        # Calculate raw components for momentum score
+        df['price_roc_raw'] = df['Close'].pct_change(MOMENTUM_LOOKBACK).fillna(0)
+        
+        ma_dist_raw_values = np.where(df[f'{FAST}_ma'].values != 0, 
+                                      (df['Close'].values / df[f'{FAST}_ma'].values - 1), 
+                                      0)
+        df['ma_dist_raw'] = pd.Series(ma_dist_raw_values, index=df.index).fillna(0)
+
+        vol_accel_raw_values = np.where(df['Volume_MA20'].values != 0, 
+                                        df['Volume'].values / df['Volume_MA20'].values, 
+                                        1.0)
+        df['vol_accel_raw'] = pd.Series(vol_accel_raw_values, index=df.index).fillna(1.0)
+        
+        df['adx_slope_raw'] = df['ADX'].diff(MOMENTUM_LOOKBACK).fillna(0)
+        
+        atr_pct_raw_values = np.where(df['Close'].values != 0, 
+                                      df['ATR'].values / df['Close'].values, 
+                                      0)
+        df['atr_pct_raw'] = pd.Series(atr_pct_raw_values, index=df.index).fillna(0)
 
         # Check if all expected indicator columns were created
         missing_calculated_indicators = [col for col in indicator_columns if col not in df.columns and col not in ['volume_confirmed', 'weekly_uptrend']] # Booleans have defaults
@@ -240,11 +263,15 @@ def prepare_data(df_input, type=None):
         df = df.iloc[-1260:].copy()
         # Modify check to exclude boolean columns from zero value check
         boolean_columns = ['volume_confirmed', 'weekly_uptrend']
-        numeric_columns = [col for col in df.columns if col not in boolean_columns]
+        potentially_zero_raw_cols = ['price_roc_raw', 'ma_dist_raw', 'adx_slope_raw', 'atr_pct_raw']
+        numeric_columns = [col for col in df.columns 
+                                          if col not in boolean_columns 
+                                          and col not in potentially_zero_raw_cols
+                                          and df[col].dtype in [np.float64, np.float32, np.int64, np.int32]]
         
         # Check if df has null values in any column or zero values in numeric columns only
         has_null = df.isnull().any().any()
-        has_zero_in_numeric = (df[numeric_columns] == 0).any().any()
+        has_zero_in_numeric = (df[numeric_columns] == 0).all().any() if numeric_columns else False
         
         if has_null or has_zero_in_numeric:
             print("Warning: DataFrame contains null or zero values after indicator calculation. Returning empty DataFrame.")
@@ -258,11 +285,15 @@ def prepare_data(df_input, type=None):
         df = df.iloc[-2016:].copy()
         # Modify check to exclude boolean columns from zero value check
         boolean_columns = ['volume_confirmed', 'weekly_uptrend']
-        numeric_columns = [col for col in df.columns if col not in boolean_columns]
+        potentially_zero_raw_cols = ['price_roc_raw', 'ma_dist_raw', 'adx_slope_raw', 'atr_pct_raw']
+        numeric_columns = [col for col in df.columns 
+                                          if col not in boolean_columns 
+                                          and col not in potentially_zero_raw_cols
+                                          and df[col].dtype in [np.float64, np.float32, np.int64, np.int32]]
         
         # Check if df has null values in any column or zero values in numeric columns only
         has_null = df.isnull().any().any()
-        has_zero_in_numeric = (df[numeric_columns] == 0).any().any()
+        has_zero_in_numeric = (df[numeric_columns] == 0).all().any() if numeric_columns else False
         
         if has_null or has_zero_in_numeric:
             print("Warning: DataFrame contains null or zero values after indicator calculation. Returning empty DataFrame.")
@@ -275,129 +306,6 @@ def prepare_data(df_input, type=None):
         print("Warning: Invalid type provided to prepare_data. Returning empty DataFrame.")
         return pd.DataFrame()
 #================== MOMENTUM STRATEGY =========================================================================================================================
-def _calculate_atr_ratio(close_np, atr_np):
-    """Calculate ATR ratio for volatility normalization"""
-    atr_ratio_np = np.full_like(close_np, 0.02, dtype=float)
-    valid_close_mask = close_np != 0
-    safe_close_np = np.where(valid_close_mask, close_np, 1e-9)
-    atr_ratio_np[valid_close_mask] = atr_np[valid_close_mask] / safe_close_np[valid_close_mask]
-    return np.nan_to_num(atr_ratio_np, nan=0.03, posinf=0.03, neginf=0.03)
-# --------------------------------------------------------------------------------------------------------------------------
-def _calculate_momentum_persistence(high_np, low_np, roll_window=7):
-    """Calculate higher highs and higher lows for momentum persistence"""
-    higher_highs = np.zeros_like(high_np, dtype=bool)
-    higher_lows = np.zeros_like(low_np, dtype=bool)
-    
-    for i in range(roll_window, len(high_np)):
-        higher_highs[i] = high_np[i] > np.max(high_np[i-roll_window:i])
-        higher_lows[i] = low_np[i] > np.min(low_np[i-roll_window:i])
-    
-    return higher_highs, higher_lows
-# --------------------------------------------------------------------------------------------------------------------------
-def _create_trading_conditions(df, close_np, fast_ma_np, slow_ma_np, adx_np, adx_threshold,
-                              rsi_np, rsi_buy_threshold, rsi_exit_threshold, rsi_pct_change,
-                              lower_band_np, upper_band_np, higher_highs, higher_lows,
-                              close_roc_5, vix_np, vix_ema_5, vix_pct_change, VIX_HIGH):
-    """Create dictionary of trading conditions"""
-    conditions = {
-        # Primary trend conditions
-        'primary_trend_long': (close_np > fast_ma_np) & (close_np > slow_ma_np),
-        'trend_strength_ok': adx_np > adx_threshold,
-        'relative_trend_strength': adx_np > (adx_np.mean() * 0.8),
-        'volume_ok': df['volume_confirmed'].values.astype(bool),
-        'weekly_uptrend': df['weekly_uptrend'].values.astype(bool),
-        
-        # Secondary conditions
-        'rsi_buy_zone': (rsi_np > rsi_buy_threshold) & (rsi_pct_change > 0),
-        'rsi_exit_zone': rsi_np > rsi_exit_threshold,
-        'rsi_extreme_exit': rsi_np > 80,
-        'bb_buy': close_np < lower_band_np,
-        'bb_exit': close_np > upper_band_np,
-        'price_momentum_strong': higher_highs | higher_lows,
-        'close_uptrend': close_roc_5 > 0,
-        
-        # VIX conditions
-        'vix_ok_for_entry': (vix_np < VIX_HIGH) & (vix_ema_5 < 25),
-        'vix_forced_exit': (vix_np > VIX_HIGH) & (vix_pct_change > 0.45)
-    }
-    
-    # Convert all conditions to boolean arrays
-    for key in conditions:
-        conditions[key] = np.array(conditions[key], dtype=bool)
-    
-    return conditions
-# --------------------------------------------------------------------------------------------------------------------------
-def _calculate_momentum_score(close_np, fast_ma_np, slow_ma_np, close_roc_5,
-                             rsi_np, rsi_pct_change, conditions, atr_ratio_np):
-    """Calculate composite momentum score"""
-    # Trend component
-    trend_score = (
-        (close_np > fast_ma_np).astype(float) * 0.10 +
-        (fast_ma_np > slow_ma_np).astype(float) * 0.10 +
-        (close_roc_5 > 0).astype(float) * 0.05
-    )
-    # RSI component
-    rsi_strength_threshold = 50
-    rsi_scaling_range_top = 70
-    above_threshold_condition = rsi_np > rsi_strength_threshold
-    rsi_rising_condition = rsi_pct_change > 0
-    rsi_score_contribution = 0.25
-    
-    rsi_score = np.where(
-        above_threshold_condition,
-        np.clip((rsi_np - rsi_strength_threshold) / 
-                (rsi_scaling_range_top - rsi_strength_threshold), 0, 1) * rsi_score_contribution,
-        0
-    )
-    rsi_score = np.where(
-        rsi_rising_condition,
-        rsi_score * 1.15,
-        rsi_score
-    )
-    # Volume component
-    volume_score = conditions['volume_ok'].astype(float) * 0.25
-
-    # Price action scoring
-    price_action_score = (
-        conditions['price_momentum_strong'].astype(float) * 0.15 +
-        conditions['close_uptrend'].astype(float) * 0.10
-    )
-    # Combined score
-    momentum_score = trend_score + rsi_score + volume_score + price_action_score
-    
-    # Adjust for volatility with reduced impact
-    atr_impact_factor = 0.7
-    momentum_score *= (1 + np.log1p(atr_ratio_np) * atr_impact_factor)
-    
-    return np.clip(momentum_score, 0, 1)
-# --------------------------------------------------------------------------------------------------------------------------
-def _detect_momentum_decay(momentum_score, decay_window=8, decay_threshold=0.7):
-    """Detect momentum decay patterns"""
-    momentum_decay = np.zeros_like(momentum_score, dtype=bool)
-    
-    for i in range(decay_window, len(momentum_score)):
-        declining_days = sum(momentum_score[i-j] < momentum_score[i-j-1] for j in range(1, decay_window))
-        if declining_days >= int(decay_window * decay_threshold):
-            momentum_decay[i] = True
-    
-    return momentum_decay
-# --------------------------------------------------------------------------------------------------------------------------
-def _calculate_entry_conditions(conditions):
-    """Calculate primary and secondary entry conditions"""
-    primary_entry_conditions = (
-        conditions['trend_strength_ok'].astype(float) * 0.4 +
-        conditions['primary_trend_long'].astype(float) * 0.3 +
-        conditions['weekly_uptrend'].astype(float) * 0.3
-    )
-    
-    secondary_entry_conditions = (
-        conditions['rsi_buy_zone'].astype(float) * 0.3 +
-        conditions['price_momentum_strong'].astype(float) * 0.4 +
-        conditions['volume_ok'].astype(float) * 0.3
-    )
-    
-    return primary_entry_conditions, secondary_entry_conditions
-# --------------------------------------------------------------------------------------------------------------------------
 def signals(df, adx_threshold, threshold):
     
     # Initialize signals DataFrame with the same index
@@ -415,23 +323,11 @@ def signals(df, adx_threshold, threshold):
         else:
             print(f"Warning: {param} not found in threshold. Using default value.")
     
-    # Extract thresholds
-    rsi_buy_threshold = threshold.get('RSI_BUY', 40)
-    rsi_exit_threshold = threshold.get('RSI_EXIT', 60)
-    buy_threshold = threshold.get('Entry', 0.6)
-    exit_threshold = threshold.get('Exit', 0.4)
-    VIX_HIGH = 35  # Exit momentum trades above this
-    
-    # Weight parameters for entry conditions
-    ENTRY_WEIGHT_PRIMARY = 0.65
-    ENTRY_WEIGHT_SECONDARY = 0.35
-
     # Validate required columns exist in the dataframe
     required_indicator_cols = [
-        fast_ma_col, slow_ma_col, 'RSI', 'Close',
-        'Lower_Band', 'Upper_Band', 'ATR', 'ADX', 
-        'Volume', 'Volume_MA20', 'Open', 'High', 'Low',
-        'volume_confirmed', 'weekly_uptrend'
+        fast_ma_col, slow_ma_col, 'RSI', 'Close', 'Volume', 'High', 'Low',
+        'ATR', 'ADX', 'Volume_MA20', 
+        'Open', 'volume_confirmed', 'weekly_uptrend'
     ]
     
     missing_cols = [col for col in required_indicator_cols if col not in df.columns]
@@ -441,123 +337,83 @@ def signals(df, adx_threshold, threshold):
 
     # Extract NumPy arrays for performance
     close_np = df['Close'].values
-    atr_np = df['ATR'].values
     adx_np = df['ADX'].values
     fast_ma_np = df[fast_ma_col].values
     slow_ma_np = df[slow_ma_col].values
-    rsi_np = df['RSI'].values
-    lower_band_np = df['Lower_Band'].values
-    upper_band_np = df['Upper_Band'].values
-    high_np = df['High'].values
-    lower_np = df['Low'].values
-    
-    # Get series for operations that work better with Series
-    rsi_series = df['RSI']
-    vix_series = df['VIX'] if 'VIX' in df.columns else pd.Series(20.0, index=df.index)
-    vix_np = vix_series.values
-
-    # Determine market regime
-    regime_conditions = [
-        vix_np < 15,
-        vix_np > 25
-    ]
-    regime_choices = [
-        "low_vol",
-        "high_vol"
-    ]
-    market_regime_series = np.select(regime_conditions, regime_choices, default="normal")
-    
-    # Calculate ATR ratio
-    atr_ratio_np = _calculate_atr_ratio(close_np, atr_np)
-    
-    # Calculate momentum indicators
-    higher_highs, higher_lows = _calculate_momentum_persistence(high_np, lower_np)
-    
-    # Calculate VIX-related indicators
-    vix_ema_5 = vix_series.ewm(span=5, adjust=False).mean()
-    vix_pct_change_3 = vix_series.pct_change(periods=3).fillna(0)
-    rsi_pct_change_3 = rsi_series.pct_change(periods=3).fillna(0)
-    
-    # Calculate price momentum indicators
-    close_series = pd.Series(close_np)
-    close_roc_5 = close_series.pct_change(periods=5).fillna(0)
-    close_roc_10 = close_series.pct_change(periods=10).fillna(0)
 
     # Define signal conditions
-    conditions = _create_trading_conditions(
-        df, close_np, fast_ma_np, slow_ma_np, adx_np, adx_threshold,
-        rsi_np, rsi_buy_threshold, rsi_exit_threshold, rsi_pct_change_3.values,
-        lower_band_np, upper_band_np, higher_highs, higher_lows,
-        close_roc_5.values, vix_np, vix_ema_5.values, vix_pct_change_3.values, VIX_HIGH
-    )
+    conditions = {
+        # Primary trend conditions
+        'trend_signal': (fast_ma_np > slow_ma_np),
+        'trend_strength_ok': adx_np > adx_threshold,
+        'volume_ok': df['volume_confirmed'].values.astype(bool),
+        # Price confirmation
+        'price_uptrend': (close_np > fast_ma_np) & (close_np > slow_ma_np),
+        'weekly_uptrend': df['weekly_uptrend'].values.astype(bool),
+    }
+
+    # ---- Price Momentum (40%) ----
+    # 1. Normalized ROC to avoid absolute value dependence
+    df['price_roc'] = df['price_roc_raw'].rank(pct=True).fillna(0.5)
+
+    # 2. Distance from fast MA (avoid binary crossover)
+    df['ma_dist'] = df['ma_dist_raw'].rank(pct=True).fillna(0.5)
+
+    # ---- Volume Confirmation (20%) ----
+    # Volume acceleration vs. moving average
+    df['vol_accel'] = df['vol_accel_raw'].rank(pct=True).fillna(0.5)
+
+    # ---- Trend Strength (20%) ----
+    # ADX slope (direction-agnostic)
+    df['adx_slope'] = df['adx_slope_raw'].rank(pct=True).fillna(0.5)
+
+    # ---- Volatility Adjustment (20%) ----
+    # Scale scores down in high volatility (reduces false signals)
+    df['vol_adjustment_rank'] = df['atr_pct_raw'].rolling(MOMENTUM_VOLATILITY_LOOKBACK, min_periods=1).rank(pct=True).fillna(0.5)
+    df['vol_adjustment'] = (1 - df['vol_adjustment_rank']).clip(0.5, 1.5)
+
+    # ---- Calculate Momentum Score ----
+    raw_score = (
+        0.4 * (df['price_roc'] * 0.6 + df['ma_dist'] * 0.4) +  # Price momentum 
+        0.2 * df['vol_accel'] +                                   # Volume 
+        0.2 * df['adx_slope']                                     # Trend strength
+    ) 
     
-    # Calculate momentum score components
-    momentum_score = _calculate_momentum_score(
-        close_np, fast_ma_np, slow_ma_np, close_roc_5.values,
-        rsi_np, rsi_pct_change_3.values, conditions, atr_ratio_np
-    )
-    
-    # Calculate momentum decay
-    momentum_decay = _detect_momentum_decay(momentum_score)
-    
-    # Generate buy and exit signals
-    primary_entry_conditions, secondary_entry_conditions = _calculate_entry_conditions(conditions)
-    
-    entry_score = (primary_entry_conditions * ENTRY_WEIGHT_PRIMARY) + (
-        secondary_entry_conditions * ENTRY_WEIGHT_SECONDARY)
+    # Apply volatility adjustment
+    momentum_score_values = ((raw_score * df['vol_adjustment']).clip(0, 1) * 100).values
     
     buy_signal = (
-        (entry_score >= 0.6) &
-        ~momentum_decay &
-        (momentum_score > buy_threshold) &
-        conditions['vix_ok_for_entry']
+        (conditions['trend_signal']) &
+        (momentum_score_values > 55) &
+        (conditions['volume_ok']) & 
+        (conditions['price_uptrend'] | conditions['weekly_uptrend'])
     )
     
     exit_signal = (
-        momentum_decay | conditions['vix_forced_exit'] | conditions['rsi_exit_zone'] | 
-         ~conditions['primary_trend_long'] & (momentum_score < exit_threshold) | conditions['bb_exit'] 
+        (momentum_score_values < 25) |
+        ((df['RSI'].values > 70) & (momentum_score_values < 50))
     )
     
-    immediate_exit = conditions['rsi_extreme_exit'] | (adx_np < adx_threshold/3.5) | (vix_np > 30)
-    
-    # Calculate signal strength
-    signal_strength = np.where(
-        buy_signal,
-        entry_score * momentum_score,
-        0
+    immediate_exit = (
+        (momentum_score_values < 20) | 
+        (adx_np < adx_threshold/2.5)
     )
-    normalized_signal_strength = np.where(
-        signal_strength > 0,
-        0.5 + np.clip(signal_strength, 0, 1),
-        0
-        )
     
     # Assign all signals to the DataFrame
-    signals_df['momentum_score'] = momentum_score
-    signals_df['momentum_decay'] = momentum_decay
-    signals_df['market_regime'] = market_regime_series
     signals_df['buy_signal'] = buy_signal
     signals_df['exit_signal'] = exit_signal
+    signals_df['momentum_score'] = momentum_score_values
     signals_df['immediate_exit'] = immediate_exit
-    signals_df['signal_strength'] = normalized_signal_strength
 
     return signals_df
 # --------------------------------------------------------------------------------------------------------------------------
-def process_signals(signals_df, i, previous_day_atr, previous_day_adx, previous_day_vix, persistence_days):
+def process_signals(signals_df, i, previous_day_atr, previous_day_adx):
     """Extract signal processing logic to a separate function"""
     current_date = signals_df.index[i]
     buy_signal = signals_df['buy_signal'].iloc[i-1]
     exit_signal = signals_df['exit_signal'].iloc[i-1]
     immediate_exit = signals_df['immediate_exit'].iloc[i-1]
     momentum_score = signals_df['momentum_score'].iloc[i-1]
-    momentum_decay = signals_df['momentum_decay'].iloc[i-1]
-    market_regime = signals_df['market_regime'].iloc[i-1]
-    momentum_strength = signals_df['signal_strength'].iloc[i-1]
-    
-    # Check for momentum persistence
-    momentum_persistence = False
-    if i >= persistence_days:
-        momentum_persistence = all(signals_df['momentum_score'].iloc[i-persistence_days:i] > 0.5)
     
     return {
         'current_date': current_date,
@@ -565,13 +421,8 @@ def process_signals(signals_df, i, previous_day_atr, previous_day_adx, previous_
         'exit_signal': exit_signal,
         'immediate_exit': immediate_exit,
         'momentum_score': momentum_score,
-        'momentum_decay': momentum_decay,
         'previous_day_atr': previous_day_atr,
         'previous_day_adx': previous_day_adx,
-        'previous_day_vix': previous_day_vix,
-        'momentum_persistence': momentum_persistence,
-        'market_regime': market_regime,
-        'momentum_strength': momentum_strength
     }
 # --------------------------------------------------------------------------------------------------------------------------
 def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAULT_LONG_REWARD, position_size=DEFAULT_POSITION_SIZE, risk_free_rate=RISK_FREE_RATE_ANNUAL, 
@@ -593,7 +444,6 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
     prices = df_with_indicators['Open'].values
     atrs = df_with_indicators['ATR'].values
     adxs = df_with_indicators['ADX'].values
-    vixs = df_with_indicators['VIX'].values if 'VIX' in df_with_indicators.columns else np.zeros(len(df_with_indicators))
 
     # 3. Main Processing Loop
     for i in range(1, len(df_with_indicators)):
@@ -602,7 +452,7 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
         current_date = df_with_indicators.index[i]
 
         # Process signals for this step
-        signal_data = process_signals(signals_df, i, atrs[i-1], adxs[i-1], vixs[i-1], persistence_days)
+        signal_data = process_signals(signals_df, i, atrs[i-1], adxs[i-1])
 
         # --- Exit Conditions (Priority Order) ---
         if trade_manager.position_count > 0:
@@ -612,7 +462,6 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                 current_date, 
                 signal_data['previous_day_atr'],
                 signal_data['previous_day_adx'], 
-                signal_data['market_regime']
             )
             
             if not any_trailing_stop_hit:
@@ -623,34 +472,22 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                                                reason_override="Immediate Exit")
                 # 3. Normal exit with tiered approach
                 elif signal_data['exit_signal']:
-                    trim_amount = 0.05 if signal_data['momentum_score'] < threshold.get('Exit', 0.4) else 0.02
+                    trim_ammount = 0.1 if signal_data['momentum_score'] > 40 else 0.0
                     trade_manager.process_exits(current_date, transaction_price, 
-                                               direction_to_exit='Long', Trim=trim_amount)
+                                                direction_to_exit='Long', Trim=trim_ammount)
                 
-                # 4. Take partial profits if we had strong momentum for a while
-                elif signal_data['momentum_persistence'] and trade_manager.position_count > 0:
-                    unrealized_pnls = trade_manager.unrealized_pnl(transaction_price)
-                    portfolio_value = trade_manager.portfolio_value + unrealized_pnls
-                    if unrealized_pnls > (portfolio_value * 0.03):
-                        trade_manager.process_exits(current_date, transaction_price, 
-                                                  direction_to_exit='Long', Trim=0.03)
-
             # 5. Check position health and apply exits based on health
             if trade_manager.position_count > 0 and not any_trailing_stop_hit:
                 position_health = trade_manager.position_health(
                     transaction_price, 
                     signal_data['previous_day_atr'],
-                    current_date, 
-                    signal_data['momentum_score'], 
+                    current_date,  
+                    signal_data['momentum_score'],
                     max_position_duration
                 )
                 
-                # Access the PnL from health-based exits
-                health_based_pnl = position_health.get('health_pnl', 0.0)
-
         # --- Entry Conditions ---
-        if (signal_data['buy_signal'] and trade_manager.position_count < max_positions and 
-            not signal_data['momentum_decay'] and signal_data['previous_day_adx'] > adx_threshold):
+        if (signal_data['buy_signal'] and trade_manager.position_count < max_positions):
             
             entry_params = {
                 'price': transaction_price * (1 + 0.001),
@@ -660,8 +497,6 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                 'atr': signal_data['previous_day_atr'],
                 'adx': signal_data['previous_day_adx'],
                 'position_size': position_size,
-                'vix': signal_data['previous_day_vix'],
-                'momentum_strength': signal_data['momentum_strength'],
             }
             trade_manager.process_entry(current_date, entry_params, direction='Long')
         
@@ -742,7 +577,7 @@ class TradeManager:
         Returns a combined dictionary with health metrics and total PnL from any health-based exits.
         """
         # Initialize return value
-        total_pnl = 0.0
+        total_pnl_from_health_exits = 0.0
         
         if self.active_trades.empty:
             # Return empty health metrics if no positions
@@ -751,98 +586,144 @@ class TradeManager:
                 'strength': 'none', 
                 'position_duration': {}, 
                 'take_profit_levels': {},
-                'health_pnl': total_pnl
+                'health_pnl': total_pnl_from_health_exits
             }
             
         # Cast inputs to proper types
-        current_price = np.float32(current_price)
-        current_atr = np.float32(current_atr)
-        current_score = np.float32(current_score)
+        current_price_np = np.float32(current_price)
+        current_atr_np = np.float32(current_atr)
+        current_score_np = np.float32(current_score)
 
-        # Calculate unrealized PnL for all active trades
-        unrealized_pnls_series = (current_price - self.active_trades['entry_price']) * \
-                                 self.active_trades['remaining_shares'] * \
-                                 self.active_trades['multiplier']
+        # Calculate unrealized PnL for all active trades (vectorized)
+        unrealized_pnls_series = (
+            (current_price_np - self.active_trades['entry_price']) * 
+            self.active_trades['remaining_shares'] * 
+            self.active_trades['multiplier']
+        )
         unrealized_pnls_sum = unrealized_pnls_series.sum()
 
-        total_risk_for_all_trades = 0.0
+        # Calculate total initial risk for all active trades (vectorized)
+        # Assuming stop_loss is per share and fixed at entry for this calculation
+        total_initial_risk_at_entry = (
+            abs(self.active_trades['entry_price'] - self.active_trades['stop_loss'].astype(float)) * 
+            self.active_trades['share_amount'] # Use original share_amount for initial total risk
+        ).sum()
+        
+        strength_label = 'none'  # Default strength label
+        atr_pct = current_atr_np / current_price_np if current_price_np != 0 else 0.0 
+        adj_score  = current_score_np * (1.2 - 0.5 * atr_pct)  # Adjust score by ATR percentage
+        if adj_score > 75:
+            strength_label = 'hyper'
+        elif adj_score > 60:
+            strength_label = 'very_strong'
+        elif adj_score > 45:
+            strength_label = 'strong'
+        elif adj_score > 30:
+            strength_label = 'moderate'
+        else:
+            strength_label = 'weak'
+        
         position_durations = {} # Keyed by active_trades DataFrame index
         take_profit_levels = {} # Keyed by active_trades DataFrame index
+        
+        # Create a list of indices to iterate over, as self.active_trades can change size during iteration
+        indices_to_iterate = self.active_trades.index.tolist()
 
-        for idx, trade in self.active_trades.iterrows(): # idx is the DataFrame index
+        for idx in indices_to_iterate:
+            # Check if trade still exists in active_trades (it might have been removed by process_exits)
+            if idx not in self.active_trades.index:
+                continue
+            
+            trade = self.active_trades.loc[idx]
+
             if trade['direction'] == 'Long': # Assuming only long for now
-                # Calculate risk for this specific trade based on remaining shares
-                risk_per_trade = abs(trade['entry_price'] - float(trade['stop_loss'])) * trade['remaining_shares']
-                total_risk_for_all_trades += risk_per_trade
-
-                if isinstance(trade['entry_date'], pd.Timestamp):
-                    # Store duration keyed by the DataFrame index 'idx'
+                # Calculate duration
+                duration = 0
+                if isinstance(trade['entry_date'], pd.Timestamp) and isinstance(current_date, pd.Timestamp):
                     duration = (current_date - trade['entry_date']).days
-                    position_durations[idx] = duration
-                    
-                    # Check for positions that have reached their time limit
-                    # Integrated from process_position_health
-                    if 'max_position_duration' in locals() and duration > max_position_duration:
-                        # Ensure position still exists (it should, we're iterating over active trades)
-                        if idx in self.active_trades.index:
-                            pnl = self.process_exits(current_date, current_price, direction_to_exit='Long', 
-                                                Trim=0.0, reason_override="Max Duration")
-                            total_pnl += pnl
-                else:
-                    position_durations[idx] = np.nan # Handle potential non-Timestamp entry_date
+                position_durations[idx] = duration
 
-                # Calculate current profit and R-multiple for this trade
-                current_profit_per_trade = (current_price - trade['entry_price']) * trade['remaining_shares']
+                # Skip if already exited (e.g. remaining_shares became 0 from a previous health check in this same call)
+                if trade['remaining_shares'] <= 0:
+                    continue
+
+                # --- Dynamic Exit Logic ---
+                # 1. Time Exit (only if momentum faded)
+                if duration > max_position_duration and current_score_np < 40:
+                    # Ensure position still exists before trying to exit
+                    if idx in self.active_trades.index:
+                        pnl = self.process_exits(
+                            current_date, current_price_np, 
+                            direction_to_exit='Long',
+                            Trim=0.0, # Full exit
+                            reason_override="Max Duration"
+                        )
+                        total_pnl_from_health_exits += pnl
+                    continue # Move to next trade if this one was exited
+
+                # Calculate risk per share for R-multiple calculation
+                risk_per_share = abs(trade['entry_price'] - float(trade['stop_loss']))
+                
+                current_profit_per_share = (current_price_np - trade['entry_price'])
                 r_multiple = 0.0
-                if risk_per_trade > 0 and current_profit_per_trade > 0 : # Check current_profit_per_trade > 0
-                    r_multiple = current_profit_per_trade / risk_per_trade
+                if risk_per_share > 1e-9: # Avoid division by zero
+                    r_multiple = current_profit_per_share / risk_per_share
                 
                 # Store take profit levels keyed by DataFrame index 'idx'
+                # R-multiple targets (momentum-scaled)
                 take_profit_levels[idx] = {
-                    '1R': trade['entry_price'] + 1 * abs(trade['entry_price'] - float(trade['stop_loss'])),
-                    '2R': trade['entry_price'] + 2 * abs(trade['entry_price'] - float(trade['stop_loss'])),
-                    '3R': trade['entry_price'] + 3 * abs(trade['entry_price'] - float(trade['stop_loss'])),
-                    'current_r': r_multiple
+                    '1R_target': trade['entry_price'] + risk_per_share * (1 + current_score_np/100),
+                    '2R_target': trade['entry_price'] + risk_per_share * (2 + current_score_np/50),
+                    'current_r_multiple': r_multiple,
+                    # Original R levels for reference if needed
+                    'static_1R': trade['entry_price'] + risk_per_share * 1,
+                    'static_2R': trade['entry_price'] + risk_per_share * 2,
+                    'static_3R': trade['entry_price'] + risk_per_share * 3,
                 }
         
-        # Overall profit factor based on sum of PnLs and sum of risks
-        profit_factor_overall = unrealized_pnls_sum / total_risk_for_all_trades if total_risk_for_all_trades > 0 else 0.0
+        # --- Portfolio-Level Profit-Taking Rules (based on overall profit factor) ---
+        # Calculate current total risk based on remaining shares and current stop losses
+        current_total_risk_active = (
+            abs(self.active_trades['entry_price'] - self.active_trades['stop_loss'].astype(float)) * 
+            self.active_trades['remaining_shares']
+        ).sum()
 
-        # Determine momentum strength based on current_score
-        strength_label = 'none' # Use 'strength' as the key
-        if current_score > 0.8:
-            strength_label = 'very_strong'
-        elif current_score > 0.6:
-            strength_label = 'strong'
-        elif current_score > 0.4:
-            strength_label = 'moderate'
-        elif current_score > 0.2:
-            strength_label = 'weak'
-        else:
-            strength_label = 'very_weak'
+        profit_factor_overall = unrealized_pnls_sum / current_total_risk_active if current_total_risk_active > 0 else 0.0
+
+        # Matrix-based trimming (momentum-dependent)
+        PROFIT_RULES = {
+            'hyper': {'pf_thresholds': [2.0, 3.0], 'trim_pcts': [0.1, 0.2]},
+            'very_strong': {'pf_thresholds': [1.5, 2.5], 'trim_pcts': [0.15, 0.25]},
+            'strong': {'pf_thresholds': [1.2, 2.0], 'trim_pcts': [0.2, 0.3]},
+            'moderate': {'pf_thresholds': [1.0], 'trim_pcts': [0.3]},
+            'weak': {'pf_thresholds': [0.8], 'trim_pcts': [0.5]}  # Aggressive exit
+        }
         
-        # --- Integrated position health processing ---
-        # Previously separate function now integrated here
-        if profit_factor_overall > 1.5:
-            if strength_label in ['weak', 'very_weak']:
-                # Exit full position if momentum is weak
-                total_pnl += self.process_exits(current_date, current_price, direction_to_exit='Long', Trim=0.10, reason_override="Positional Take Profit")
-            elif strength_label == 'moderate':
-                # Partial exit (50%) if momentum is moderate
-                total_pnl += self.process_exits(current_date, current_price, direction_to_exit='Long', Trim=0.07, reason_override="Positional Take Profit")
-            elif strength_label in ['strong', 'very_strong'] and profit_factor_overall > 3.0:
-                # Take some profits even with strong momentum
-                total_pnl += self.process_exits(current_date, current_price, direction_to_exit='Long', Trim=0.03, reason_override="Positional Take Profit")
+        rules = PROFIT_RULES.get(strength_label, {})
+        if not self.active_trades.empty: # Only apply if there are active trades
+            for threshold_pf, trim_pct in zip(rules.get('pf_thresholds', []), 
+                                        rules.get('trim_pcts', [])):
+                if profit_factor_overall >= threshold_pf:
+                    # This process_exits call might affect self.active_trades
+                    # It will iterate through trades and apply trimming if applicable
+                    pnl_from_trimming = self.process_exits(
+                        current_date, current_price_np,
+                        direction_to_exit='Long', # Assuming long only for now
+                        Trim=trim_pct,
+                        reason_override="Profit Take"
+                    )
+                    total_pnl_from_health_exits += pnl_from_trimming
+                    break # Apply only one rule per call
             
         return {
-            'profit_factor': profit_factor_overall,
+            'profit_factor': profit_factor_overall, # Use overall profit factor
             'strength': strength_label, 
             'position_duration': position_durations, 
             'take_profit_levels': take_profit_levels,
-            'health_pnl': total_pnl  # Include PnL from health-based exits
+            'health_pnl': total_pnl_from_health_exits
         }
     # ----------------------------------------------------------------------------------------------------------
-    def trailing_stops(self, current_price, current_date, current_atr, adx_value, market_regime="normal"):
+    def trailing_stops(self, current_price, current_date, current_atr, adx_value):
         """
         Simplified trailing stop implementation using vectorized operations.
         """
@@ -858,33 +739,46 @@ class TradeManager:
             self.active_trades['highest_close_since_entry'],
             current_price_arr
         )
-        
-        # Calculate dynamic multipliers
-        adx_normalized = (adx_value - 25) / 50  # 0 at ADX=25, 0.5 at ADX=50
-        base_multiplier = 2.0 + adx_normalized
-        
-        # Calculate profit factor based on percentage gain from entry
-        profit_pct = ((self.active_trades['highest_close_since_entry'] - self.active_trades['entry_price']) / 
-                            self.active_trades['entry_price']) 
-        profit_factor = 1 + np.clip(profit_pct * 3, 0, 1)  
-        
-        # Final multiplier combines trend strength and profit
-        final_multiplier = base_multiplier * profit_factor
-        
-        # Calculate new stops
-        new_stops = (self.active_trades['highest_close_since_entry'] - 
-                    (final_multiplier * current_atr_arr))
-        
-        # Never move stops backward
-        in_profit = profit_pct > 0.03
-        new_stops = np.where(in_profit, 
-                        np.maximum(new_stops, self.active_trades['entry_price'] * 1.01),
-                        new_stops)
 
-        self.active_trades['stop_loss'] = np.maximum(
-            self.active_trades['stop_loss'],
+        # --- 1. Dynamic ATR Multiplier Based on ADX ---
+        if adx_value < 20:  # Weak trend: tight stops
+            base_multiplier = 1.0  
+        elif 20 <= adx_value <= 40:  # Normal trend
+            base_multiplier = 2.0  
+        else:  # Strong trend (ADX > 40): wider stops
+            base_multiplier = 1.5  
+
+        # --- 2. Profit-Based Multiplier Boosts ---
+        profit_pct = ((self.active_trades['highest_close_since_entry'] - 
+                    self.active_trades['entry_price']) / self.active_trades['entry_price'])
+        
+        # Tiered profit locking (adjust thresholds as needed)
+        profit_factor = np.where(
+            profit_pct > 0.10, 1.5,  # Lock in profits aggressively after +10%
+            np.where(
+                profit_pct > 0.05, 1.2,  # Moderate locking after +5%
+                1.0  # Default
+            )
+        )
+        
+        # --- 3. Calculate Final Stops ---
+        final_multiplier = base_multiplier * profit_factor
+        new_stops = self.active_trades['highest_close_since_entry'] - (final_multiplier * current_atr)
+
+        # --- 4. Apply Stop Rules ---
+        # Rule 1: Never move stops backward
+        new_stops = np.maximum(new_stops, self.active_trades['stop_loss'])
+        
+        # Rule 2: Never risk giving back >50% of unrealized gains
+        unrealized_gains = current_price - self.active_trades['entry_price']
+        new_stops = np.where(
+            unrealized_gains > 0,
+            np.maximum(new_stops, self.active_trades['entry_price'] + (unrealized_gains * 0.5)),
             new_stops
         )
+
+        # Update stops
+        self.active_trades['stop_loss'] = new_stops
         
         # Check for exits
         stops_hit = current_price_arr <= self.active_trades['stop_loss'].values
@@ -928,7 +822,8 @@ class TradeManager:
             current_shares = trade['remaining_shares']
             
             if current_shares <= 0:
-                indices_to_remove.append(idx)
+                if idx not in indices_to_remove:
+                    indices_to_remove.append(idx)
                 continue
 
             # Priority 1: Stop Loss Check
@@ -1015,103 +910,75 @@ class TradeManager:
     def process_entry(self, current_date, entry_params, direction=None):
         is_long = direction == 'Long'
         direction_mult = 1 if is_long else -1
-        momentum_strength = entry_params.get('momentum_strength', 1.0)
 
-        # 1. Calculate Initial Stop (ATR + ADX adjusted)
-        risk_pct = entry_params['risk'] 
-        adx_adjustment = 1 + (entry_params['adx'] - 25)/100
-        volatility_adjustment = entry_params['atr']/entry_params['price'] * 3
-        final_risk = risk_pct * adx_adjustment * volatility_adjustment
-        price_based_stop = entry_params['price'] * (1 - min(0.08, final_risk))
+        # --- 1. ADX-Based ATR Multiplier & Stop-Loss ---
+        adx = entry_params['adx']
+        atr = entry_params['atr']
         
-        adx_factor = 1.0 + (entry_params['adx'] - 25) / 50
-        multiplier = 2.5 * adx_factor * momentum_strength
-        stop_distance = entry_params['atr'] * multiplier
-        atr_based_stop = entry_params['price'] - (stop_distance)
+        # Dynamic ATR Multiplier (adjust based on ADX)
+        if adx < 20:  # Weak trend: tighter stops, smaller size
+            atr_multiplier = 1.0  
+            risk_pct = entry_params['risk'] * 0.5  # Halve risk in choppy markets
+        elif 20 <= adx <= 40:  # Strong trend: default
+            atr_multiplier = 2.5  
+            risk_pct = entry_params['risk']
+        else:  # Very strong trend: secure profits faster
+            atr_multiplier = 1.5  
+            risk_pct = entry_params['risk'] * 1.2  # Slightly increase risk
         
-        # Use the tighter of the two stops for better protection
-        initial_stop = atr_based_stop
-        
-        # 2. Position Sizing Based on Risk
+        stop_distance = atr * atr_multiplier
+        initial_stop = entry_params['price'] - (stop_distance * direction_mult)
+
+        # --- 2. Position Sizing ---
         risk_per_share = abs(entry_params['price'] - initial_stop)
-        if risk_per_share < 1e-9: # Avoid division by zero
+        if risk_per_share < 1e-9:
             return False
 
-        max_risk_amount = entry_params['portfolio_value'] * entry_params['risk'] # Max $ risk for the trade
+        max_risk_amount = entry_params['portfolio_value'] * risk_pct  # Now ADX-adjusted
         shares_by_risk = int(max_risk_amount / risk_per_share)
-        
-        # Calculate VIX scaling factor
-        current_vix = entry_params.get('vix', 20.0) # Default to a neutral VIX if not provided
-        vix_scaling_factor = np.clip(1.0 + (current_vix - 20) / 30, 0.8, 1.5)
 
-        effective_position_size_pct = entry_params['position_size'] * vix_scaling_factor * momentum_strength
-        
-        max_position_value_allowed = entry_params['portfolio_value'] * effective_position_size_pct
-        shares_by_size_cap = int(max_position_value_allowed / entry_params['price'])
-
-        # Determine shares: minimum of risk-based and VIX-adjusted size cap
-        shares = int(min(shares_by_risk, shares_by_size_cap))
-
-        # Ensure shares are not negative or zero if they passed previous checks
-        if shares <= 0:
-            return False
-
-        # Calculate dollar amount for this position
+        # Cap shares by available capital and exposure
+        shares = shares_by_risk
         position_dollar_amount = shares * entry_params['price']
         actual_position_size = position_dollar_amount / entry_params['portfolio_value']
 
-        max_total_exposure = 0.95
-        current_exposure = 0.0 
+        # Exposure check (unchanged)
+        max_total_exposure = 0.85
+        current_exposure = 0.0
         if not self.active_trades.empty:
-            # Ensure 'entry_price' and 'remaining_shares' are float32 for consistent calculation
-            current_prices_of_active_trades = self.active_trades['entry_price'].astype(np.float32)
-            remaining_shares_of_active_trades = self.active_trades['remaining_shares'].astype(np.float32)
-            current_positions_value = (remaining_shares_of_active_trades * current_prices_of_active_trades).sum()
-            current_exposure = current_positions_value / entry_params['portfolio_value']
+            current_prices = self.active_trades['entry_price'].astype(np.float32)
+            remaining_shares = self.active_trades['remaining_shares'].astype(np.float32)
+            current_exposure = (remaining_shares * current_prices).sum() / entry_params['portfolio_value']
 
-        # Calculate new position exposure
-        new_exposure = position_dollar_amount / entry_params['portfolio_value']
-        total_exposure = current_exposure + new_exposure
-        
-        # 3. Check total portfolio exposure (add here)
+        total_exposure = current_exposure + actual_position_size
         if total_exposure > max_total_exposure:
-            # Try to adjust position size to fit within exposure limits
             available_exposure = max_total_exposure - current_exposure
             if available_exposure > 0:
                 adjusted_shares = int((available_exposure * entry_params['portfolio_value']) / entry_params['price'])
-                if adjusted_shares > 0:
-                    shares = min(shares, adjusted_shares)
-                    position_dollar_amount = shares * entry_params['price']
-                    actual_position_size = position_dollar_amount / entry_params['portfolio_value']
-                else:
-                    return False
+                shares = min(shares, adjusted_shares)
+                position_dollar_amount = shares * entry_params['price']
+                actual_position_size = position_dollar_amount / entry_params['portfolio_value']
             else:
                 return False
 
-        # 4. Available Capital Check 
+        # --- 3. Take-Profit Calculation (ADX-Boosted) ---
+        base_profit_distance = 2 * atr  # Default 3:1 reward:risk
+        if adx > 40:  # Strong trend: wider profit target
+            profit_multiplier = 1 + (adx / 100)  # Up to 1.4x
+        else:
+            profit_multiplier = 1.0
+
+        take_profit = entry_params['price'] + (base_profit_distance * profit_multiplier * direction_mult)
+
+        # --- 4. Final Checks ---
         available_capital = self.portfolio_value - self.allocated_capital
         if position_dollar_amount > available_capital or shares <= 0:
             return False
-        
-        # Calculate commission before final check
-        commission = self.calculate_commission(shares, entry_params['price'])
 
-        # Final minimum position check
-        min_position_value = entry_params['portfolio_value'] * 0.001  # 0.1% minimum position size
+        commission = self.calculate_commission(shares, entry_params['price'])
+        min_position_value = entry_params['portfolio_value'] * 0.001
         if position_dollar_amount < min_position_value:
             return False
-        
-    
-        # 4. Calculate Take-Profit Using Risk/Reward Ratio
-        reward = entry_params['reward'] 
-        adx_boost = (entry_params['adx']/40)
-        volatility_boost = (entry_params['atr']/entry_params['price']) * 4
-        reward_profit = entry_params['price'] * (1 + reward + adx_boost + volatility_boost)
-        base_profit = 3 * entry_params['atr']  # 3x ATR as initial target
-        adx_boost = 1 + (entry_params['adx'] / 100)  # Up to 2x for strong trends
-        atr_profit = entry_params['price'] + base_profit * adx_boost
-
-        take_profit = atr_profit
 
         self.position_count += 1
 
@@ -1313,7 +1180,7 @@ def trade_statistics(equity, trade_log, wins, losses, risk_free_rate=0.04):
     if trade_log:
         for trade in trade_log:
             if 'Exit Reason' in trade:
-                if trade['Exit Reason'] in ['Take Profit', 'Trailing Stop', 'Max Duration']:
+                if trade['Exit Reason'] in ['Take Profit', 'Trailing Stop', 'Max Duration', 'Profit Take']:
                     hit_count += 1
     
     hit_rate = (hit_count / total_trades * 100) if total_trades > 0 else 0.0
