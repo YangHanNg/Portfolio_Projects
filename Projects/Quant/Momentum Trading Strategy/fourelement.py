@@ -17,12 +17,12 @@ import traceback
 from scipy import stats
 #================== SCRIPT PARAMETERS =======================================================================================================================
 # Controls
-TYPE = 5 # 1. Full run # 2. Walk-Forward # 3. Monte Carlo # 4. Optimization # 5. Test
+TYPE = 3 # 1. Full run # 2. Walk-Forward # 3. Monte Carlo # 4. Optimization # 5. Test
 TICKER = 'SPY'
 INITIAL_CAPITAL = 25000.0
 TRIALS = 35 # Number of trials for optimization
-COMMISION = False # Set to True for commission
-BLOCK_SIZE = 10 # Size of blocks for random sampling
+COMMISION = True # Set to True for commission
+BLOCK_SIZE = 20 # Size of blocks for random sampling
 OPTIMIZATION_FREQUENCY = 126 # Number of days between optimizations (wfa)
 OOS_WINDOW = 42 # Number of days for out-of-sample testing (wfa)
 FINAL_OOS_YEARS = 3 # Number of years for final out-of-sample testing
@@ -51,12 +51,12 @@ THRESHOLD = {
     'RSI_EXIT': 70,
 }
 ADX_THRESHOLD_DEFAULT = 25
-DEFAULT_LONG_RISK = 0.06 
+DEFAULT_LONG_RISK = 0.05
 DEFAULT_LONG_REWARD = 0.09
 DEFAULT_POSITION_SIZE = 0.20
-MAX_OPEN_POSITIONS = 50
+MAX_OPEN_POSITIONS = 30
 PERSISTENCE_DAYS = 3
-MAX_POSITION_DURATION = 30
+MAX_POSITION_DURATION = 15
 
 # Other default parameters
 DEFAULT_SHORT_RISK = 0.01  
@@ -384,19 +384,19 @@ def signals(df, adx_threshold, threshold):
     
     buy_signal = (
         (conditions['trend_signal']) &
-        (momentum_score_values > 55) &
+        (momentum_score_values > 60) &
         (conditions['volume_ok']) & 
         (conditions['price_uptrend'] | conditions['weekly_uptrend'])
     )
     
     exit_signal = (
         (momentum_score_values < 25) |
-        ((df['RSI'].values > 70) & (momentum_score_values < 50))
+        ((df['RSI'].values > 70) & (momentum_score_values < 45))
     )
     
     immediate_exit = (
         (momentum_score_values < 20) | 
-        (adx_np < adx_threshold/2.5)
+        (adx_np < adx_threshold/3)
     )
     
     # Assign all signals to the DataFrame
@@ -472,9 +472,16 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                                                reason_override="Immediate Exit")
                 # 3. Normal exit with tiered approach
                 elif signal_data['exit_signal']:
-                    trim_ammount = 0.1 if signal_data['momentum_score'] > 40 else 0.0
+                    if signal_data['momentum_score'] > 50:
+                        trim_ammount = 0.05
+                        reason = "Partial Exit"
+                    else:
+                        trim_ammount = 0.0
+                        reason = "Exit Signal"
+                    
                     trade_manager.process_exits(current_date, transaction_price, 
-                                                direction_to_exit='Long', Trim=trim_ammount)
+                                                    direction_to_exit='Long', Trim=trim_ammount,
+                                                    reason_override=reason)
                 
             # 5. Check position health and apply exits based on health
             if trade_manager.position_count > 0 and not any_trailing_stop_hit:
@@ -488,7 +495,6 @@ def momentum(df_with_indicators, long_risk=DEFAULT_LONG_RISK, long_reward=DEFAUL
                 
         # --- Entry Conditions ---
         if (signal_data['buy_signal'] and trade_manager.position_count < max_positions):
-            
             entry_params = {
                 'price': transaction_price * (1 + 0.001),
                 'portfolio_value': trade_manager.portfolio_value,
@@ -649,16 +655,26 @@ class TradeManager:
 
                 # --- Dynamic Exit Logic ---
                 # 1. Time Exit (only if momentum faded)
-                if duration > max_position_duration and current_score_np < 40:
+                if duration > max_position_duration:
+                    if current_score_np > 50:
+                        if idx in self.active_trades.index:
+                            pnl = self.process_exits(
+                                current_date, current_price_np, 
+                                direction_to_exit='Long',
+                                Trim=0.07,
+                                reason_override="Partial Trim"
+                            )
+                            total_pnl_from_health_exits += pnl
+                    else:
                     # Ensure position still exists before trying to exit
-                    if idx in self.active_trades.index:
-                        pnl = self.process_exits(
-                            current_date, current_price_np, 
-                            direction_to_exit='Long',
-                            Trim=0.0, # Full exit
-                            reason_override="Max Duration"
-                        )
-                        total_pnl_from_health_exits += pnl
+                        if idx in self.active_trades.index:
+                            pnl = self.process_exits(
+                                current_date, current_price_np, 
+                                direction_to_exit='Long',
+                                Trim=0.0, # Full exit
+                                reason_override="Max Duration"
+                            )
+                            total_pnl_from_health_exits += pnl
                     continue # Move to next trade if this one was exited
 
                 # Calculate risk per share for R-multiple calculation
@@ -773,7 +789,7 @@ class TradeManager:
         unrealized_gains = current_price - self.active_trades['entry_price']
         new_stops = np.where(
             unrealized_gains > 0,
-            np.maximum(new_stops, self.active_trades['entry_price'] + (unrealized_gains * 0.5)),
+            np.maximum(new_stops, self.active_trades['entry_price'] + (unrealized_gains * 0.65)),
             new_stops
         )
 
@@ -826,38 +842,6 @@ class TradeManager:
                     indices_to_remove.append(idx)
                 continue
 
-            # Priority 1: Stop Loss Check
-            if current_price <= trade['stop_loss']:
-                pnl = self.exit_pnl(
-                    trade, 
-                    current_date, 
-                    current_price,
-                    current_shares, 
-                    'Stop Loss'
-                )
-                total_pnl += pnl
-                self.portfolio_value += pnl
-                self.allocated_capital -= (current_price * current_shares)
-                self.position_count -= 1
-                indices_to_remove.append(idx)
-                continue
-
-            # Priority 2: Take Profit Check
-            if pd.notna(trade['take_profit']) and current_price >= trade['take_profit']:
-                pnl = self.exit_pnl(
-                    trade, 
-                    current_date, 
-                    current_price,
-                    current_shares, 
-                    'Take Profit'
-                )
-                total_pnl += pnl
-                self.portfolio_value += pnl
-                self.allocated_capital -= (current_price * current_shares)
-                self.position_count -= 1
-                indices_to_remove.append(idx)
-                continue
-
             # Priority 3: Signal-based Exits (Full or Partial)
             base_signal_exit_reason = 'Full Signal Exit'
             if Trim > 0.0:
@@ -900,6 +884,40 @@ class TradeManager:
                 self.allocated_capital -= (current_price * current_shares)
                 self.position_count -= 1
                 indices_to_remove.append(idx)
+                continue
+            
+            # Priority 2: Take Profit Check
+            if pd.notna(trade['take_profit']) and current_price >= trade['take_profit']:
+                pnl = self.exit_pnl(
+                    trade, 
+                    current_date, 
+                    current_price,
+                    current_shares, 
+                    'Take Profit'
+                )
+                total_pnl += pnl
+                self.portfolio_value += pnl
+                self.allocated_capital -= (current_price * current_shares)
+                self.position_count -= 1
+                indices_to_remove.append(idx)
+                continue
+
+            # Priority 1: Stop Loss Check
+            if current_price <= trade['stop_loss']:
+                pnl = self.exit_pnl(
+                    trade, 
+                    current_date, 
+                    current_price,
+                    current_shares, 
+                    'Stop Loss'
+                )
+                total_pnl += pnl
+                self.portfolio_value += pnl
+                self.allocated_capital -= (current_price * current_shares)
+                self.position_count -= 1
+                indices_to_remove.append(idx)
+                continue
+
         
         # Remove closed positions
         if indices_to_remove:
@@ -943,7 +961,7 @@ class TradeManager:
         actual_position_size = position_dollar_amount / entry_params['portfolio_value']
 
         # Exposure check (unchanged)
-        max_total_exposure = 0.85
+        max_total_exposure = 0.95
         current_exposure = 0.0
         if not self.active_trades.empty:
             current_prices = self.active_trades['entry_price'].astype(np.float32)
@@ -962,7 +980,7 @@ class TradeManager:
                 return False
 
         # --- 3. Take-Profit Calculation (ADX-Boosted) ---
-        base_profit_distance = 2 * atr  # Default 3:1 reward:risk
+        base_profit_distance = 3.0 * atr  # Default 3:1 reward:risk
         if adx > 40:  # Strong trend: wider profit target
             profit_multiplier = 1 + (adx / 100)  # Up to 1.4x
         else:
@@ -1737,7 +1755,7 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1000):
         sim_metrics = {internal_key: [] for internal_key in metric_key_map.keys()}
     
         num_bootstrap_samples = len(bootstrap_samples)
-        for sample_idx, sample in enumerate(tqdm(bootstrap_samples, total=num_bootstrap_samples, desc=f"Sims for Set {param_idx+1}", leave=False, position=(param_idx % (mp.cpu_count() if mp.cpu_count() > 0 else 1)) )):
+        for sample_idx, sample in enumerate(tqdm.tqdm(bootstrap_samples, total=num_bootstrap_samples, desc=f"Sims for Set {param_idx+1}", leave=False, position=(param_idx % (mp.cpu_count() if mp.cpu_count() > 0 else 1)) )):
             _, sim_stats_run, _, _ = momentum(sample, **params)
             
             for internal_key, original_key in metric_key_map.items():
