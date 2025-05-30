@@ -1,7 +1,7 @@
 # S&P 500 Valuation Multiples: Statistical Analysis of Trading Multiple Pricing 
 ### Project Outline
 
-This is a data analysis project inspired by NYU Stern Business School Prof. Aswath Damodaran from his Valuations course. It is a relative valuation method built upon traditional comparable companies analysis. It is based upon Discounted Cash Flow (DCF) calculations to derive Enterprise Value (EV) using metrics like Weighted Average Cost of Capital (WACC), Reinvestment Rate (RIR), Expected Growth Rate Etc. These financial metrics represent independent variables for dependent variable EV, as such, it allows the opportunity for a linear regression study to interpret the performances of companies relative to their industry peers. The regressed line would serve as a projection tool built on the performance of the industry, and thus, it presents the concept of under/over-pricing for companies as their current financial metrics are projected forward. A possible strategy to this analysis insight would be long companies where theoretical trading mulitple are greater than its current value and short companies whose theoretical trading mulitple are projected to decrease. 
+This is a data analysis project inspired by NYU Stern Business School Prof. Aswath Damodaran from his Valuations course. It is a relative valuation method built upon traditional Comparable Companies Analysis. It is based upon Discounted Cash Flow (DCF) calculations to derive Enterprise Value (EV) using metrics like Weighted Average Cost of Capital (WACC), Reinvestment Rate (RIR), Expected Growth Rate Etc. These financial metrics represent independent variables for dependent variable EV, as such, it allows the opportunity for a linear regression study to interpret the performances of companies relative to their industry peers. The regressed line would serve as a projection tool built on the performance of the industry, and thus, it presents the concept of under/over-pricing for companies as their current financial metrics are projected forward. A possible strategy to this analysis insight would be long companies where theoretical trading mulitple are greater than its current value and short companies whose theoretical trading mulitple are projected to decrease. 
 
 The project utilises AlphaVantage API to gather financial data from companies listed in the S&P 500 index. The data includes annual and quarterly Income Statement and Balance Sheet information which are stored in a PostgreSQL database for efficient data management and analysis. The project implements a caching system to track processing progress and avoid redundant API calls, making it resilient to interruptions and mindful of API rate limits. The SP500 CSV data is sourced from Kaggle in late 2024 and consolidate with a few data points published by Prof. Aswath.
 
@@ -89,7 +89,9 @@ Program 2 focuses on retrieving the stored financial data and performing complex
 
 ### Stage 3: SQL Queries, Data Visualisation, and Statistical Validation
 
-Appending data takes quite sometime, there is an estimated 600,000+ data points to be retrieved and more to be calculated. (64 data points for one year of reporting, roughly 8-10 years of reporting done for 500 listed companies. If we include quarterly reporting then it is a 192 extra data points a year....)
+The linked database allows for many forms of visualization given the capabilities of PowerBI. The large number of financial data allows for the construction of simple financials table that can be organised to companies, industry sectors, and fiscal years. Simply put, the goal envisioned for the PowerBI dashboards would be to create financial tables that would otherwise be offered in services like CapitalIQ or Bloomberg Terminal. It would simplify the process to gather financial information and allows for quick financial analysis on subject of interest. The new addition to the financial data of course were the introduction of linear regression data on the performance metrics companies to derive intrinsic trading multiples. The theorectical trading multiples values are computed and placed next to their actual trading multiples to allow an-depth data search on potential under or over-performers in a given industry sector. For any Asset Manager or Hedge Fund that are interested in capturing alpha returns through long-short strategies, this would be a potential method to gauge the overall performance of an industry sector and position for market-neutral positions.
+
+
 
 ---
 <br>
@@ -149,7 +151,7 @@ $$
 
 | EV Metric | Scaling Factor | Proof |
 |-----------|----------------|-------|
-| EV/EBIT | \( 1/(1 - tax) \) |  |
+| EV/EBIT | \(1 - tax\) | $EBIT(1-tax)/EBIT$ |
 | EV/EBIT(1-Tax) | 1 | $EBIT(1-tax)/EBIT(1-tax)$ |
 | EV/EBITDA | \( (1 - DA\%) (1 - tax) \) | $\( EBIT(1-tax) = (EBITDA - DA)(1-tax) \) $|
 | EV/Sales | ATOM | $\( EBIT(1-tax)/Sales = ATOM \$) |
