@@ -91,25 +91,32 @@ Program 2 focuses on retrieving the stored financial data and performing complex
 
 The linked database allows for many forms of visualization given the capabilities of PowerBI. The large number of financial data allows for the construction of simple financials table that can be organised to companies, industry sectors, and fiscal years. Simply put, the goal envisioned for the PowerBI dashboards would be to create financial tables that would otherwise be offered in services like CapitalIQ or Bloomberg Terminal. It would simplify the process to gather financial information and allows for quick financial analysis on subject of interest. The new addition to the financial data of course were the introduction of linear regression data on the performance metrics companies to derive intrinsic trading multiples. The theorectical trading multiples values are computed and placed next to their actual trading multiples to allow an-depth data search on potential under or over-performers in a given industry sector. For any Asset Manager or Hedge Fund that are interested in capturing alpha returns through long-short strategies, this would be a potential method to gauge the overall performance of an industry sector and position for market-neutral positions.
 
-<p align="center">
-  <img src="figures/Comparable Companies Analysis - Fundamentals.png" width="700"/>
-</p>
-<p align="center"><em>Figure 4: Dashboard view of fundamental financial data for comparable companies.</em></p>
-
-<p align="center">
-  <img src="figures/Comparable Companies Analysis - Trading Multiples.png" width="700"/>
-</p>
-<p align="center"><em>Figure 5: Dashboard view of calculated trading multiples.</em></p>
-
-<p align="center">
-  <img src="figures/Comparable Companies Analysis - Theoretical Multiples.png" width="700"/>
-</p>
-<p align="center"><em>Figure 6: Dashboard view comparing actual vs. theoretical multiples derived from regression analysis.</em></p>
-
-<p align="center">
-  <img src="figures/Comparable Companies Analysis - Projections.png" width="700"/>
-</p>
-<p align="center"><em>Figure 7: Dashboard view illustrating market share and company-specific financial projections.</em></p>
+<table>
+  <tr>
+    <td align="center">
+      <img src="figures/example_fundamental.png" width="450"/>
+      <br>
+      <em>Figure 4: Dashboard view of fundamental financial data.</em>
+    </td>
+    <td align="center">
+      <img src="figures/example_multiples.png" width="450"/>
+      <br>
+      <em>Figure 5: Dashboard view of calculated trading multiples.</em>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="figures/example_theoretical.png" width="450"/>
+      <br>
+      <em>Figure 6: Dashboard view comparing actual vs. theoretical multiples.</em>
+    </td>
+    <td align="center">
+      <img src="figures/example_visuals.png" width="450"/>
+      <br>
+      <em>Figure 7: Dashboard view illustrating market share and projections.</em>
+    </td>
+  </tr>
+</table>
 
 ---
 <br>
