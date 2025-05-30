@@ -37,7 +37,7 @@ The following will be a rolling descriptions of projects I am doing, their brief
 
 ## #1 S&P500 Valuation Multiple: Statistical Analysis of Trading Multiple Pricing 
 
-Last Updated: 24/Apr/2025 &nbsp; &nbsp; Status: Ongoing
+Last Updated: 27/Apr/2025 &nbsp; &nbsp; Status: Finished
 
 ### Summary
 A data analysis project that is an extension to comparable companies analysis, a relative valuation method used in the finance industry. The project aims to analyse Enterprise Value (EV) trading mutliples of S&P 500 listed companies. Rather than using traditional methods of mean and median statistics on peer companies, a linear regression study is used to interpret the performances of companies relative to their industry peers. The regression model uses various internal financial metrics to determine the pricing of trading multiples, and would therefore predict the potential trading multiple of companies given the performance of the industry in which they operate.
