@@ -6,6 +6,38 @@ This project implements a quantitative momentum trading strategy for financial a
 ---
 <br>
 
+## Project Scope and Strategy Framework
+
+The `fourelement.py` implementation represents the initial phase of a broader momentum trading strategy exploration. This foundational strategy synthesizes four key elements of market dynamics: price trend, momentum confirmation (RSI), trend strength (ADX), and volume acceleration, with an additional overlay of VIX-based market regime filtering. However, this is just one approach within the expansive domain of momentum trading.
+
+### Strategy Evolution Roadmap
+Future implementations will explore various momentum approaches including:
+- Price-based momentum strategies (time-series and cross-sectional)
+- Volume-weighted momentum indicators
+- Sector rotation based on relative strength
+- Multi-timeframe momentum convergence
+- Adaptive momentum strategies using machine learning
+
+### Validation Framework
+Central to this project's methodology is the rigorous validation of each strategy through:
+
+1. **Monte Carlo Simulation**
+   - Employs stationary bootstrap for synthetic price series generation
+   - Preserves temporal dependencies and statistical properties
+   - Assesses strategy significance against random chance
+   - Quantifies confidence intervals for performance metrics
+
+2. **Walk-Forward Analysis (WFA)**
+   - Tests strategy robustness across different market regimes
+   - Validates parameter stability through time
+   - Minimizes overfitting risk through out-of-sample testing
+   - Provides realistic performance expectations
+
+This systematic approach to strategy validation ensures that any momentum strategy developed within this framework meets rigorous statistical standards before consideration for live trading.
+
+---
+<br>
+
 ## Execution
 
 The project is structured into several key components, from data preparation to advanced strategy validation:

@@ -22,24 +22,32 @@ from statsmodels.tsa.stattools import acf
 #==========================================================================================================================
 
 # CONTROLS
-TYPE = 2 # 1. Full run # 2. Walk-Forward # 3. Monte Carlo # 4. Optimization # 5. Test
+TYPE = 1 # 1. Full run # 2. Walk-Forward # 3. Monte Carlo # 4. Optimization # 5. Test
 TICKER = 'SPY' # Ticker to analyze (only takes in one ticker at a time)
+IS_HISTORY_DAYS = 1260  # Approx 5 years, for IS operations (Opt, MC, Test)
+
+# TRADE CONTROL
 INITIAL_CAPITAL = 25000.0 # Initial capital for the strategy
 COMMISION = True # Set to True for commission
+
 # OPTIMIZATION CONTROL
 OPTIMIZATION = True # Set to True for optimization
-TRIALS = 100 # Number of trials for optimization
+TRIALS = 150 # Number of trials for optimization
+TARGET_SCORE = 1.0
+SCORE_TOLERANCE = 0.5
+
 # MONTE CARLO CONTROL
 BLOCK_SIZE = 20 # Size of blocks for random sampling
+
 # WALK-FORWARD CONTROL
 OPTIMIZATION_FREQUENCY = 252 # Number of days between optimizations (wfa)
 OOS_WINDOW = 126 # Number of days for out-of-sample testing (wfa)
 FINAL_OOS_YEARS = 5 # Number of years for final out-of-sample testing
+FINAL_IS_YEARS = 5 # Number of years for in-sample testing
+WFA_HISTORY_DAYS = IS_HISTORY_DAYS + FINAL_OOS_YEARS * 252  # Full history for WFA operations
+TRADE_SUM = False # Set to True to sum trades in WFA
 
 RISK_FREE_RATE_ANNUAL = 0.04   # Annual risk-free rate
-
-IS_HISTORY_DAYS = 1260  # Approx 5 years, for IS operations (Opt, MC, Test)
-WFA_HISTORY_DAYS = IS_HISTORY_DAYS + FINAL_OOS_YEARS * 252  # Full history for WFA operations
 
 #=========================================================================================================================
 #================== STRATEGY PARAMETERS ==================================================================================
@@ -56,7 +64,7 @@ OPTIMIZATION_DIRECTIONS = {
 OBJECTIVE_WEIGHTS = {       
     'profit_factor': 0.25, 
     'avg_win_loss_ratio': 0.25,
-    'expectancy': 0.25,   
+    'expectancy': 25.0,   
     'max_drawdown': 0.25   
 }
 
@@ -116,7 +124,7 @@ def get_data(ticker):
     """
     trading_days_per_year = 252
     oos_period_days = trading_days_per_year * FINAL_OOS_YEARS
-    target_is_days = trading_days_per_year * 5
+    target_is_days = trading_days_per_year * FINAL_IS_YEARS
     data_start_year = 2013
 
     print(f"\nDownloading data for {ticker}...")
@@ -1395,11 +1403,11 @@ def objectives(trial, base_df):
         'adx_threshold': trial.suggest_float('adx_threshold', 20.0, 35.0, step=1.0),
         'max_position_duration': trial.suggest_int('max_position_duration', 5, 30, step=1), # Changed step
 
-        'weight_price_trend': trial.suggest_float('weight_price_trend', 0.1, 0.3, step=0.05),
-        'weight_rsi_zone': trial.suggest_float('weight_rsi_zone', 0.1, 0.3, step=0.05),
-        'weight_adx_slope': trial.suggest_float('weight_adx_slope', 0.1, 0.3, step=0.05),
-        'weight_vol_accel': trial.suggest_float('weight_vol_accel', 0.1, 0.3, step=0.05),
-        'weight_vix_factor': trial.suggest_float('weight_vix_factor', 0.1, 0.3, step=0.05),
+        'weight_price_trend': trial.suggest_float('weight_price_trend', 0.1, 0.4, step=0.05),
+        'weight_rsi_zone': trial.suggest_float('weight_rsi_zone', 0.1, 0.4, step=0.05),
+        'weight_adx_slope': trial.suggest_float('weight_adx_slope', 0.1, 0.4, step=0.05),
+        'weight_vol_accel': trial.suggest_float('weight_vol_accel', 0.1, 0.4, step=0.05),
+        'weight_vix_factor': trial.suggest_float('weight_vix_factor', 0.1, 0.4, step=0.05),
         
         'threshold_buy_score': trial.suggest_int('threshold_buy_score', 45, 70, step=1), # Changed step
         'threshold_exit_score': trial.suggest_int('threshold_exit_score', 25, 45, step=1), # Changed step
@@ -1411,12 +1419,6 @@ def objectives(trial, base_df):
     
     # For debugging  
     trial_num = trial.number
-
-    if sum([optuna_params_dict['weight_price_trend'], optuna_params_dict['weight_rsi_zone'],optuna_params_dict['weight_adx_slope'],optuna_params_dict['weight_vol_accel'],optuna_params_dict['weight_vix_factor']]) > 1:
-        return bad_metrics_template
-
-    if sum([optuna_params_dict['weight_price_trend'], optuna_params_dict['weight_rsi_zone'],optuna_params_dict['weight_adx_slope'],optuna_params_dict['weight_vol_accel'],optuna_params_dict['weight_vix_factor']]) != 1:
-        return bad_metrics_template
 
     try:
         # Direct evaluation
@@ -1521,11 +1523,6 @@ def optimize(prepared_data):
     all_trials = study.trials
     # Filter out failed trials and sort by custom criteria
     filtered_trials_with_data = [] # Renamed to avoid confusion
-    
-    # Define target scores and tolerance for the new filter
-    TARGET_SCORE_Low = 0.5
-    TARGET_SCORE_High = 1.5
-    SCORE_TOLERANCE = 0.5
 
     for trial in all_trials:
         if trial.state == optuna.trial.TrialState.COMPLETE and trial.values is not None:
@@ -1561,20 +1558,22 @@ def optimize(prepared_data):
                         value = min(value, 100) 
                     combined_score += weight * value
             
-            # New filter: Check if combined_score is within the defined range + tolerance
-            lower_bound_with_tolerance = TARGET_SCORE_Low - SCORE_TOLERANCE
-            upper_bound_with_tolerance = TARGET_SCORE_High + SCORE_TOLERANCE
+            lower_bound_with_tolerance = TARGET_SCORE - SCORE_TOLERANCE
+            upper_bound_with_tolerance = TARGET_SCORE + SCORE_TOLERANCE
 
             if not (lower_bound_with_tolerance <= combined_score <= upper_bound_with_tolerance):
                 # If the score is not within the target range (inclusive of tolerance), skip this trial
                 continue
 
+            # Filter: Skip trials with less than 25 trades
+            if num_trades < 25:
+                continue
+
             # Store trial, num_trades, and combined_score (if needed)
             filtered_trials_with_data.append({'trial': trial, 'num_trades': num_trades, 'combined_score': combined_score})
 
-    # Sort by number of trades in descending order
-    # If two trials have the same number of trades, you could add a secondary sort key, e.g., combined_score
-    filtered_trials_with_data.sort(key=lambda x: (x['num_trades'], x['combined_score']), reverse=True) # Example secondary sort by combined_score
+    # Sort by number of trades in descending order, then by combined_score in descending order
+    filtered_trials_with_data.sort(key=lambda x: (x['num_trades'], x['combined_score']), reverse=True)
     
     # Extract just the trial objects for the pareto_front list
     pareto_front = [item['trial'] for item in filtered_trials_with_data]
@@ -1582,8 +1581,7 @@ def optimize(prepared_data):
     if not pareto_front:
         return []
         
-    return pareto_front[:20]
-
+    return pareto_front[:15]
 
 #==========================================================================================================================
 #================== VIEW STRATEGY =========================================================================================
@@ -2138,28 +2136,37 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1500):
     
     # Additional data for summary
     total_obs_metrics = {}
-    for metric in ['profit_factor', 'expectancy_pct', 'avg_win_loss_ratio', 'max_drawdown']:
+    metric_keys_for_summary = ['profit_factor', 'expectancy_pct', 'avg_win_loss_ratio', 'max_drawdown']
+    for metric in metric_keys_for_summary:
         values = [result['observed_metrics'][metric] for result in mc_results 
                   if pd.notna(result['observed_metrics'].get(metric))] # Use .get for safety
         if values:
             total_obs_metrics[metric] = np.mean(values)
     
-    if 'profit_factor' in total_obs_metrics and 'avg_win_loss_ratio' in total_obs_metrics and 'expectancy_pct' in total_obs_metrics and 'max_drawdown' in total_obs_metrics:
+    if all(metric in total_obs_metrics for metric in metric_keys_for_summary):
         print(f"   - Avg Observed Profit Factor: {total_obs_metrics['profit_factor']:.2f} | " + f"Avg Observed Win/Loss Ration: {total_obs_metrics['avg_win_loss_ratio']:.2f} | " + f"Avg Observed Expectancy: {total_obs_metrics['expectancy_pct']:.2f}% | " + 
               f"Max DD: {total_obs_metrics['max_drawdown']:.2f}%")
     
     # Get significant metric counts
-    sig_counts = {}
-    # Updated metrics for significance count
-    for metric in ['profit_factor', 'expectancy_pct', 'avg_win_loss_ratio', 'max_drawdown']:
-        sig_counts[metric] = sum(1 for result in mc_results 
-                                 if result['p_values'].get(metric, 1.0) < 0.05)
+    sig_counts_p_lt_0_10 = {}
+    marg_sig_counts_p_lt_0_20 = {}
+
+    for metric in metric_keys_for_summary:
+        sig_counts_p_lt_0_10[metric] = sum(1 for result in mc_results
+                                     if result['p_values'].get(metric, 1.0) < 0.10)
+        marg_sig_counts_p_lt_0_20[metric] = sum(1 for result in mc_results
+                                          if 0.10 <= result['p_values'].get(metric, 1.0) < 0.20)
     
-    print(f"   - Significant Results (p<0.05): " + 
-          f"PF: {sig_counts.get('profit_factor',0)}/{len(mc_results)}, " +
-          f"Expect: {sig_counts.get('expectancy_pct',0)}/{len(mc_results)}, " +
-          f"W/L Ratio: {sig_counts.get('avg_win_loss_ratio',0)}/{len(mc_results)}, " +
-          f"MaxDD: {sig_counts.get('max_drawdown',0)}/{len(mc_results)}")
+    print(f"   - Significant Results (p<0.10): " + 
+          f"PF: {sig_counts_p_lt_0_10.get('profit_factor',0)}/{len(mc_results)}, " +
+          f"Expect: {sig_counts_p_lt_0_10.get('expectancy_pct',0)}/{len(mc_results)}, " +
+          f"W/L Ratio: {sig_counts_p_lt_0_10.get('avg_win_loss_ratio',0)}/{len(mc_results)}, " +
+          f"MaxDD: {sig_counts_p_lt_0_10.get('max_drawdown',0)}/{len(mc_results)}")
+    print(f"   - Marg. Significant (0.10<=p<0.20): " +
+          f"PF: {marg_sig_counts_p_lt_0_20.get('profit_factor',0)}/{len(mc_results)}, " +
+          f"Expect: {marg_sig_counts_p_lt_0_20.get('expectancy_pct',0)}/{len(mc_results)}, " +
+          f"W/L Ratio: {marg_sig_counts_p_lt_0_20.get('avg_win_loss_ratio',0)}/{len(mc_results)}, " +
+          f"MaxDD: {marg_sig_counts_p_lt_0_20.get('max_drawdown',0)}/{len(mc_results)}")
     
     # 2-5. Null Distribution tables for each key metric
     metric_display_names = {
@@ -2170,7 +2177,7 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1500):
     }
     
     # For each metric, create a separate table
-    for metric_num, metric in enumerate(['profit_factor', 'expectancy_pct', 'avg_win_loss_ratio', 'max_drawdown'], 2):
+    for metric_num, metric in enumerate(metric_keys_for_summary, 2):
         print(f"\n{metric_num}. Null Distribution - {metric_display_names[metric]}:")
         
         # Create table data for this metric
@@ -2206,83 +2213,109 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1500):
     
     # Find best parameter set overall (lowest combined p-values)
     if mc_results:
-        best_set_idx = np.argmin([sum(res['p_values'].values()) for res in mc_results])
-        best_set_result = mc_results[best_set_idx]
-        best_set_num = best_set_result['parameter_set']
-        
-        print(f"\nBest Overall Parameter Set: #{best_set_num}")
-        print("Key Performance Metrics:")
-        
-        # Format best set metrics nicely
-        best_metrics_table = []
-        # Updated metrics for best set display
-        for metric in ['profit_factor', 'expectancy_pct', 'avg_win_loss_ratio', 'max_drawdown']:
-            observed = best_set_result['observed_metrics'].get(metric, np.nan)
-            p_val = best_set_result['p_values'].get(metric, np.nan)
-            sim_mean = best_set_result['simulation_metrics'].get(metric, {}).get('mean', np.nan)
+        p_value_sums = []
+        for res in mc_results:
+            current_sum = 0
+            for key in metric_keys_for_summary: # Use the same keys for consistency
+                p_val = res['p_values'].get(key, 1.0) # Default to 1.0 if missing
+                current_sum += float(p_val) if pd.notna(p_val) else 1.0
+            p_value_sums.append(current_sum)
+
+        if p_value_sums:
+            best_set_idx = np.argmin(p_value_sums)
+            best_set_result = mc_results[best_set_idx]
+            best_set_num = best_set_result['parameter_set']
             
-            # Mark significant metrics with *
-            sig_marker = '*' if pd.notna(p_val) and p_val < 0.05 else ''
+            print(f"\nBest Overall Parameter Set (by sum of p-values): #{best_set_num}")
+            print("Key Performance Metrics:")
             
-            best_metrics_table.append([
-                f"{metric_display_names[metric]}{sig_marker}", 
-                f"{observed:.2f}",
-                f"{sim_mean:.2f}",
-                f"{observed - sim_mean:.2f}" if pd.notna(observed) and pd.notna(sim_mean) else "N/A"
-            ])
-        
-        print(tabulate(best_metrics_table, headers=['Metric', 'Observed', 'Sim Mean', 'Edge'], tablefmt='simple'))
+            best_metrics_table = []
+            for metric in metric_keys_for_summary:
+                observed = best_set_result['observed_metrics'].get(metric, np.nan)
+                p_val = best_set_result['p_values'].get(metric, np.nan)
+                sim_mean = best_set_result['simulation_metrics'].get(metric, {}).get('mean', np.nan)
+                
+                sig_marker = ''
+                if pd.notna(p_val):
+                    p_val_float = float(p_val)
+                    if p_val_float < 0.10:
+                        sig_marker = '*'  # Significant
+                    elif 0.10 <= p_val_float < 0.20:
+                        sig_marker = '~'  # Marginally Significant
+                
+                best_metrics_table.append([
+                    f"{metric_display_names[metric]}{sig_marker}", 
+                    f"{observed:.2f}",
+                    f"{sim_mean:.2f}",
+                    f"{observed - sim_mean:.2f}" if pd.notna(observed) and pd.notna(sim_mean) else "N/A"
+                ])
+            
+            print(tabulate(best_metrics_table, headers=['Metric', 'Observed', 'Sim Mean', 'Edge'], tablefmt='simple'))
+        else:
+            print("   Could not determine best parameter set due to missing p-value data.")
     
     return results_df
 
 #==========================================================================================================================
-#================== STRATEGY ROBUSTNESS TESTING ============================================================================
+#================== STRATEGY ROBUSTNESS TESTING ===========================================================================
 #==========================================================================================================================
 def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parameters, risk_free_annual=RISK_FREE_RATE_ANNUAL):
     
     # Global constants from your script parameters
-    oos_window_size = OOS_WINDOW  # e.g., 10 (days/periods in raw data)
-    opt_frequency_days = OPTIMIZATION_FREQUENCY # e.g., 42 (days/periods in raw data)
-    daily_rf_rate = risk_free_annual / 252.0 # Daily risk-free rate for Sharpe ratio calculation
+    oos_window_size = OOS_WINDOW
+    opt_frequency_days = OPTIMIZATION_FREQUENCY # Days of OOS data to process before re-optimizing
+    daily_rf_rate = risk_free_annual / 252.0
+    days_in_is_lookback = 252 * 3 # Approx 3 years for the sliding IS window part
 
-    # Make copies to avoid modifying originals passed to the function
-    current_train_raw = initial_is_data_raw.copy()
-    remaining_oos_raw = full_oos_data_raw.copy()
-
-    # Combine datasets and prepare together
-    full_data = pd.concat([current_train_raw, remaining_oos_raw])
-    prepared_data = prepare_data(full_data.copy(), type=2)
-    
-    if prepared_data.empty:
-        print("Combined data is empty after preparation. Aborting WFA.")
-        return None
-    
-    # Split back into IS and OOS based on original sizes
-    is_size = len(current_train_raw)
-    prepared_current_train = prepared_data.iloc[:is_size].copy()
-    prepared_remaining_oos = prepared_data.iloc[is_size:].copy()
-    
-    if prepared_current_train.empty:
-        print("Initial training data is empty after preparation. Aborting WFA.")
-        return None
-        
-    # Ensure active_parameters contains only what momentum() expects
+    # Initialize active parameters with the initial set
     active_parameters_for_momentum = initial_parameters.copy()
+    
+    combined_raw_data = pd.concat([initial_is_data_raw, full_oos_data_raw])
+    prepared_full_data = prepare_data(combined_raw_data.copy(), type=2)
+
+    # This will store the raw training data used for the *last* optimization
+    # Initially, it's the full initial in-sample data
+    training_data_at_last_optimization_raw = initial_is_data_raw.copy()
+    
+    # Get the prepared version of the initial training data from the fully prepared data
+    if not initial_is_data_raw.empty:
+        print(f"Slicing initial prepared training data: {initial_is_data_raw.index.min().date()} to {initial_is_data_raw.index.max().date()} ({len(initial_is_data_raw)} days)")
+        prepared_current_train = prepared_full_data.loc[initial_is_data_raw.index.min():initial_is_data_raw.index.max()].copy()
+        if prepared_current_train.empty:
+            print("Initial training data slice is empty. Aborting WFA.")
+            return None
+    else:
+        print("Initial raw IS data is empty. Cannot create initial prepared training data.")
+        prepared_current_train = pd.DataFrame() # Will be handled by downstream checks
+
+    # The raw OOS pool remains the same
+    current_oos_pool_raw = full_oos_data_raw.copy()
+    # Get the prepared version of the OOS pool from the fully prepared data
+    if not full_oos_data_raw.empty:
+        print(f"Slicing initial prepared OOS pool: {full_oos_data_raw.index.min().date()} to {full_oos_data_raw.index.max().date()} ({len(full_oos_data_raw)} days)")
+        prepared_oos_pool = prepared_full_data.loc[full_oos_data_raw.index.min():full_oos_data_raw.index.max()].copy()
+        if prepared_oos_pool.empty:
+            print("OOS data pool slice is empty despite raw OOS data existing. Aborting WFA.")
+            return None
+    else:
+        print("Raw OOS data pool is empty. WFA might end quickly or not run.")
+        prepared_oos_pool = pd.DataFrame()
+
     all_step_results = []
     days_processed_since_last_opt = 0 
     step_number = 0
+    accumulated_raw_oos_for_next_train = pd.DataFrame() # To accumulate raw OOS chunks
 
-    print(f"\nStarting Anchored Walk-Forward Analysis...")
-    if not prepared_remaining_oos.empty:
-        print(f"Initial training data: {prepared_current_train.index[0].date()} to {prepared_current_train.index[-1].date()} ({len(prepared_current_train)} days)")
+    print(f"\nStarting Unanchored Walk-Forward Analysis...")
+    if not prepared_current_train.empty:
+        print(f"Initial prepared training data for first cycle: {prepared_current_train.index.min().date()} to {prepared_current_train.index.max().date()} ({len(prepared_current_train)} days)")
     else:
-        print("Initial training data: Empty")
-    print(f"OOS training data: {prepared_remaining_oos.index[0].date()} to {prepared_remaining_oos.index[-1].date()} ({len(prepared_remaining_oos)} days)")
-    print(f"OOS Window Size: {oos_window_size} days, Optimization Frequency: {opt_frequency_days} days.")
+        print(f"Initial prepared training data for first cycle is empty.")
+    print(f"Total OOS data available: {len(prepared_oos_pool)} days | OOS Window Size: {oos_window_size} days | Optimization Frequency: {opt_frequency_days} days")
+    print(f"OOS Pool Date Range: {prepared_oos_pool.index.min().date()} to {prepared_oos_pool.index.max().date()} ({len(prepared_oos_pool)} days)")
+    
 
-    # ----------------------------------------------------------------------------------------------------------------------------
-    # Create progress bar for WFA steps
-    total_possible_steps = len(prepared_remaining_oos) // oos_window_size
+    total_possible_steps = len(prepared_oos_pool) // oos_window_size if oos_window_size > 0 and not prepared_oos_pool.empty else 0
     progress_bar = tqdm.tqdm(
         total=total_possible_steps,
         desc="WFA Progress",
@@ -2291,98 +2324,117 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
         ncols=100
     )
     
-    while len(prepared_remaining_oos) >= oos_window_size:
+    while len(current_oos_pool_raw) >= oos_window_size and len(prepared_oos_pool) >= oos_window_size:
         step_number += 1
         
         # 1. Re-optimization Check
         if days_processed_since_last_opt >= opt_frequency_days and step_number > 1:
+            #print(f"\nStep {step_number}: Re-optimizing parameters...")
+            #print(f"Accumulated {len(accumulated_raw_oos_for_next_train)} days of OOS data for new training set.")
             
-            if prepared_current_train.empty:
-                print("Cannot optimize: Current accumulated training data is empty after preparation.")
+            if len(training_data_at_last_optimization_raw) < days_in_is_lookback:
+                base_for_new_train_raw_segment = training_data_at_last_optimization_raw.copy()
+                print(f"Warning: Training data used in last optimization ({len(training_data_at_last_optimization_raw)} days) is shorter than IS lookback ({days_in_is_lookback} days). Using all available.")
             else:
-                pareto_front = optimize(prepared_current_train) 
+                base_for_new_train_raw_segment = training_data_at_last_optimization_raw.iloc[-days_in_is_lookback:].copy()
+            
+            new_raw_training_data_for_opt = pd.concat([base_for_new_train_raw_segment, accumulated_raw_oos_for_next_train])
+            new_raw_training_data_for_opt = new_raw_training_data_for_opt[~new_raw_training_data_for_opt.index.duplicated(keep='first')].sort_index()
+
+            prepared_new_training_data_for_opt = pd.DataFrame()
+            if not new_raw_training_data_for_opt.empty:
+                #print(f"Slicing new prepared training data for optimization from {new_raw_training_data_for_opt.index.min().date()} to {new_raw_training_data_for_opt.index.max().date()} (length: {len(new_raw_training_data_for_opt)} days)...")
+                try:
+                    prepared_new_training_data_for_opt = prepared_full_data.loc[new_raw_training_data_for_opt.index.min():new_raw_training_data_for_opt.index.max()].copy()
+                except KeyError:
+                    print(f"Error: Date range for new training data not found in prepared_full_data. Min: {new_raw_training_data_for_opt.index.min()}, Max: {new_raw_training_data_for_opt.index.max()}")
+                    prepared_new_training_data_for_opt = pd.DataFrame()
+
+
+            if prepared_new_training_data_for_opt.empty:
+                print("Cannot optimize: New prepared training data for optimization is empty. Continuing with old parameters.")
+            else:
+                #print(f"Optimizing with new training data from {prepared_new_training_data_for_opt.index.min().date()} to {prepared_new_training_data_for_opt.index.max().date()} ({len(prepared_new_training_data_for_opt)} days)")
+                pareto_front = optimize(prepared_new_training_data_for_opt) 
                 
                 if pareto_front and len(pareto_front) > 0:
                     best_trial = pareto_front[0] 
-                    # Update with the full set of new optimized params
                     active_parameters_for_momentum = best_trial.params.copy()
-                    # Ensure correct types for main strategy parameters for robustness
+                    # Ensure correct types for main strategy parameters
                     if 'long_risk' in active_parameters_for_momentum:
                         active_parameters_for_momentum['long_risk'] = float(active_parameters_for_momentum['long_risk'])
-                    if 'max_open_positions' in active_parameters_for_momentum: # Optuna key
+                    if 'max_open_positions' in active_parameters_for_momentum:
                         active_parameters_for_momentum['max_open_positions'] = int(active_parameters_for_momentum['max_open_positions'])
                     if 'adx_threshold' in active_parameters_for_momentum:
                         active_parameters_for_momentum['adx_threshold'] = float(active_parameters_for_momentum['adx_threshold'])
                     if 'max_position_duration' in active_parameters_for_momentum:
                         active_parameters_for_momentum['max_position_duration'] = int(active_parameters_for_momentum['max_position_duration'])
+                    #print("Parameters updated after re-optimization.")
+                    
+                    training_data_at_last_optimization_raw = new_raw_training_data_for_opt.copy()
+                    prepared_current_train = prepared_new_training_data_for_opt.copy() 
                 else:
-                    continue
+                    print("Optimization failed or yielded no results. Continuing with previously optimized parameters.")
+            
             days_processed_since_last_opt = 0 
+            accumulated_raw_oos_for_next_train = pd.DataFrame()
         
         # 2. Define and Prepare Current Test Window (OOS Chunk)
-        prepared_oos_chunk = prepared_remaining_oos.iloc[:oos_window_size].copy()
-        raw_oos_chunk = remaining_oos_raw.iloc[:oos_window_size].copy()
+        raw_oos_chunk = current_oos_pool_raw.iloc[:oos_window_size].copy()
+        prepared_oos_chunk = prepared_oos_pool.iloc[:oos_window_size].copy()
 
-        if prepared_oos_chunk.empty:
+        if prepared_oos_chunk.empty or raw_oos_chunk.empty:
+            print(f"Step {step_number}: OOS chunk is empty. Ending WFA.")
             break
 
         # 3. Run strategy on the current prepared training data (for reference)
-        train_log, train_stats, train_equity, train_returns = momentum(
-            prepared_current_train.copy(), 
-            params=active_parameters_for_momentum # Pass the full flat dict
-        )
+        # `prepared_current_train` is the data that was used (or would have been used) to get `active_parameters_for_momentum`
+        if prepared_current_train.empty:
+            print(f"Step {step_number}: Warning - prepared_current_train for reference run is empty.")
+            train_log, train_stats, train_equity, train_returns = [], {}, pd.Series(dtype='float64'), pd.Series(dtype='float64')
+        else:
+            train_log, train_stats, train_equity, train_returns = momentum(
+                prepared_current_train.copy(), 
+                params=active_parameters_for_momentum
+            )
 
         # 4. Run strategy on the prepared OOS chunk (current test window)
         oos_log, oos_stats, oos_equity, oos_returns = momentum(
             prepared_oos_chunk.copy(),
-            params=active_parameters_for_momentum # Pass the full flat dict
+            params=active_parameters_for_momentum
         )
         
-        # 5. Record results for this step
+        # 5. Record results for this step (existing logic for metrics extraction)
         oos_trade_count = oos_stats.get('Total Trades', 0)
         train_trade_count = train_stats.get('Total Trades', 0)
         
-        # Get key metrics for tracking (added for improved tracking)
         train_sharpe = train_stats.get('Sharpe Ratio', np.nan)
         oos_sharpe = oos_stats.get('Sharpe Ratio', np.nan)
-        
-        # Additional metrics to track (added)
         train_annualized_return = train_stats.get('Annualized Return (%)', np.nan)
         oos_annualized_return = oos_stats.get('Annualized Return (%)', np.nan)
-        
         train_max_drawdown = train_stats.get('Max Drawdown (%)', np.nan)
         oos_max_drawdown = oos_stats.get('Max Drawdown (%)', np.nan)
-        
         train_sortino = train_stats.get('Sortino Ratio', np.nan)
         oos_sortino = oos_stats.get('Sortino Ratio', np.nan)
-        
         train_avg_win_loss = train_stats.get('Avg Win/Loss Ratio', np.nan)
         oos_avg_win_loss = oos_stats.get('Avg Win/Loss Ratio', np.nan)
-        
         train_expectancy = train_stats.get('Expectancy (%)', np.nan)
         oos_expectancy = oos_stats.get('Expectancy (%)', np.nan)
-        
         train_profit_factor = train_stats.get('Profit Factor', np.nan)
         oos_profit_factor = oos_stats.get('Profit Factor', np.nan)
         
-        # Flag for periods with no trading activity
         is_valid_train_period = train_trade_count > 0
         is_valid_oos_period = oos_trade_count > 0
         
-        if not is_valid_oos_period:
-            oos_sharpe = 0.0
+        if not is_valid_oos_period: oos_sharpe = 0.0
+        if not is_valid_train_period: train_sharpe = 0.0
         
-        if not is_valid_train_period:
-            train_sharpe = 0.0
-        
-        # Initialize decay tracking
         decay_ratio_val = np.nan
         decay_ratios = {}
-        step_result_data = {} # Initialize step_result_data once here
-        valid_decays = [] # Initialize valid_decays here
+        step_result_data = {} 
+        valid_decays = []
 
         if is_valid_train_period and is_valid_oos_period:
-            # Define metrics to track for decay
             metric_pairs = {
                 'profit_factor': (train_profit_factor, oos_profit_factor),
                 'sharpe': (train_sharpe, oos_sharpe),
@@ -2392,49 +2444,32 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
                 'ann_return': (train_annualized_return, oos_annualized_return),
                 'max_drawdown': (train_max_drawdown, oos_max_drawdown)
             }
-            
             for metric_name, (train_val, oos_val) in metric_pairs.items():
                 if pd.notna(train_val) and pd.notna(oos_val):
-                    # valid_decay_count += 1 # Not strictly needed
                     if metric_name == 'profit_factor':
-                        # Special handling for profit factor
-                        if train_val == np.inf:
-                            decay_ratios[metric_name] = 0.0 if oos_val == np.inf else 1.0
-                        elif oos_val == np.inf:
-                            decay_ratios[metric_name] = -1.0  # Improvement
+                        if train_val == np.inf: decay_ratios[metric_name] = 0.0 if oos_val == np.inf else 1.0
+                        elif oos_val == np.inf: decay_ratios[metric_name] = -1.0
                         else:
                             denominator = max(train_val, 0.1)
-                            performance_ratio = oos_val / denominator
+                            performance_ratio = oos_val / denominator if denominator != 0 else (1.0 if oos_val >=0 else -1.0) # Avoid div by zero
                             decay_ratios[metric_name] = 1.0 - performance_ratio
-                    
                     elif metric_name == 'max_drawdown':
-                        # For drawdown, lower is better, so invert the ratio
-                        if train_val == 0:
-                            decay_ratios[metric_name] = 0.0 if oos_val == 0 else 1.0
+                        if train_val == 0: decay_ratios[metric_name] = 0.0 if oos_val == 0 else 1.0
                         else:
-                            # Cap the ratio to prevent extreme values
-                            performance_ratio = min(oos_val / max(abs(train_val), 0.1), 2.0)
-                            decay_ratios[metric_name] = 1.0 - (1.0 / performance_ratio)
-                    
+                            denominator = max(abs(train_val), 0.1)
+                            performance_ratio = min(oos_val / denominator if denominator != 0 else 1.0, 2.0) # Avoid div by zero
+                            decay_ratios[metric_name] = 1.0 - (1.0 / performance_ratio if performance_ratio != 0 else 10.0) # Avoid div by zero
                     else:
-                        # For other metrics (higher is better)
-                        if train_val == 0:
-                            decay_ratios[metric_name] = 0.0 if oos_val == 0 else -1.0
+                        if train_val == 0: decay_ratios[metric_name] = 0.0 if oos_val == 0 else -1.0
                         else:
-                            # Cap the ratio to prevent extreme values
-                            performance_ratio = min(oos_val / max(abs(train_val), 0.1), 2.0)
+                            denominator = max(abs(train_val), 0.1)
+                            performance_ratio = min(oos_val / denominator if denominator != 0 else 1.0, 2.0) # Avoid div by zero
                             decay_ratios[metric_name] = 1.0 - performance_ratio
-                    
-                    # Store individual decay in step_result_data
                     step_result_data[f'decay_{metric_name}'] = decay_ratios.get(metric_name, np.nan)
-
-            # Calculate mean decay from all valid ratios
-            valid_decays = [v for v in decay_ratios.values() if pd.notna(v)] # valid_decays is now populated
-            if valid_decays:
-                decay_ratio_val = np.mean(valid_decays)
+            valid_decays = [v for v in decay_ratios.values() if pd.notna(v)]
+            if valid_decays: decay_ratio_val = np.mean(valid_decays)
         
-        # Create comprehensive step results
-        step_result_data.update({ # MODIFIED: Changed from assignment to .update()
+        step_result_data.update({
             'step': step_number,
             'train_start_date': prepared_current_train.index[0].date() if not prepared_current_train.empty else None,
             'train_end_date': prepared_current_train.index[-1].date() if not prepared_current_train.empty else None,
@@ -2442,58 +2477,37 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
             'test_start_date': prepared_oos_chunk.index[0].date() if not prepared_oos_chunk.empty else None,
             'test_end_date': prepared_oos_chunk.index[-1].date() if not prepared_oos_chunk.empty else None,
             'test_days': len(prepared_oos_chunk),
-            
-            # Original metrics
-            'train_sharpe': train_sharpe,
-            'test_sharpe': oos_sharpe,
-            'decay_ratio': decay_ratio_val,
-            'decay_metrics_used': len(valid_decays),
-            'train_trades': train_trade_count,
-            'test_trades': oos_trade_count,
+            'train_sharpe': train_sharpe, 'test_sharpe': oos_sharpe, 'decay_ratio': decay_ratio_val,
+            'decay_metrics_used': len(valid_decays), 'train_trades': train_trade_count, 'test_trades': oos_trade_count,
+            'oos_trade_log': list(oos_log) if oos_log else [],
             'oos_returns_series': oos_returns, 
-            'train_return_pct': train_stats.get('Return (%)', np.nan),
-            'test_return_pct': oos_stats.get('Return (%)', np.nan),
-            'valid_train': is_valid_train_period,
-            'valid_test': is_valid_oos_period,
+            'train_return_pct': train_stats.get('Return (%)', np.nan), 'test_return_pct': oos_stats.get('Return (%)', np.nan),
+            'valid_train': is_valid_train_period, 'valid_test': is_valid_oos_period,
             'valid_comparison': is_valid_train_period and is_valid_oos_period,
-            
-            # Additional metrics (added)
-            'train_ann_return': train_annualized_return,
-            'test_ann_return': oos_annualized_return,
-            'train_max_drawdown': train_max_drawdown,
-            'test_max_drawdown': oos_max_drawdown,
-            'train_sortino': train_sortino,
-            'test_sortino': oos_sortino,
-            'train_avg_win_loss': train_avg_win_loss,
-            'test_avg_win_loss': oos_avg_win_loss,
-            'train_expectancy': train_expectancy,
-            'test_expectancy': oos_expectancy,
-            'train_profit_factor': train_profit_factor,
-            'test_profit_factor': oos_profit_factor,
-            
-            # Parameter snapshot
+            'train_ann_return': train_annualized_return, 'test_ann_return': oos_annualized_return,
+            'train_max_drawdown': train_max_drawdown, 'test_max_drawdown': oos_max_drawdown,
+            'train_sortino': train_sortino, 'test_sortino': oos_sortino,
+            'train_avg_win_loss': train_avg_win_loss, 'test_avg_win_loss': oos_avg_win_loss,
+            'train_expectancy': train_expectancy, 'test_expectancy': oos_expectancy,
+            'train_profit_factor': train_profit_factor, 'test_profit_factor': oos_profit_factor,
             'parameters_used_snapshot': active_parameters_for_momentum.copy()
         })
         all_step_results.append(step_result_data)
-
-        # Update progress bar instead of printing step results
         progress_bar.update(1)
         
-        # 6. Update data for the next iteration (Anchoring)
-        # Update prepared data by appending the current OOS chunk to training data
-        prepared_current_train = pd.concat([prepared_current_train, prepared_oos_chunk])
+        # 6. Update data for the next iteration
+        # Accumulate the raw OOS chunk for the next potential training set (if re-optimization occurs)
+        accumulated_raw_oos_for_next_train = pd.concat([accumulated_raw_oos_for_next_train, raw_oos_chunk])
+        accumulated_raw_oos_for_next_train = accumulated_raw_oos_for_next_train[~accumulated_raw_oos_for_next_train.index.duplicated(keep='first')].sort_index()
+
+        # Advance the OOS pool (both raw and prepared)
+        chunk_len = len(raw_oos_chunk) # Number of days in the current OOS chunk
+        current_oos_pool_raw = current_oos_pool_raw.iloc[chunk_len:].copy()
+        prepared_oos_pool = prepared_oos_pool.iloc[chunk_len:].copy()
         
-        # Update raw data tracking for consistency
-        current_train_raw = pd.concat([current_train_raw, raw_oos_chunk])
-        
-        # Remove the processed chunk from remaining OOS data
-        prepared_remaining_oos = prepared_remaining_oos.iloc[oos_window_size:].copy()
-        remaining_oos_raw = remaining_oos_raw.iloc[oos_window_size:].copy()
-        
-        # Update days processed counter
-        days_processed_since_last_opt += len(raw_oos_chunk)
+        # Update days processed counter for OOS data
+        days_processed_since_last_opt += chunk_len
     
-    # Close progress bar
     progress_bar.close()
 
     if not all_step_results:
@@ -2507,6 +2521,21 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
     all_oos_log_returns_list = [res['oos_returns_series'] for res in all_step_results 
                                if isinstance(res['oos_returns_series'], pd.Series) and not res['oos_returns_series'].empty]
     
+    # Collect all OOS trade logs
+    all_oos_trades_list = []
+    for res_dict in all_step_results: # Iterate through the list of dictionaries
+        if 'oos_trade_log' in res_dict and res_dict['oos_trade_log']:
+            all_oos_trades_list.extend(res_dict['oos_trade_log'])
+
+    total_oos_wins = 0
+    total_oos_losses = 0
+    if all_oos_trades_list:
+        for trade in all_oos_trades_list:
+            if isinstance(trade, dict) and trade.get('PnL', 0) > 0:
+                total_oos_wins += 1
+            elif isinstance(trade, dict): # Count non-positive PnL as losses
+                total_oos_losses += 1
+
     concatenated_oos_log_returns = pd.Series(dtype=float)
     overall_oos_sharpe = np.nan
     overall_oos_cumulative_return_pct = np.nan 
@@ -2701,13 +2730,13 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
             print("   No individual decay metric data to display.")
         
         # Overall decay analysis based on 'decay_ratio'
-        decay_values_overall = valid_comparisons_df['decay_ratio'].dropna() # Use 'decay_ratio'
+        decay_values_overall = valid_comparisons_df['decay_avg_win_loss'].dropna() # Use 'decay_avg_win_loss'
         
         if not decay_values_overall.empty:
-            mean_decay = decay_values_overall.mean() # Use 'decay_ratio'
-            std_decay = decay_values_overall.std()   # Call std() and use 'decay_ratio'
+            mean_decay = decay_values_overall.mean() # Use 'decay_avg_win_loss'
+            std_decay = decay_values_overall.std()   # Call std() and use 'decay_avg_win_loss'
             
-            # Classify decay ratio
+            # Classify decay ratio (using the same thresholds for now)
             decay_classification = ("CATASTROPHIC" if mean_decay > 0.7 else
                                     "SEVERE" if mean_decay > 0.5 else
                                     "SIGNIFICANT" if mean_decay > 0.3 else
@@ -2720,50 +2749,76 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
                                 "MODERATE VOLATILITY" if std_decay > 0.1 else
                                 "STABLE")
             
-            print(f"Overall Decay Analysis (Based on Mean Step Decay Ratio):") # Updated label
-            print(f"   - Mean Decay Ratio: {mean_decay:.2f} → {decay_classification}")
-            print(f"   - Std Dev Decay: {std_decay:.2f} → {vol_classification}")
+            print(f"Overall Decay Analysis (Based on Avg Win/Loss Decay):") # Updated label
+            print(f"   - Mean Avg Win/Loss Decay: {mean_decay:.2f} → {decay_classification}")
+            print(f"   - Std Dev Avg Win/Loss Decay: {std_decay:.2f} → {vol_classification}")
             
-            # Note: 'rolling_decay' is already calculated based on 'decay_ratio' earlier
-            # The 'decay_values' variable used for 'recent_rolling_decay' print should be the one from 'decay_ratio'
+            # Note: 'rolling_decay' should also be calculated based on 'decay_avg_win_loss' (see note below)
+            # The 'decay_values_overall' variable used for 'recent_rolling_decay' print is now based on 'decay_avg_win_loss'
             if rolling_decay is not None and len(rolling_decay.dropna()) > 0:
                 recent_decay_val = rolling_decay.dropna().iloc[-1]
                 if pd.notna(recent_decay_val):
-                    # 'decay_values' for rolling_decay was defined as valid_comparisons_df['decay_ratio'].dropna()
-                    # So, using len(decay_values_overall) here is consistent.
-                    print(f"   - Recent Rolling Decay (n={min(3, len(decay_values_overall))}): {recent_decay_val:.2f}")
+                    # 'decay_values_overall' for rolling_decay print is now consistent.
+                    print(f"   - Recent Rolling Avg Win/Loss Decay (n={min(3, len(decay_values_overall))}): {recent_decay_val:.2f}")
         else:
-            print("   No 'decay_ratio' data available for overall analysis.")
+            print("   No 'decay_avg_win_loss' data available for overall analysis.")
     else:
         print("   No valid comparison periods to calculate decay metrics")
     # ----------------------------------------------------------------------------------------------------------------------------
     # 4. Activity metrics
     print("\n4. Activity:")
     if total_days_in_oos_concat > 0:
-        trading_activity_pct = active_trading_days/total_days_in_oos_concat*100
+        trading_activity_pct = active_trading_days / total_days_in_oos_concat * 100
         print(f"   - Trading Days: {active_trading_days}/{total_days_in_oos_concat} ({trading_activity_pct:.1f}%)")
         
-        # Identify potential causes for low activity
-        if trading_activity_pct < 30:
-            # Analyze parameters to suggest causes
-            if not results_df.empty and 'parameters_used_snapshot' in results_df.columns:
-                entry_thresholds = []
-                for _, row in results_df.iterrows():
-                    if isinstance(row['parameters_used_snapshot'], dict):
-                        threshold = row['parameters_used_snapshot'].get('threshold', {})
-                        if isinstance(threshold, dict) and 'Entry' in threshold:
-                            entry_thresholds.append(threshold['Entry'])
+        # Identify potential causes for low activity or zero-trade steps
+        # zero_trade_count is already calculated as total_steps - valid_tests_count
+        # valid_tests_count is where oos_trade_count > 0. So zero_trade_count is correct.
+        
+        if trading_activity_pct < 3 and zero_trade_count > 0:
+            print("   - Low overall trading activity (<3%). Analyzing parameters of zero-trade steps:")
+            zero_trade_steps_df = results_df[results_df['test_trades'] == 0]
+            
+            for _, step_row in zero_trade_steps_df.iterrows():
+                params = step_row['parameters_used_snapshot']
+                step_num = step_row['step']
+                causes_for_step = []
+
+                # Check entry threshold (threshold_buy_score)
+                # Default buy score is DEFAULT_SIGNAL_PROCESSING_PARAMS['thresholds']['buy_score'] (e.g., 55)
+                buy_score_thresh = params.get('threshold_buy_score')
+                if buy_score_thresh is not None and buy_score_thresh > 65: # Example: if optimized significantly higher
+                    causes_for_step.append(f"high buy_score_thresh ({buy_score_thresh})")
+
+                # Check ADX threshold
+                # Default ADX threshold is ADX_THRESHOLD_DEFAULT (e.g., 25)
+                adx_val_thresh = params.get('adx_threshold')
+                if adx_val_thresh is not None and adx_val_thresh > 30: # Example: if optimized significantly higher
+                    causes_for_step.append(f"high adx_threshold ({adx_val_thresh:.1f})")
                 
-                if entry_thresholds:
-                    avg_entry = np.mean(entry_thresholds)
-                    if avg_entry > 0.8:
-                        print("   - Zero-Trade Cause: Restrictive entry thresholds (too high)")
-                    elif all(t.get('adx_thresh', 25) > 30 for t in results_df['parameters_used_snapshot'] if isinstance(t, dict)):
-                        print("   - Zero-Trade Cause: High ADX threshold requirements")
-                    else:
-                        print("   - Zero-Trade Cause: Overfit parameter combination")
-        elif zero_trade_count > 0:
-            print("   - Zero-Trade Cause: Parameter instability between periods")
+                # Check signal weights
+                signal_weights_keys = [
+                    'weight_price_trend', 'weight_rsi_zone', 'weight_adx_slope', 
+                    'weight_vol_accel', 'weight_vix_factor'
+                ]
+                low_weights_details = []
+                # Default weights are typically around 0.20 each
+                for weight_key in signal_weights_keys:
+                    weight_val = params.get(weight_key)
+                    if weight_val is not None and weight_val < 0.05: # Example: if a weight is very low
+                        low_weights_details.append(f"{weight_key.replace('weight_', '')}: {weight_val:.2f}")
+                
+                if low_weights_details:
+                    causes_for_step.append(f"low signal weights ({', '.join(low_weights_details)})")
+
+                if causes_for_step:
+                    print(f"     - Step {step_num}: Zero trades. Potential causes: {'; '.join(causes_for_step)}.")
+                else:
+                    # If no obvious parameter red flags, it might be other combinations or market conditions
+                    print(f"     - Step {step_num}: Zero trades. Cause: Parameter combination or specific market conditions not flagged by simple checks.")
+            
+        elif zero_trade_count > 0: # Overall activity is not <3%, but there were still some zero-trade windows
+            print(f"   - Note: {zero_trade_count} OOS window(s) had zero trades. This might indicate parameter instability or specific unresponsive market conditions during those periods.")
     else:
         print("   - No trading activity data available")
     # ----------------------------------------------------------------------------------------------------------------------------
@@ -2771,21 +2826,25 @@ def walk_forward_analysis(initial_is_data_raw, full_oos_data_raw, initial_parame
     print("\n5. Concatenated OOS:")
     if len(concatenated_oos_log_returns) > 5:
         print(f"   - Ann. Sharpe: {overall_oos_sharpe:.2f} | Cum. Return: {overall_oos_cumulative_return_pct:.2f}% | Max DD: {overall_max_drawdown:.1f}%")
+        print(f"   - Total OOS Trades: {total_oos_wins + total_oos_losses} (Wins: {total_oos_wins}, Losses: {total_oos_losses})")
         
-        # Market classification based on overall performance
+        # Market classification based on overall cumulative return
         market_type = ""
-        if overall_oos_sharpe > 1.5:
-            market_type = "HIGHLY FAVORABLE"
-        elif overall_oos_sharpe > 0.5:
-            market_type = "FAVORABLE" 
-        elif overall_oos_sharpe > -0.5:
-            market_type = "NEUTRAL"
-        elif overall_oos_sharpe > -1.5:
-            market_type = "CHALLENGING"
+        if pd.notna(overall_oos_cumulative_return_pct):
+            if overall_oos_cumulative_return_pct > 50:
+                market_type = "HIGHLY FAVORABLE"
+            elif overall_oos_cumulative_return_pct > 20:
+                market_type = "FAVORABLE" 
+            elif overall_oos_cumulative_return_pct > -5:
+                market_type = "NEUTRAL"
+            elif overall_oos_cumulative_return_pct > -20:
+                market_type = "CHALLENGING"
+            else:
+                market_type = "HIGHLY ADVERSE"
         else:
-            market_type = "HIGHLY ADVERSE"
+            market_type = "UNKNOWN (Return N/A)"
             
-        print(f"   - Market Classification: {market_type}")
+        print(f"   - Market Classification (by Return): {market_type}")
     else:
         print("   - Insufficient data for reliable OOS performance metrics")
     # ----------------------------------------------------------------------------------------------------------------------------
@@ -2937,14 +2996,17 @@ def main():
 
                         best_idx_loc = mc_results_df['p_value_sum'].idxmin()
                         best_row = mc_results_df.loc[best_idx_loc]
-                        best_params_mc_flat = best_row['params'] # This 'params' from MC results should be the flat dict
+                        best_params_mc_flat = best_row['params'] 
                         
-                        is_significant = any(p < 0.05 for p in best_row['p_values'].values() if pd.notna(p))
+                        is_significant_p_lt_0_10 = any(p < 0.10 for p in best_row['p_values'].values() if pd.notna(p))
+                        is_marginally_significant_p_lt_0_20 = any(0.10 <= p < 0.20 for p in best_row['p_values'].values() if pd.notna(p))
 
-                        if is_significant:
-                            print("\n✓ Found statistically significant parameter set from Monte Carlo.")
+                        if is_significant_p_lt_0_10:
+                            print("\n✓ Found statistically significant (p < 0.10) parameter set from Monte Carlo.")
+                        elif is_marginally_significant_p_lt_0_20:
+                            print("\n~ Found marginally significant (0.10 <= p < 0.20) parameter set from Monte Carlo. Proceeding with best found.")
                         else:
-                            print("\n⚠ No statistically significant parameter sets found from Monte Carlo. Proceeding with best found.")
+                            print("\n⚠ No statistically significant (p < 0.10) or marginally significant (p < 0.20) parameter sets found from Monte Carlo. Proceeding with best found.")
                         
                         print(f"\nTesting with parameters from Monte Carlo: ")
                         test(df_prepared_for_mc.copy(), params_to_test=best_params_mc_flat)
@@ -3024,46 +3086,49 @@ def main():
                 mc_candidate_trials = pareto_front_full_run_opt[:3] # Use top 3 from Pareto for MC
                 mc_results_df_full_run = monte_carlo(df_prepared_full_run, mc_candidate_trials)
                 
-                initial_params_for_wfa = None # Initialize
+                initial_params_for_wfa = None 
                 
                 if mc_results_df_full_run is not None and not mc_results_df_full_run.empty:
                     if 'p_values' in mc_results_df_full_run.columns and \
                        mc_results_df_full_run['p_values'].apply(lambda x: isinstance(x, dict)).all() and \
                        'params' in mc_results_df_full_run.columns:
                         
-                        # Calculate sum of p-values for ranking (lower is better)
                         mc_results_df_full_run['p_value_sum'] = mc_results_df_full_run['p_values'].apply(
                             lambda p_dict: sum(val for val in p_dict.values() if pd.notna(val))
                         )
                         best_idx_loc_mc = mc_results_df_full_run['p_value_sum'].idxmin()
                         best_row_mc = mc_results_df_full_run.loc[best_idx_loc_mc]
-                        best_params_from_mc_dict = best_row_mc['params'] # This is the full flat dict from MC
+                        best_params_from_mc_dict = best_row_mc['params'] 
                         
-                        is_significant = any(p < 0.05 for p in best_row_mc['p_values'].values() if pd.notna(p))
+                        is_significant_p_lt_0_10 = any(p < 0.10 for p in best_row_mc['p_values'].values() if pd.notna(p))
+                        is_marginally_significant_p_lt_0_20 = any(0.10 <= p < 0.20 for p in best_row_mc['p_values'].values() if pd.notna(p))
 
-                        if is_significant:
-                            print("\n✓ Found statistically significant parameter set from Monte Carlo for Full Run.")
-                            initial_params_for_wfa = best_params_from_mc_dict.copy() # Use the complete parameter set
-                            # Ensure correct types for main strategy parameters
-                            if 'long_risk' in initial_params_for_wfa:
-                                initial_params_for_wfa['long_risk'] = float(initial_params_for_wfa['long_risk'])
-                            if 'max_open_positions' in initial_params_for_wfa:
-                                initial_params_for_wfa['max_open_positions'] = int(initial_params_for_wfa['max_open_positions'])
-                            if 'adx_threshold' in initial_params_for_wfa:
-                                initial_params_for_wfa['adx_threshold'] = float(initial_params_for_wfa['adx_threshold'])
-                            if 'max_position_duration' in initial_params_for_wfa:
-                                initial_params_for_wfa['max_position_duration'] = int(initial_params_for_wfa['max_position_duration'])
+                        if is_significant_p_lt_0_10:
+                            print("\n✓ Found statistically significant (p < 0.10) parameter set from Monte Carlo for Full Run. Using for WFA.")
+                            initial_params_for_wfa = best_params_from_mc_dict.copy()
+                        elif is_marginally_significant_p_lt_0_20:
+                            print("\n~ Found marginally significant (0.10 <= p < 0.20) parameter set from MC for Full Run. Using for WFA.")
+                            initial_params_for_wfa = best_params_from_mc_dict.copy()
                         else:
-                            print("⚠ No statistically significant parameters from MC. Using best from initial Opt for WFA.")
+                            print("⚠ No statistically significant (p < 0.10) or marginally significant (p < 0.20) parameters from MC.")
+                            # initial_params_for_wfa remains None, will trigger fallback
                     else:
                         print("Error in MC results format for Full Run. 'p_values' or 'params' column missing/invalid.")
                 else:
                     print("Monte Carlo analysis for Full Run did not yield results.")
 
-                # Fallback to best Optuna trial if MC fails or is not significant
-                if initial_params_for_wfa is None:
-                    best_optuna_trial_for_wfa = pareto_front_full_run_opt[0]
-                    initial_params_for_wfa = best_optuna_trial_for_wfa.params.copy() # Use the complete parameter set
+                # Fallback logic
+                if initial_params_for_wfa is None: # True if MC failed, or was not significant enough
+                    print("Falling back to best parameters from initial optimization for WFA.")
+                    if pareto_front_full_run_opt: # Ensure Optuna results exist
+                        best_optuna_trial_for_wfa = pareto_front_full_run_opt[0]
+                        initial_params_for_wfa = best_optuna_trial_for_wfa.params.copy()
+                    else: # This case should ideally not be reached if OPTIMIZATION=False (MockTrial)
+                          # or if Optuna itself failed to produce a front.
+                        print("Initial optimization also yielded no parameters. Cannot proceed with WFA.")
+                
+                # Common type conversion block and WFA execution
+                if initial_params_for_wfa:
                     # Ensure correct types for main strategy parameters
                     if 'long_risk' in initial_params_for_wfa:
                         initial_params_for_wfa['long_risk'] = float(initial_params_for_wfa['long_risk'])
@@ -3074,27 +3139,25 @@ def main():
                     if 'max_position_duration' in initial_params_for_wfa:
                         initial_params_for_wfa['max_position_duration'] = int(initial_params_for_wfa['max_position_duration'])
 
-                    if OPTIMIZATION:
-                        print("Using best parameters from initial optimization for WFA.")
-                    else:
-                        print("Using default parameters for WFA (as optimization and MC were inconclusive/skipped).")
-
-                if initial_params_for_wfa:
                     print("\nProceeding to Walk-Forward Analysis for Full Run...")
                     wfa_summary_full_run = walk_forward_analysis(IS, OOS, initial_params_for_wfa)
+                    if wfa_summary_full_run:
+                        print("\nFull Run Walk-Forward Analysis completed.")
+                    else:
+                        print("\nFull Run Walk-Forward Analysis failed or produced no results.")
                 else:
-                    print("Could not determine initial parameters for WFA.")
-            else:
+                    print("Could not determine initial parameters for WFA for Full Run.")
+            else: # Optuna part failed or yielded no results
                 if OPTIMIZATION:
                     print("Initial optimization for Full Run did not yield results.")
-                else:
-                    print("Could not proceed with Full Run using default parameters.")
+                else: 
+                    print("Could not proceed with Full Run using default parameters (initial parameter setup failed).")
         
         # -------------------------------------------------------------------------------------------------------------------
     except Exception as e:
         print(f"Error in main function: {e}")
         traceback.print_exc()
         return None
-# --------------------------------------------------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------------------------------------------------
 if __name__ == "__main__":
     main()
