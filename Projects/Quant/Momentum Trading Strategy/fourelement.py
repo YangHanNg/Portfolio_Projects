@@ -1965,7 +1965,7 @@ def monte_carlo(prepared_data, pareto_front, num_simulations=1500):
     else:
         print(f"Warning: 'prepared_data' is empty or lacks 'Close' column for ACF. Using default block size: {BLOCK_SIZE}")
     
-    dynamic_block_size = 5
+    dynamic_block_size = 10
 
     # Generate bootstrap samples once
     print(f"\nGenerating bootstrap samples with block_size: {dynamic_block_size}...")
